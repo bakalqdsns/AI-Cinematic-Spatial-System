@@ -2,6 +2,8 @@
 
 > Convert a 2D cinematic image into a depth-layered, pseudo-3D spatial scene — objects segmented by edge-aware masks, arranged in Z-depth layers, rendered as interactive billboards in a Three.js viewport.
 
+**[中文版](./README-zh.md)**
+
 ---
 
 ## Architecture
@@ -39,6 +41,10 @@ User uploads image
 │  Post-processing: Canny edge refinement → polygon contours    │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+## Interface Preview
+
+![AICSS UI — 2D/3D split view](view.png)
 
 ## Directory Structure
 
