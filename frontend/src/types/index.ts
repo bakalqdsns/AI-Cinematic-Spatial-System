@@ -1,0 +1,91 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// AICSS Frontend — Shared TypeScript Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Bounding box normalized 0-1
+export interface BoundingBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// Spatial layer from backend
+export interface SpatialLayer {
+  id: string;
+  name: string;
+  zMin: number;
+  zMax: number;
+  objects: DetectedObject[];
+}
+
+// Scene graph node
+export interface SceneGraphNode {
+  id: string;
+  classLabel: string;
+  depth: number;
+  layer: string;
+  relations: Array<{ type: string; targetId: string }>;
+}
+
+export interface SceneGraph {
+  shotId: string;
+  nodes: SceneGraphNode[];
+}
+
+// Polygon point: [x_norm, y_norm] in 0-1 range
+export type PolygonPoint = [number, number];
+
+// Detected object from backend
+export interface DetectedObject {
+  id: string;
+  classLabel: string;
+  depth: number;
+  boundingBox: BoundingBox;
+  maskDataUrl: string;
+  polygon: PolygonPoint[];
+  layer: string;
+}
+
+// Full analysis result
+export interface AicssResult {
+  analysisId: string;
+  depthMapUrl: string;
+  objects: DetectedObject[];
+  layers: SpatialLayer[];
+  sceneGraph: SceneGraph;
+}
+
+// Layer assignment: objectId -> colorIndex (0-14)
+export type LayerAssignments = Record<string, number>;
+
+// Edit mode
+export type EditMode = 'director' | 'camera';
+
+// Billboard with RGBA texture for 3D
+export interface BillboardAsset {
+  objectId: string;
+  rgbaUrl: string;  // base64 RGBA PNG from backend
+}
+
+// History entry for undo/redo
+export interface HistoryEntry {
+  assignments: LayerAssignments;
+  timestamp: number;
+}
+
+// Billboard offset in 3D space
+export interface BillboardOffset {
+  objectId: string;
+  offsetX: number;
+  offsetZ: number;
+}
+
+// Layer color palette (15 distinct colors)
+export const LAYER_COLORS: string[] = [
+  '#E74C3C', '#E67E22', '#F1C40F', '#2ECC71', '#1ABC9C',
+  '#3498DB', '#9B59B6', '#E91E63', '#00BCD4', '#FF5722',
+  '#607D8B', '#795548', '#9C27B0', '#3F51B5', '#009688',
+];
+
+export const MAX_LAYERS = 15;

@@ -1,0 +1,12 @@
+# Build output
+dist/
+dist-ssr/
+
+# Env files — use root .gitignore for .env
+.env
+.env.local
+.env.*.local
+
+# Dev
+*.local
+*.log
