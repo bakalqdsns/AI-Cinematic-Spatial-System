@@ -1,0 +1,83 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+backend/.venv/
+.venv/
+
+# Python cache / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.db
+*.sqlite
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints/
+
+# ─── Backend / ML models ───────────────────────────────────────────────────────
+backend/.cache/
+backend/.env
+backend/sam2.1_l.pt
+backend/sam2.1_b.pt
+backend/sam2.1_s.pt
+backend/sam2.1_t.pt
+*.pt                  # SAM2 / other model checkpoints
+*.onnx
+*.bin                 # Large binary weights
+thirdparty/           # Local third-party builds
+
+# HuggingFace cache (may contain large models)
+~/.cache/huggingface/
+~/.cache/torch/
+
+# ─── Frontend ─────────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+*.local
+
+# ─── Common ───────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+.DS_Store
+Thumbs.db
+
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+~$*
+Desktop.ini
