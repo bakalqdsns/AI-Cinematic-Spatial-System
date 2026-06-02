@@ -13,6 +13,7 @@ build/
 
 # Virtual environments
 backend/.venv/
+backend/.env/
 .venv/
 
 # Python cache / coverage
@@ -30,24 +31,26 @@ htmlcov/
 
 # ─── Backend / ML models ───────────────────────────────────────────────────────
 backend/.cache/
-backend/.env
+backend/logs/
+backend/pip-log/
 backend/sam2.1_l.pt
 backend/sam2.1_b.pt
 backend/sam2.1_s.pt
 backend/sam2.1_t.pt
-*.pt                  # SAM2 / other model checkpoints
+*.pt
 *.onnx
-*.bin                 # Large binary weights
-thirdparty/           # Local third-party builds
+*.bin
+backend/thirdparty/
 
-# HuggingFace cache (may contain large models)
-~/.cache/huggingface/
-~/.cache/torch/
+# ML model caches (cross-platform **/ wildcard)
+**/.cache/huggingface/
+**/.cache/torch/
 
 # ─── Frontend ─────────────────────────────────────────────────────────────────
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/
+frontend/.vite/
 frontend/.env
 frontend/.env.local
 frontend/.env.*.local
@@ -77,7 +80,12 @@ Thumbs.db
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
 # OS
 ~$*
 Desktop.ini
+
+# Cursor IDE
+.cursor/
+terminals/
