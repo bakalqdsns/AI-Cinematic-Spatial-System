@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // AICSS Global Store — Zustand
-// Manages: image, analysis result, layer assignments, edit mode, history
+// Manages: image, analysis result, layer assignments, edit mode, history, crop, inpaint
 // ─────────────────────────────────────────────────────────────────────────────
 import { create } from 'zustand';
 import type {
@@ -11,6 +11,7 @@ import type {
   HistoryEntry,
   BillboardAsset,
   BillboardOffset,
+  CropParams,
 } from '../types';
 
 const MAX_HISTORY = 50;
@@ -22,6 +23,10 @@ interface AppState {
   imageWidth: number;
   imageHeight: number;
 
+  // Crop
+  croppedImageUrl: string;
+  cropParams: CropParams | null;
+
   // Analysis
   analysisResult: AicssResult | null;
   isAnalyzing: boolean;
@@ -29,7 +34,7 @@ interface AppState {
 
   // Layer assignments: objectId -> colorIndex
   assignments: LayerAssignments;
-  selectedLayerIndex: number | null; // which color slot is currently active
+  selectedLayerIndex: number | null;
 
   // Billboard assets (RGBA textures from backend)
   billboardAssets: Record<string, BillboardAsset>;
@@ -43,11 +48,16 @@ interface AppState {
   // Edit mode
   editMode: EditMode;
 
-  // User-configurable segmentation prompt
-  segmentationPrompt: string;
-
   // Image view mode: 'depth' | 'original'
   imageMode: 'depth' | 'original';
+
+  // Inpaint
+  inpaintPreviewUrl: string | null;
+  inpaintLoading: boolean;
+  inpaintError: string | null;
+
+  // DashScope API key (user-entered, stored in localStorage)
+  dashscopeApiKey: string;
 
   // History for undo/redo
   past: HistoryEntry[];
@@ -55,6 +65,7 @@ interface AppState {
 
   // Actions
   setImage: (url: string, base64: string, width: number, height: number) => void;
+  setCroppedImage: (url: string, params: CropParams | null) => void;
   setAnalysisResult: (result: AicssResult) => void;
   setIsAnalyzing: (v: boolean) => void;
   setAnalysisError: (msg: string | null) => void;
@@ -78,8 +89,15 @@ interface AppState {
 
   // Edit mode
   setEditMode: (mode: EditMode) => void;
-  setSegmentationPrompt: (prompt: string) => void;
   setImageMode: (mode: 'depth' | 'original') => void;
+
+  // Inpaint
+  setInpaintPreview: (url: string | null) => void;
+  setInpaintLoading: (v: boolean) => void;
+  setInpaintError: (msg: string | null) => void;
+
+  // DashScope API key
+  setDashscopeApiKey: (key: string) => void;
 
   // History
   pushHistory: () => void;
@@ -97,17 +115,22 @@ const initialState = {
   originalImageBase64: '',
   imageWidth: 0,
   imageHeight: 0,
-  analysisResult: null,
+  croppedImageUrl: '',
+  cropParams: null as CropParams | null,
+  analysisResult: null as AicssResult | null,
   isAnalyzing: false,
-  analysisError: null,
+  analysisError: null as string | null,
   assignments: {} as LayerAssignments,
   selectedLayerIndex: null as number | null,
   billboardAssets: {} as Record<string, BillboardAsset>,
   billboardOffsets: {} as Record<string, BillboardOffset>,
   selectedObjectId: null as string | null,
   editMode: 'director' as EditMode,
-  segmentationPrompt: 'person,car,building,tree,lamp,door,window,chair,table',
   imageMode: 'depth' as 'depth' | 'original',
+  inpaintPreviewUrl: null as string | null,
+  inpaintLoading: false,
+  inpaintError: null as string | null,
+  dashscopeApiKey: '',
   past: [] as HistoryEntry[],
   future: [] as HistoryEntry[],
 };
@@ -117,6 +140,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setImage: (url, base64, width, height) =>
     set({ originalImageUrl: url, originalImageBase64: base64, imageWidth: width, imageHeight: height }),
+
+  setCroppedImage: (url, params) =>
+    set({ croppedImageUrl: url, cropParams: params }),
 
   setAnalysisResult: (result) =>
     set({ analysisResult: result, analysisError: null }),
@@ -147,7 +173,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       const selectedLayer = state.selectedLayerIndex;
 
       if (currentLayer !== undefined) {
-        // Already assigned — remove from layer
         return {
           past: [
             ...state.past.slice(-MAX_HISTORY + 1),
@@ -159,7 +184,6 @@ export const useAppStore = create<AppState>((set, get) => ({
           ),
         };
       } else if (selectedLayer !== null) {
-        // Assign to selected layer
         return {
           past: [
             ...state.past.slice(-MAX_HISTORY + 1),
@@ -209,9 +233,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setEditMode: (mode) => set({ editMode: mode }),
 
-  setSegmentationPrompt: (prompt) => set({ segmentationPrompt: prompt }),
-
   setImageMode: (mode) => set({ imageMode: mode }),
+
+  setInpaintPreview: (url) => set({ inpaintPreviewUrl: url }),
+
+  setInpaintLoading: (v) => set({ inpaintLoading: v }),
+
+  setInpaintError: (msg) => set({ inpaintError: msg }),
+
+  setDashscopeApiKey: (key) => set({ dashscopeApiKey: key }),
 
   pushHistory: () =>
     set((state) => ({
@@ -261,3 +291,17 @@ if (typeof window !== 'undefined') {
     }
   });
 }
+
+// Persist DashScope API key in localStorage
+const STORED_KEY = 'aicss_dashscope_apikey';
+const stored = localStorage.getItem(STORED_KEY);
+if (stored) {
+  useAppStore.getState().setDashscopeApiKey(stored);
+}
+useAppStore.subscribe(
+  (state) => state.dashscopeApiKey,
+  (key) => {
+    if (key) localStorage.setItem(STORED_KEY, key);
+    else localStorage.removeItem(STORED_KEY);
+  },
+);

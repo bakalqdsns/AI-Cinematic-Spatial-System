@@ -54,6 +54,9 @@ export interface AicssResult {
   objects: DetectedObject[];
   layers: SpatialLayer[];
   sceneGraph: SceneGraph;
+  // VLM detection (always present — computed by Qwen-VL)
+  vlmDetectedClasses?: string[];
+  vlmDetectedScene?: string;
 }
 
 // Layer assignment: objectId -> colorIndex (0-14)
@@ -79,6 +82,19 @@ export interface BillboardOffset {
   objectId: string;
   offsetX: number;
   offsetZ: number;
+}
+
+// Image crop params
+export type ImageSizePreset = '1:1' | '16:9' | '9:16';
+export type ResolutionTier = '1K' | '2K';
+
+export interface CropParams {
+  size: ImageSizePreset;
+  resolution: ResolutionTier;
+  cropOffsetX: number;
+  cropOffsetY: number;
+  actualWidth: number;
+  actualHeight: number;
 }
 
 // Layer color palette (15 distinct colors)

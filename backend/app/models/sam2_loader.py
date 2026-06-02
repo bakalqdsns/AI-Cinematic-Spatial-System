@@ -42,29 +42,34 @@ class SAM2Model:
     SAM2_CONFIGS = {
         "vit_l": {
             "model_cfg": "sam2.1_hiera_l.yaml",
-            "checkpoint": "sam2.1_hiera_large.pt",
+            "checkpoint": "sam2.1_l.pt",
         },
         "vit_h": {
             "model_cfg": "sam2.1_hiera_l.yaml",
-            "checkpoint": "sam2.1_hiera_large.pt",
+            "checkpoint": "sam2.1_l.pt",
         },
         "vit_b": {
             "model_cfg": "sam2.1_hiera_b+.yaml",
-            "checkpoint": "sam2.1_hiera_base_plus.pt",
+            "checkpoint": "sam2.1_b.pt",
         },
         "vit_s": {
             "model_cfg": "sam2.1_hiera_s.yaml",
-            "checkpoint": "sam2.1_hiera_small.pt",
+            "checkpoint": "sam2.1_s.pt",
         },
         "vit_t": {
             "model_cfg": "sam2.1_hiera_t.yaml",
-            "checkpoint": "sam2.1_hiera_tiny.pt",
+            "checkpoint": "sam2.1_t.pt",
         },
     }
 
-    def __init__(self, model_size: str = "vit_h", device: str = "cuda"):
+    def __init__(self, model_size: str = "vit_h", device: str = "cuda",
+                 checkpoint_dir: Optional[str] = None):
         self.model_size = model_size
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        # Default: <project-root>/backend/.cache/sam2  (matches config.py sam2_checkpoint_dir)
+        # Override with SAM2_CHECKPOINT_DIR env var if needed.
+        default_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".cache", "sam2")
+        self.checkpoint_dir = checkpoint_dir or os.environ.get("SAM2_CHECKPOINT_DIR") or default_dir
         self._predictor: Optional[object] = None
         self._automatic_generator: Optional[object] = None
 
@@ -83,8 +88,9 @@ class SAM2Model:
         from ultralytics import SAM
 
         # Map config names to ultralytics model names
-        # "vit_h" -> "sam2.1_l.pt" (large), "vit_b" -> "sam2.1_b.pt" (base), etc.
+        # "vit_l" / "vit_h" -> "sam2.1_l.pt" (large), "vit_b" -> "sam2.1_b.pt" (base), etc.
         model_map = {
+            "vit_l": "sam2.1_l.pt",
             "vit_h": "sam2.1_l.pt",
             "vit_b": "sam2.1_b.pt",
             "vit_s": "sam2.1_s.pt",
@@ -95,26 +101,50 @@ class SAM2Model:
         self._predictor = predictor
         print(f"[SAM2] Loaded via ultralytics: {model_name}")
 
+    def _resolve_ckpt_path(self, checkpoint_name: str) -> Optional[str]:
+        """
+        Locate a SAM2 checkpoint by name within the huggingface hub cache.
+        Returns the full path if found, None otherwise.
+        """
+        import glob
+        hf_hub_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        for root in [self.checkpoint_dir, hf_hub_dir]:
+            pattern = os.path.join(root, "**", "snapshots", "**", checkpoint_name)
+            matches = glob.glob(pattern, recursive=True)
+            if matches:
+                return matches[0]
+            # Also try matching any file containing the checkpoint name
+            pattern2 = os.path.join(root, "**", checkpoint_name)
+            matches2 = glob.glob(pattern2, recursive=True)
+            if matches2:
+                return matches2[0]
+        return None
+
     def _load_sam2_standalone(self):
         """Load standalone SAM2 from Meta's repository."""
-        sam2_dir = os.environ.get("SAM2_HOME", os.path.expanduser("~/.sam2"))
-        os.makedirs(sam2_dir, exist_ok=True)
-
-        # Build SAM2 model
         sam2_cfg = self.SAM2_CONFIGS.get(self.model_size, self.SAM2_CONFIGS["vit_h"])
+        ckpt_name = sam2_cfg["checkpoint"]
+
+        # Resolve the checkpoint path — look in huggingface hub cache
+        ckpt_path = self._resolve_ckpt_path(ckpt_name)
+        if ckpt_path is None:
+            raise FileNotFoundError(
+                f"SAM2 checkpoint '{ckpt_name}' not found in {self.checkpoint_dir}. "
+                f"Please download it first by running 'huggingface-cli download "
+                f"facebook/sam2.1_hiera_{self.model_size.replace('vit_', '')} {ckpt_name}' "
+                f"or use ultralytics (pip install ultralytics)."
+            )
 
         try:
             sam2_model = build_sam2(
                 config_file=sam2_cfg["model_cfg"],
-                ckpt_path=None,  # Will auto-download
+                ckpt_path=ckpt_path,
                 device=self.device,
             )
             self._predictor = SAM2ImagePredictor(sam2_model)
-            print(f"[SAM2] Loaded standalone: {sam2_cfg['checkpoint']}")
+            print(f"[SAM2] Loaded standalone: {ckpt_path}")
         except Exception as e:
-            print(f"[SAM2] Failed to load standalone SAM2: {e}")
-            print("[SAM2] Falling back to automatic masks (no box guidance).")
-            self._automatic_generator = SAM2AutomaticMaskGenerator(sam2_model)
+            raise RuntimeError(f"Failed to build SAM2 with checkpoint {ckpt_path}: {e}") from e
 
     def predict_masks_from_boxes(
         self,

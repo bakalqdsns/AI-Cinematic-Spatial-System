@@ -101,7 +101,6 @@ class GroundingDinoModel:
 
         results = self._processor.post_process_grounded_object_detection(
             outputs,
-            inputs["input_ids"],
             threshold=threshold,
             text_threshold=threshold,
             target_sizes=[(image.height, image.width)],

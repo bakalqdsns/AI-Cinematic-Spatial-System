@@ -14,12 +14,15 @@ import io
 import base64
 import uuid
 import time
+import logging
 from typing import Optional
 
 import httpx
 import torch
 import numpy as np
 import cv2
+
+_log = logging.getLogger("aicss")
 from PIL import Image
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -46,6 +49,8 @@ from app.utils.spatial_utils import (
     build_scene_graph_from_objects,
 )
 from app.models.sam2_loader import refine_mask_edges, extract_polygon_from_mask
+from app.utils.inpaint_utils import generate_inpaint
+from app.utils.vlm_utils import vlm_detect
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,8 +64,8 @@ class ImageUrlRequest(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     imageUrl: str
-    segmentationPrompt: Optional[str] = Field(None, description="Comma-separated class names for Grounding DINO")
     shotId: str
+    apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
 
 
 class DepthRequest(BaseModel):
@@ -69,6 +74,7 @@ class DepthRequest(BaseModel):
 
 class SegmentRequest(BaseModel):
     imageUrl: str
+    apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
 
 
 class LayersRequest(BaseModel):
@@ -95,6 +101,13 @@ class MultifaceRequest(BaseModel):
     objectId: str
     boundingBox: dict = Field(..., description="{x, y, w, h} normalized 0-1")
     polygon: list[list[float]] = Field(default_factory=list, description="[[x,y],...] normalized 0-1, overrides boundingBox for precise cropping")
+
+
+class InpaintRequest(BaseModel):
+    imageUrl: str = Field(..., description="Cropped image, base64 or URL")
+    maskDataUrl: str = Field(..., description="Inverse mask (RGBA), white=edit area, black=keep area")
+    prompt: str = Field(..., description="Inpainting prompt")
+    apiKey: Optional[str] = Field(None, description="DashScope API key — falls back to AICSS_DASHSCOPE_API_KEY env var if not provided")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,7 +150,7 @@ async def analyze(request: AnalyzeRequest):
         image = await _load_image(request.imageUrl)
         w, h = image.size
 
-        # Step 2: Depth estimation
+        # Step 2: Depth estimation (start immediately)
         print(f"[{analysis_id}] Running depth estimation...")
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
@@ -147,10 +160,19 @@ async def analyze(request: AnalyzeRequest):
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
         depth_url = pil_to_base64(depth_pil_resized)
 
+        # Step 2b: VLM detection — always runs. Key is required.
+        # Runs concurrently with depth estimation to avoid adding latency.
+        print(f"[{analysis_id}] Running VLM detection with apiKey={request.apiKey[:12]}...")
+        import asyncio
+        vlm_task = asyncio.create_task(vlm_detect(image, request.apiKey))
+        # Yield to event loop so depth estimation can finish concurrently
+        detected_classes, detected_scene = await vlm_task
+        effective_prompt = ".".join(detected_classes)
+        print(f"[{analysis_id}] VLM scene='{detected_scene}' classes={detected_classes}")
+
         # Step 3: Object detection + segmentation
-        print(f"[{analysis_id}] Running Grounding DINO + SAM2...")
-        prompt = request.segmentationPrompt or settings.segmentation_prompt
-        detections = model_manager.grounding_dino.detect(image, prompt=prompt, threshold=0.3)
+        print(f"[{analysis_id}] Running Grounding DINO + SAM2 with prompt: {effective_prompt[:60]}...")
+        detections = model_manager.grounding_dino.detect(image, prompt=effective_prompt, threshold=0.3)
 
         if not detections:
             print(f"[{analysis_id}] No objects detected.")
@@ -160,6 +182,8 @@ async def analyze(request: AnalyzeRequest):
                 "objects": [],
                 "layers": [],
                 "sceneGraph": {"shotId": request.shotId, "nodes": []},
+                "vlmDetectedClasses": detected_classes,
+                "vlmDetectedScene": detected_scene,
             }
 
         # Get boxes and scores for SAM2
@@ -197,10 +221,6 @@ async def analyze(request: AnalyzeRequest):
             polygon = extract_polygon_from_mask(mask)
             print(f"[{analysis_id}] {det.label}: mask sum={mask.sum()}, polygon points={len(polygon)}")
 
-            # Extract polygon contour
-            polygon = extract_polygon_from_mask(mask)
-            print(f"[{analysis_id}] {det.label}: mask sum={mask.sum()}, polygon points={len(polygon)}")
-
             objects.append({
                 "id": det.object_id,
                 "classLabel": det.label,
@@ -223,6 +243,8 @@ async def analyze(request: AnalyzeRequest):
             "objects": objects,
             "layers": layers,
             "sceneGraph": scene_graph,
+            "vlmDetectedClasses": detected_classes,
+            "vlmDetectedScene": detected_scene,
         }
 
     except Exception as e:
@@ -264,7 +286,15 @@ async def segment_objects(request: SegmentRequest):
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
 
-        prompt = request.segmentationPrompt or settings.segmentation_prompt
+        # Always use VLM to detect classes
+        print(f"[segment] Running VLM detection with apiKey={request.apiKey[:12]}...")
+        import asyncio
+        detected_classes, detected_scene = await asyncio.create_task(
+            vlm_detect(image, request.apiKey)
+        )
+        prompt = ".".join(detected_classes)
+        print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
+
         detections = model_manager.grounding_dino.detect(image, prompt=prompt, threshold=0.3)
 
         if not detections:
@@ -366,7 +396,7 @@ async def generate_billboard(request: BillboardRequest):
         # Build polygon mask if polygon points provided, else fall back to bbox
         raw_polygon = getattr(request, 'polygon', None)
         polygon = raw_polygon if (raw_polygon is not None and len(raw_polygon) > 0) else []
-        print(f"[billboard] objectId={request.objectId} polygon_points={len(polygon)} bbox={request.boundingBox}")
+        _log.info(f"[billboard] objectId=%s polygon_points=%s bbox=%s", request.objectId, len(polygon), request.boundingBox)
 
         if polygon and len(polygon) >= 3:
             # Full-image polygon mask
@@ -401,11 +431,9 @@ async def generate_billboard(request: BillboardRequest):
             mask_cropped = mask_np[y1:y2, x1:x2]
 
         rgba = create_rgba_from_masked_image(cropped, mask_cropped)
-        return {"billboardUrl": pil_to_base64(rgba, format="PNG")}
+        return {"billboardUrl": pil_to_base64(rgba, fmt="PNG")}
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[billboard] ERROR: {e}\n{tb}")
+        _log.exception(f"[billboard] ERROR objectId=%s: %s", request.objectId, e)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
@@ -464,3 +492,53 @@ async def generate_multiface(request: MultifaceRequest):
         return {"faces": faces}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/aicss/inpaint — Inpaint with wanx2.1-imageedit
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/inpaint")
+async def inpaint_image(request: InpaintRequest):
+    """
+    Inpaint the non-selected areas using DashScope wanx2.1-imageedit.
+
+    maskDataUrl should be an RGBA PNG where:
+      - White (alpha=255): edit area — will be inpainted
+      - Black (alpha=0):   keep area — selected objects remain unchanged
+    """
+    effective_key = request.apiKey or settings.dashscope_api_key
+    if not effective_key:
+        raise HTTPException(
+            status_code=503,
+            detail="DashScope API key not configured. Pass apiKey in request body or set AICSS_DASHSCOPE_API_KEY env var.",
+        )
+
+    try:
+        base_image = await _load_image(request.imageUrl)
+        mask_image = await _load_image(request.maskDataUrl)
+
+        if base_image.size != mask_image.size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Size mismatch: base_image={base_image.size}, mask={mask_image.size}. "
+                       "Mask must have the same dimensions as the base image.",
+            )
+
+        result_img = generate_inpaint(
+            base_image=base_image,
+            mask_image=mask_image,
+            prompt=request.prompt,
+            api_key=effective_key,
+        )
+
+        result_url = pil_to_base64(result_img)
+        return {"inpaintResultUrl": result_url}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[inpaint] Error: {e}\n{tb}")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")

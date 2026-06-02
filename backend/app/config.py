@@ -11,6 +11,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CACHE_DIR = BASE_DIR / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
+# Redirect all HuggingFace downloads to project cache (Grounding DINO, Depth, etc.)
+# This must be set BEFORE any transformers/ huggingface_hub imports
+os.environ.setdefault("HF_HOME", str(CACHE_DIR / "huggingface"))
+os.environ.setdefault("HF_HUB_CACHE", str(CACHE_DIR / "huggingface" / "hub"))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_DIR / "huggingface" / "transformers"))
+
 class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
@@ -41,8 +47,23 @@ class Settings(BaseSettings):
         (50, float("inf"), "sky"),
     ]
 
-    # Segmentation prompt — comma-separated class names to detect
-    segmentation_prompt: str = "person,car,building,tree,lamp,door,window,chair,table"
+    # VLM (Qwen-VL) fallback prompts by scene type — used when no segmentation prompt is provided
+    # and VLM detection fails or is disabled
+    vlm_fallback_prompts: dict[str, str] = {
+        "outdoor": "person.car.truck.tree.building.sky.road.grass.lamp.sign.mountain.water.flower",
+        "indoor": "person.chair.table.sofa.bed.curtain.floor.wall.window.door.lamp.ceiling",
+        "night": "person.car.building.light.sign.sky.window.lamp.tree.road.railing.boat",
+        "nature": "tree.grass.rock.mountain.sky.cloud.water.hill.flower.bird.animal.road",
+    }
+
+    # Segmentation prompt — dot-separated class names to detect
+    segmentation_prompt: str = "person.car.building.tree.lamp.door.window.chair.table.road.sky.mountain.water.grass.flower"
+
+    # DashScope Wanx2.1 Image Edit
+    dashscope_api_key: str = ""
+    dashscope_model: str = "wanx2.1-imageedit"
+    dashscope_function: str = "description_edit_with_mask"
+    inpaint_timeout: int = 120
 
     class Config:
         env_prefix = "AICSS_"

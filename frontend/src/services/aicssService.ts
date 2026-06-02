@@ -11,11 +11,11 @@ const client = axios.create({
   timeout: 120_000,
 });
 
-export async function analyzeImage(imageUrl: string, segmentationPrompt: string, shotId: string = 'shot_001'): Promise<AicssResult> {
+export async function analyzeImage(imageUrl: string, shotId: string = 'shot_001', apiKey: string): Promise<AicssResult> {
   const resp = await client.post<AicssResult>('/api/aicss/analyze', {
     imageUrl,
-    segmentationPrompt,
     shotId,
+    apiKey,
   });
   return resp.data;
 }
@@ -53,4 +53,19 @@ export async function generateMultiface(
 export async function checkHealth(): Promise<{ status: string; device: string; models_loaded: boolean }> {
   const resp = await client.get('/health');
   return resp.data;
+}
+
+export async function inpaintImage(
+  imageUrl: string,
+  maskDataUrl: string,
+  prompt: string,
+  apiKey?: string,
+): Promise<string> {
+  const resp = await client.post<{ inpaintResultUrl: string }>('/api/aicss/inpaint', {
+    imageUrl,
+    maskDataUrl,
+    prompt,
+    apiKey: apiKey || undefined,
+  });
+  return resp.data.inpaintResultUrl;
 }

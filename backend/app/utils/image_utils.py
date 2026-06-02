@@ -8,13 +8,13 @@ from PIL import Image
 from typing import Union
 
 
-def pil_to_base64(img: Image.Image, format: str = "PNG") -> str:
+def pil_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
     """Convert a PIL Image to a base64 data URL."""
     buf = io.BytesIO()
-    img.save(buf, format=format)
+    img.save(buf, format=fmt)
     buf.seek(0)
     data = base64.b64encode(buf.read()).decode("utf-8")
-    return f"data:image/{format.lower()};base64,{data}"
+    return f"data:image/{fmt.lower()};base64,{data}"
 
 
 def base64_to_pil(data_url: str) -> Image.Image:

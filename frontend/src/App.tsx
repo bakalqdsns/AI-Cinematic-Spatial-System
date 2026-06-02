@@ -2,7 +2,7 @@
 // App — Main layout: top toolbar + split pane (2D editor | 3D viewer)
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useRef, useState, useEffect } from 'react';
-import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw } from 'lucide-react';
+import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key } from 'lucide-react';
 import { ImageCanvas } from './components/ImageCanvas';
 import { LayerSelector } from './components/LayerSelector';
 import { Viewer3D } from './components/Viewer3D';
@@ -10,41 +10,62 @@ import { SplitControls } from './components/SplitControls';
 import { useAppStore } from './store/useAppStore';
 import { analyzeImage } from './services/aicssService';
 
-// ─── Image loader ──────────────────────────────────────────────────────────────
-function useImageLoader() {
-  const setImage = useAppStore((s) => s.setImage);
+const TARGET_W = 1920;
+const TARGET_H = 1080;
 
-  const loadFromFile = useCallback(
-    async (file: File) => {
-      return new Promise<void>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const dataUrl = e.target?.result as string;
-          const img = new Image();
-          img.onload = () => {
-            // Store as base64 without prefix for API calls
-            const base64 = dataUrl.split(',')[1] || '';
-            setImage(dataUrl, base64, img.width, img.height);
-            resolve();
-          };
-          img.onerror = reject;
-          img.src = dataUrl;
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    },
-    [setImage],
-  );
+function autoResizeTo1920x1080(file: File): Promise<{ dataUrl: string; base64: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const src = e.target?.result as string;
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = TARGET_W;
+        canvas.height = TARGET_H;
+        const ctx = canvas.getContext('2d')!;
 
-  return { loadFromFile };
+        const srcW = img.naturalWidth;
+        const srcH = img.naturalHeight;
+        const srcRatio = srcW / srcH;
+        const tgtRatio = TARGET_W / TARGET_H;
+
+        let drawW: number, drawH: number, drawX: number, drawY: number;
+        if (srcRatio > tgtRatio) {
+          // Source wider → fit height, fill width
+          drawH = TARGET_H;
+          drawW = Math.round(drawH * srcRatio);
+          drawX = Math.round((TARGET_W - drawW) / 2);
+          drawY = 0;
+        } else {
+          // Source taller → fit width, fill height
+          drawW = TARGET_W;
+          drawH = Math.round(drawW / srcRatio);
+          drawX = 0;
+          drawY = Math.round((TARGET_H - drawH) / 2);
+        }
+
+        // Black fill for letterbox/pillarbox
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, TARGET_W, TARGET_H);
+        ctx.drawImage(img, drawX, drawY, drawW, drawH);
+
+        const dataUrl = canvas.toDataURL('image/png');
+        const base64 = dataUrl.split(',')[1] || '';
+        resolve({ dataUrl, base64 });
+      };
+      img.onerror = reject;
+      img.src = src;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 // ─── Toolbar ────────────────────────────────────────────────────────────────────
 function Toolbar() {
   const {
     originalImageUrl,
-    originalImageBase64,
     analysisResult,
     isAnalyzing,
     editMode,
@@ -56,61 +77,66 @@ function Toolbar() {
     setIsAnalyzing,
     setAnalysisResult,
     setAnalysisError,
-    segmentationPrompt,
-    setSegmentationPrompt,
+    croppedImageUrl,
   } = useAppStore();
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const { loadFromFile } = useImageLoader();
+  const dashscopeApiKey = useAppStore((s) => s.dashscopeApiKey);
+  const setDashscopeApiKey = useAppStore((s) => s.setDashscopeApiKey);
 
-  const imageUrl = originalImageUrl || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
+  const imageUrl = originalImageUrl || croppedImageUrl || '';
 
   const handleAnalyze = async () => {
     if (!imageUrl) return;
     setIsAnalyzing(true);
     setAnalysisError(null);
     try {
-      const result = await analyzeImage(imageUrl, segmentationPrompt);
+      const result = await analyzeImage(imageUrl, 'shot_001', dashscopeApiKey);
+      if (result.vlmDetectedScene || result.vlmDetectedClasses?.length) {
+        console.group('[VLM Detection]');
+        console.log('Scene:', result.vlmDetectedScene);
+        console.log('Classes:', result.vlmDetectedClasses?.join(', '));
+        console.log('Full result:', result);
+        console.groupEnd();
+      }
       setAnalysisResult(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setAnalysisError(msg);
-      console.error('Analysis failed:', err);
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    await loadFromFile(file);
-    e.target.value = '';
-  };
-
   return (
     <header className="flex items-center gap-3 px-4 py-3 bg-gray-950 border-b border-gray-800">
       {/* Logo */}
-      <div className="flex items-center gap-2 mr-4">
+      <div className="flex items-center gap-2 mr-2">
         <Film size={22} className="text-blue-400" />
         <span className="text-white font-bold text-lg tracking-tight">AICSS</span>
       </div>
 
+      {/* DashScope API Key */}
+      <div className="flex items-center gap-2 mr-2">
+        <Key size={16} className="text-gray-400" />
+        <input
+          type="password"
+          value={dashscopeApiKey}
+          onChange={(e) => setDashscopeApiKey(e.target.value)}
+          placeholder="API Key"
+          className="w-32 px-2 py-1.5 rounded bg-gray-800 border border-gray-600 text-gray-200 text-xs
+            placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
+          spellCheck={false}
+        />
+      </div>
+
       {/* Import image */}
       <button
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => document.getElementById('aicss-file-input')?.click()}
         className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm font-medium transition-colors"
       >
         <Upload size={16} />
         Import Image
       </button>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={handleFileChange}
-      />
 
       {/* Analyze */}
       <button
@@ -127,52 +153,25 @@ function Toolbar() {
         {isAnalyzing ? 'Analyzing...' : 'Analyze'}
       </button>
 
-      {/* Prompt input */}
-      <input
-        type="text"
-        value={segmentationPrompt}
-        onChange={(e) => setSegmentationPrompt(e.target.value)}
-        placeholder="person,car,building,tree..."
-        className="flex-1 min-w-0 max-w-xs px-3 py-2 rounded-lg bg-gray-800 border border-gray-600
-          text-gray-200 text-sm placeholder-gray-500 focus:outline-none focus:border-blue-500
-          focus:ring-1 focus:ring-blue-500 transition-colors"
-        disabled={isAnalyzing}
-        spellCheck={false}
-      />
-
-      {/* Divider */}
       <div className="w-px h-6 bg-gray-700" />
 
-      {/* Undo / Redo */}
-      <button
-        onClick={undo}
-        disabled={!canUndo()}
-        title="Undo (Ctrl+Z)"
-        className="p-2 rounded-lg hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-      >
+      <button onClick={undo} disabled={!canUndo()} title="Undo (Ctrl+Z)"
+        className="p-2 rounded-lg hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
         <Undo2 size={18} className="text-gray-300" />
       </button>
-      <button
-        onClick={redo}
-        disabled={!canRedo()}
-        title="Redo (Ctrl+Y)"
-        className="p-2 rounded-lg hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-      >
+      <button onClick={redo} disabled={!canRedo()} title="Redo (Ctrl+Y)"
+        className="p-2 rounded-lg hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
         <Redo2 size={18} className="text-gray-300" />
       </button>
 
-      {/* Divider */}
       <div className="w-px h-6 bg-gray-700" />
 
-      {/* Mode toggle */}
       <div className="flex rounded-lg overflow-hidden border border-gray-600">
         <button
           onClick={() => setEditMode('director')}
           className={`
             flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-colors
-            ${editMode === 'director'
-              ? 'bg-purple-600 text-white'
-              : 'bg-gray-800 text-gray-400 hover:text-white'}
+            ${editMode === 'director' ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}
           `}
         >
           <Film size={14} />
@@ -182,9 +181,7 @@ function Toolbar() {
           onClick={() => setEditMode('camera')}
           className={`
             flex items-center gap-1.5 px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-colors
-            ${editMode === 'camera'
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-800 text-gray-400 hover:text-white'}
+            ${editMode === 'camera' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}
           `}
         >
           <Camera size={14} />
@@ -192,15 +189,13 @@ function Toolbar() {
         </button>
       </div>
 
-      {/* Spacer */}
       <div className="flex-1" />
 
-      {/* Status */}
       {analysisResult && (
         <div className="flex items-center gap-3 text-xs text-gray-500">
           <span className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-green-400" />
-            {analysisResult.objects.length} objects detected
+            {analysisResult.objects.length} objects
           </span>
           <span>{analysisResult.analysisId}</span>
         </div>
@@ -211,31 +206,31 @@ function Toolbar() {
 
 // ─── 2D Panel ──────────────────────────────────────────────────────────────────
 function Panel2D() {
-  const { analysisResult, originalImageBase64 } = useAppStore();
+  const analysisResult = useAppStore((s) => s.analysisResult);
+  const croppedImageUrl = useAppStore((s) => s.croppedImageUrl);
+  const originalImageBase64 = useAppStore((s) => s.originalImageBase64);
+  const imageWidth = useAppStore((s) => s.imageWidth);
+  const imageHeight = useAppStore((s) => s.imageHeight);
   const imageMode = useAppStore((s) => s.imageMode);
   const setImageMode = useAppStore((s) => s.setImageMode);
+
   const imageUrl = analysisResult?.depthMapUrl
-    || useAppStore.getState().originalImageUrl
+    || croppedImageUrl
     || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
 
-  // Determine canvas dimensions based on image
-  const { imageWidth, imageHeight } = useAppStore();
   const aspect = imageWidth && imageHeight ? imageWidth / imageHeight : 16 / 9;
   const canvasWidth = 800;
   const canvasHeight = Math.round(canvasWidth / aspect);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Image mode toggle */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900">
         <span className="text-xs text-gray-500 uppercase tracking-wider mr-1">View:</span>
         <div className="flex rounded-lg overflow-hidden border border-gray-600">
           <button
             onClick={() => setImageMode('depth')}
             className={`px-3 py-1 text-xs font-medium transition-colors ${
-              imageMode === 'depth'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-800 text-gray-400 hover:text-white'
+              imageMode === 'depth' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'
             }`}
           >
             Depth
@@ -243,9 +238,7 @@ function Panel2D() {
           <button
             onClick={() => setImageMode('original')}
             className={`px-3 py-1 text-xs font-medium transition-colors ${
-              imageMode === 'original'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-800 text-gray-400 hover:text-white'
+              imageMode === 'original' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'
             }`}
           >
             Original
@@ -253,7 +246,6 @@ function Panel2D() {
         </div>
       </div>
 
-      {/* Image canvas */}
       <div className="flex-1 overflow-auto">
         {imageUrl ? (
           <ImageCanvas width={canvasWidth || 800} height={canvasHeight || 450} />
@@ -267,77 +259,113 @@ function Panel2D() {
         )}
       </div>
 
-      {/* Layer selector */}
       {analysisResult && <LayerSelector />}
-
-      {/* Split controls */}
       {analysisResult && <SplitControls />}
     </div>
   );
 }
 
-// ─── App ───────────────────────────────────────────────────────────────────────
+// ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [splitRatio, setSplitRatio] = useState(50); // percent for left panel
   const [isDragging, setIsDragging] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(50);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const handleMouseDown = useCallback(() => {
-    setIsDragging(true);
-  }, []);
+  const setImage = useAppStore((s) => s.setImage);
+  const setCroppedImage = useAppStore((s) => s.setCroppedImage);
 
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (!isDragging || !containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const ratio = ((e.clientX - rect.left) / rect.width) * 100;
-      setSplitRatio(Math.max(20, Math.min(80, ratio)));
+  // Restore last session on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const { listSessions, loadSession, blobToUrl } = await import('./utils/db');
+        const sessions = await listSessions();
+        if (sessions.length === 0) return;
+        const last = sessions[0];
+        const session = await loadSession(last.id);
+        if (!session) return;
+        if (session.croppedImageBlob) {
+          const url = blobToUrl(session.croppedImageBlob);
+          setCroppedImage(url, session.cropParams ?? null);
+        }
+      } catch (err) {
+        console.warn('Failed to restore session:', err);
+      }
+    })();
+  }, [setCroppedImage]);
+
+  // Auto-resize to 1920x1080 on import
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      e.target.value = '';
+
+      const { dataUrl, base64 } = await autoResizeTo1920x1080(file);
+      setImage(dataUrl, base64, TARGET_W, TARGET_H);
+      setCroppedImage(dataUrl, null);
     },
-    [isDragging],
+    [setImage, setCroppedImage],
   );
 
-  const handleMouseUp = useCallback(() => {
-    setIsDragging(false);
-  }, []);
+  // Split pane drag
+  const handleMouseDown = useCallback(() => setIsDragging(true), []);
 
   useEffect(() => {
-    const handleGlobalUp = () => setIsDragging(false);
-    window.addEventListener('mouseup', handleGlobalUp);
-    return () => window.removeEventListener('mouseup', handleGlobalUp);
-  }, []);
+    const onMove = (e: MouseEvent) => {
+      if (!isDragging || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      setSplitRatio(Math.max(20, Math.min(80, ((e.clientX - rect.left) / rect.width) * 100)));
+    };
+    const onUp = () => setIsDragging(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isDragging]);
 
   return (
-    <div
-      className="flex flex-col h-screen w-screen overflow-hidden bg-gray-950 text-white select-none"
-      style={{ fontFamily: 'system-ui, -apple-system, sans-serif' }}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-    >
-      <Toolbar />
+    <>
+      {/* Hidden file input */}
+      <input
+        id="aicss-file-input"
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleFileChange}
+      />
 
-      {/* Split panes */}
-      <div ref={containerRef} className="flex flex-1 overflow-hidden">
-        {/* 2D Panel */}
-        <div
-          className="overflow-hidden border-r border-gray-800 flex-shrink-0"
-          style={{ width: `${splitRatio}%` }}
-        >
-          <Panel2D />
-        </div>
+      <div
+        className="flex flex-col h-screen w-screen overflow-hidden bg-gray-950 text-white select-none"
+        style={{ fontFamily: 'system-ui, -apple-system, sans-serif' }}
+      >
+        <Toolbar />
 
-        {/* Resize handle */}
-        <div
-          className={`w-1 cursor-col-resize flex-shrink-0 transition-colors ${
-            isDragging ? 'bg-blue-500' : 'bg-gray-800 hover:bg-gray-600'
-          }`}
-          onMouseDown={handleMouseDown}
-        />
+        <div ref={containerRef} className="flex flex-1 overflow-hidden">
+          {/* 2D Panel */}
+          <div
+            className="overflow-hidden border-r border-gray-800 flex-shrink-0"
+            style={{ width: `${splitRatio}%` }}
+          >
+            <Panel2D />
+          </div>
 
-        {/* 3D Panel */}
-        <div className="flex-1 overflow-hidden">
-          <Viewer3D />
+          {/* Resize handle */}
+          <div
+            className={`w-1 cursor-col-resize flex-shrink-0 transition-colors ${
+              isDragging ? 'bg-blue-500' : 'bg-gray-800 hover:bg-gray-600'
+            }`}
+            onMouseDown={handleMouseDown}
+          />
+
+          {/* 3D Panel */}
+          <div className="flex-1 overflow-hidden">
+            <Viewer3D />
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }

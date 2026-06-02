@@ -3,6 +3,20 @@ AICSS Backend — FastAPI Application
 """
 import sys
 import os
+import logging
+from logging.handlers import RotatingFileHandler
+
+# File-based logging so errors are always visible
+_log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_log_file = os.path.join(_log_dir, "aicss.log")
+
+_log = logging.getLogger("aicss")
+_log.setLevel(logging.DEBUG)
+_handler = RotatingFileHandler(_log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+if not _log.handlers:
+    _log.addHandler(_handler)
 
 # Put the backend root on sys.path so absolute imports (from app.xxx) work
 # regardless of the working directory when uvicorn starts the process.

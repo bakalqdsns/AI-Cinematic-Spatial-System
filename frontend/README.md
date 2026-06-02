@@ -1,15 +1,15 @@
 # AICSS Frontend
 
-AI Cinematic Spatial System — Web UI for real-time scene depth analysis, object segmentation, and pseudo-3D billboard rendering.
+React 19 + TypeScript web UI for the AI Cinematic Spatial System. Provides 2D mask overlay editing and 3D billboard rendering.
 
 ## Tech Stack
 
 | Category | Library |
 |---|---|
-| Framework | React 19 + TypeScript |
+| Framework | React 19 + TypeScript 6 |
 | Bundler | Vite 8 |
 | 3D Rendering | Three.js + `@react-three/fiber` + `@react-three/drei` |
-| State Management | Zustand |
+| State Management | Zustand 5 |
 | Styling | Tailwind CSS v4 |
 | HTTP Client | Axios |
 | Icons | Lucide React |
@@ -22,89 +22,139 @@ src/
 ├── main.tsx                # React mount
 ├── index.css               # Global styles (Tailwind base)
 ├── components/
-│   ├── ImageCanvas.tsx     # 2D SVG overlay: polygon/rect masks, object highlights, layer coloring
-│   ├── LayerSelector.tsx    # 15-color swatch palette; click to select active layer for assignment
-│   ├── SplitControls.tsx    # "Split Image" → billboard generation; progress / error display
-│   └── Viewer3D.tsx        # Three.js canvas: billboard meshes in 3D world space
+│   ├── ImageCanvas.tsx     # 2D SVG canvas
+│   ├── LayerSelector.tsx   # 15-color swatch palette
+│   ├── SplitControls.tsx   # Split button + progress/error display
+│   └── Viewer3D.tsx       # Three.js canvas
 ├── services/
-│   └── aicssService.ts     # Axios wrapper around backend REST API
+│   └── aicssService.ts    # Axios client for backend API
 ├── store/
-│   └── useAppStore.ts      # Zustand global store (image, analysis result, assignments, history)
+│   └── useAppStore.ts     # Zustand global store
 └── types/
-    └── index.ts            # Shared TypeScript interfaces (DetectedObject, SpatialLayer, etc.)
+    └── index.ts           # TypeScript interfaces
 ```
+
+## App.tsx — Layout
+
+The root component assembles three panels:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Toolbar (fixed)                                              │
+│  Import | Analyze | prompt | Undo | Redo | Director|Camera   │
+├────────────────────────────┬─────────────────────────────────┤
+│ Panel2D (resizable)       │ Viewer3D (flex-1)                │
+│  ┌─ View toggle ───────┐  │                                 │
+│  │ [Depth] [Original]  │  │   Three.js scene                 │
+│  └────────────────────┘  │   billboard planes in Z-depth     │
+│                            │                                 │
+│  ImageCanvas (SVG)        │   OrbitControls                  │
+│  polygon masks + labels    │                                 │
+│                            │                                 │
+│  LayerSelector            │                                 │
+│  SplitControls            │                                 │
+└────────────────────────────┴─────────────────────────────────┘
+```
+
+The resize handle between panels is draggable, clamped to 20–80 % split ratio.
+
+## ImageCanvas.tsx
+
+SVG overlay rendered on top of the background image (`<img>` element).
+
+**Props:** `width`, `height` (canvas pixel dimensions)
+
+**Rendering logic:**
+- Iterates `analysisResult.objects`
+- For each object: if `obj.polygon.length >= 3` → renders `<polygon>` with Douglas-Peucker points; otherwise renders `<rect>` fallback
+- Fill: semi-transparent layer color (35 % opacity) if assigned
+- Border: dashed when not selected, solid when selected
+- Label text: class name + layer index
+- Click → `handleObjectClick(obj, event)` in store
+
+**Coordinate system:** all polygon points are normalized 0–1, scaled to canvas pixels at render time.
+
+## LayerSelector.tsx
+
+15 color swatches (`LAYER_COLORS` from `types/index.ts`). Clicking a swatch sets `selectedLayerIndex`. The next object clicked in `ImageCanvas` is assigned to that layer.
+
+- `clearLayer(colorIndex)` — removes all assignments for that layer
+- Counter shows `N / 15 used`
+
+## SplitControls.tsx
+
+"Split Image" button: iterates all assigned objects and calls `generateBillboard(imageUrl, obj.id, obj.boundingBox, obj.polygon)` for each. Stores the resulting RGBA base64 URLs in `billboardAssets`.
+
+Errors are caught per-object so one failure doesn't block others.
+
+## Viewer3D.tsx
+
+Three.js `Canvas` with `OrbitControls`. World dimensions: `SCENE_WIDTH = 20`, `SCENE_HEIGHT = 15`.
+
+**Billboard placement per object:**
+```
+posX = (bbox.cx - 0.5) * SCENE_WIDTH + (offset?.offsetX ?? 0)
+posY = (1 - bbox.cy) * SCENE_HEIGHT   // Y-flip for 3D
+posZ = (depth / 50) * 10 - 5          // 0 → -5 (near), 50 → +5 (far)
+```
+
+**Billboard rotation:** in director mode, billboards face the camera (billboard constraint). In camera mode, each billboard can be rotated freely.
+
+**Texture loading:** `useEffect` loads the RGBA texture from `billboardAssets[obj.id].rgbaUrl` into a `THREE.Texture`.
+
+**CameraController:** wraps `OrbitControls`, exposes a passive wheel listener for scroll-to-zoom.
 
 ## State Management (Zustand)
 
-`useAppStore` is the single source of truth for the entire UI:
+`useAppStore.ts` — single store, no slices. Key actions:
 
-| State key | Type | Purpose |
+| Action | Signature | Effect |
 |---|---|---|
-| `originalImageUrl` | `string` | Full data URL of the imported image |
-| `originalImageBase64` | `string` | Base64 without prefix (for API payload) |
-| `imageWidth / imageHeight` | `number` | Original image dimensions in pixels |
-| `analysisResult` | `AicssResult \| null` | Full pipeline response: depth map, objects, layers, scene graph |
-| `imageMode` | `'depth' \| 'original'` | 2D panel background: depth map or original photo |
-| `assignments` | `Record<objectId, colorIndex>` | Maps each detected object to a layer color |
-| `selectedLayerIndex` | `number \| null` | Currently active color swatch (0-14) |
-| `selectedObjectId` | `string \| null` | Object highlighted on the 2D canvas |
-| `billboardAssets` | `Record<objectId, BillboardAsset>` | RGBA textures fetched from `/api/aicss/billboard` |
-| `editMode` | `'director' \| 'camera'` | Director = assign objects to layers; Camera = adjust billboard positions |
-| `past / future` | `HistoryEntry[]` | Undo/redo stack for layer assignments |
+| `setImage` | `(url, base64, w, h)` | Sets original image |
+| `setAnalysisResult` | `(result)` | Stores full pipeline response |
+| `setEditMode` | `('director' \| 'camera')` | Toggles interaction mode |
+| `setImageMode` | `('depth' \| 'original')` | 2D panel background |
+| `assignLayer` | `(objectId, colorIndex)` | Assigns object to layer |
+| `clearLayer` | `(colorIndex)` | Clears all assignments for a layer |
+| `pushHistory` | `()` | Saves snapshot to undo stack |
+| `undo / redo` | `()` | Replaces assignments from past/future |
+| `setBillboardAsset` | `(objectId, rgbaUrl)` | Stores generated RGBA texture |
 
-## Key Data Flow
+Undo/redo: stores `{assignments, timestamp}` snapshots. Max 50 entries.
 
-```
-Import Image
-    │
-    ▼
-POST /api/aicss/analyze          (analyzeImage in aicssService)
-    │
-    ├─► Depth-Anything-V2         → depthMapUrl
-    ├─► Grounding DINO            → boxes + scores
-    ├─► SAM2 + Canny edge refine  → object masks + polygon contours
-    ├─► Spatial layering           → layers[]
-    └─► Scene graph               → sceneGraph{}
+## API Client (aicssService.ts)
 
-    ▼
-analysisResult → displayed in ImageCanvas (2D panel)
-              → displayed in Viewer3D  (3D panel)
-              → objects assigned to layers via LayerSelector
-
-Split Image button
-    │
-    ▼
-POST /api/aicss/billboard        (generateBillboard)
-    │
-    └─► Crop using polygon mask   → RGBA PNG → Viewer3D texture
-```
-
-## API Endpoints
-
-All calls go to `http://localhost:8000` by default (configurable via `VITE_AICSS_BACKEND`).
-
-| Method | Path | Payload | Response |
-|---|---|---|---|
-| `POST` | `/api/aicss/analyze` | `{imageUrl, segmentationPrompt, shotId}` | `AicssResult` |
-| `POST` | `/api/aicss/billboard` | `{imageUrl, objectId, boundingBox, polygon}` | `{billboardUrl}` |
-| `POST` | `/api/aicss/multiface` | `{imageUrl, objectId, boundingBox, polygon}` | `{faces: {front, back, left, right, top, bottom}}` |
-| `GET` | `/health` | — | `{status, device, models_loaded}` |
-
-## Key TypeScript Types
+Axios instance at `http://localhost:8000` (configurable via `VITE_AICSS_BACKEND`). Timeout: 120 s.
 
 ```typescript
-// Each detected object carries both bbox + polygon contour
+// Full pipeline
+analyzeImage(imageUrl, segmentationPrompt, shotId): Promise<AicssResult>
+
+// Billboard — polygon optional, falls back to bbox
+generateBillboard(imageUrl, objectId, boundingBox, polygon?): Promise<string>
+
+// 6-face textures
+generateMultiface(imageUrl, objectId, boundingBox, polygon?): Promise<Record<string, string>>
+
+// Health
+checkHealth(): Promise<{ status, device, models_loaded }>
+```
+
+## Key Types
+
+```typescript
+type PolygonPoint = [number, number];           // normalized 0-1
+
 interface DetectedObject {
   id: string;
   classLabel: string;
-  depth: number;           // median depth in meters
-  boundingBox: BoundingBox; // {x, y, w, h} normalized 0-1
-  maskDataUrl: string;      // base64 PNG mask
-  polygon: [number, number][]; // edge-refined contour, 0-1 range
-  layer: string;            // "near" | "mid" | "far"
+  depth: number;                // median meters
+  boundingBox: BoundingBox;    // {x,y,w,h} 0-1
+  maskDataUrl: string;         // base64 PNG mask
+  polygon: PolygonPoint[];     // edge-refined contour
+  layer: string;               // foreground|midground|background|sky
 }
 
-// Full pipeline result
 interface AicssResult {
   analysisId: string;
   depthMapUrl: string;
@@ -119,15 +169,15 @@ interface AicssResult {
 ```bash
 cd frontend
 npm install
-npm run dev      # http://localhost:5173
+npm run dev       # http://localhost:5173 (HMR enabled)
+npm run build     # type-check + production build → dist/
+npm run preview   # serve dist/ locally
 ```
 
-The frontend assumes the backend is running at `http://localhost:8000`. See the [backend README](../backend/README.md) for setup instructions.
+Requires the backend running at `http://localhost:8000` (or set `VITE_AICSS_BACKEND` in `frontend/.env`).
 
-## Scripts
+## Environment Variables
 
-| Command | Purpose |
-|---|---|
-| `npm run dev` | Start Vite dev server with HMR |
-| `npm run build` | Type-check + production build to `dist/` |
-| `npm run preview` | Serve the production build locally |
+| Variable | Default | Description |
+|---|---|---|
+| `VITE_AICSS_BACKEND` | `http://localhost:8000` | Backend base URL |

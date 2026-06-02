@@ -56,9 +56,11 @@ class ModelManager:
         self._grounding_dino.load()
 
         print("[ModelManager] Loading SAM2...")
+        sam2_checkpoint_dir = str(settings.sam2_checkpoint_dir) if settings.sam2_checkpoint_dir else None
         self._sam2 = SAM2Model(
             model_size=settings.sam2_model_size,
             device=DEVICE,
+            checkpoint_dir=sam2_checkpoint_dir,
         )
         self._sam2.load()
 
