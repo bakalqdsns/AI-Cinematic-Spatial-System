@@ -501,11 +501,12 @@ async def generate_multiface(request: MultifaceRequest):
 @router.post("/inpaint")
 async def inpaint_image(request: InpaintRequest):
     """
-    Inpaint the non-selected areas using DashScope wanx2.1-imageedit.
+    Inpaint the non-selected areas using DashScope wanx2.1-imageedit model.
 
     maskDataUrl should be an RGBA PNG where:
-      - White (alpha=255): edit area — will be inpainted
-      - Black (alpha=0):   keep area — selected objects remain unchanged
+      - White (alpha=255): background — will be edited and inpainted
+      - Black (alpha=0):   selected objects — will be retained
+    prompt: describes what to fill in the white (edited) regions
     """
     effective_key = request.apiKey or settings.dashscope_api_key
     if not effective_key:
@@ -515,8 +516,8 @@ async def inpaint_image(request: InpaintRequest):
         )
 
     try:
-        base_image = await _load_image(request.imageUrl)
-        mask_image = await _load_image(request.maskDataUrl)
+        base_image = load_image_from_url_or_base64(request.imageUrl)
+        mask_image = load_image_from_url_or_base64(request.maskDataUrl, keep_alpha=True)
 
         if base_image.size != mask_image.size:
             raise HTTPException(

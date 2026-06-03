@@ -68,7 +68,11 @@ export function ImageCanvas({ width, height }: Props) {
         onClick={handleCanvasClick}
         style={{ cursor: selectedLayerIndex !== null ? 'crosshair' : 'default' }}
       >
-        {objects.map((obj) => {
+        {[...objects].sort((a, b) => {
+          const areaA = a.boundingBox.w * a.boundingBox.h;
+          const areaB = b.boundingBox.w * b.boundingBox.h;
+          return areaB - areaA;
+        }).map((obj) => {
           const bbox = obj.boundingBox;
           const px = bbox.x * width;
           const py = bbox.y * height;

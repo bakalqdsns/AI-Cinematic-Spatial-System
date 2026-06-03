@@ -1,9 +1,7 @@
 """
 Depth Model Loader — Depth Anything V2 via HuggingFace Transformers.
 
-Uses the official HuggingFace 'depth-anything/Depth-Anything-V2-Large-hf' model
-which ships with a proper preprocessor_config.json and supports the standard
-AutoImageProcessor / AutoModelForDepthEstimation API.
+本地优先：加载时使用 local_files_only=True，避免离线时触发 HuggingFace Hub 检查。
 """
 import torch
 import numpy as np
@@ -34,10 +32,16 @@ class DepthModel:
         self._model = None
 
     def load(self):
-        """Load model and processor from HuggingFace."""
-        print(f"[DepthModel] Loading {self.model_name} on {self.device}...")
-        self._processor = AutoImageProcessor.from_pretrained(self.model_name)
-        self._model = AutoModelForDepthEstimation.from_pretrained(self.model_name)
+        """Load model and processor from local cache only (offline-first)."""
+        print(f"[DepthModel] Loading {self.model_name} on {self.device} (local only)...")
+        self._processor = AutoImageProcessor.from_pretrained(
+            self.model_name,
+            local_files_only=True,
+        )
+        self._model = AutoModelForDepthEstimation.from_pretrained(
+            self.model_name,
+            local_files_only=True,
+        )
         self._model.to(self.device)
         self._model.eval()
         print("[DepthModel] Loaded.")

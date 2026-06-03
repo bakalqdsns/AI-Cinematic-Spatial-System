@@ -17,35 +17,51 @@ def pil_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
     return f"data:image/{fmt.lower()};base64,{data}"
 
 
-def base64_to_pil(data_url: str) -> Image.Image:
-    """Convert a base64 data URL to a PIL Image."""
+def base64_to_pil(data_url: str, keep_alpha: bool = False) -> Image.Image:
+    """Convert a base64 data URL to a PIL Image.
+
+    Args:
+        data_url: base64 data URL (with or without "data:..." prefix) or plain base64 string.
+        keep_alpha: if True, preserves RGBA mode (e.g. for inpaint masks); if False (default),
+                    converts to RGB.
+    """
     if data_url.startswith("data:"):
         data_url = data64 = data_url.split(",", 1)[1]
     else:
         data64 = data_url
     raw = base64.b64decode(data64)
-    return Image.open(io.BytesIO(raw)).convert("RGB")
+    img = Image.open(io.BytesIO(raw))
+    if keep_alpha and img.mode == "RGBA":
+        return img
+    return img.convert("RGB")
 
 
-def load_image_from_url_or_base64(url_or_base64: str) -> Image.Image:
+def load_image_from_url_or_base64(url_or_base64: str, keep_alpha: bool = False) -> Image.Image:
     """
     Load an image from either:
       - A HTTP/HTTPS URL (fetched via httpx)
       - A base64 data URL
       - A plain base64 string
-    Returns a PIL RGB image.
+    Returns a PIL image (RGB, or RGBA if keep_alpha=True).
+
+    Args:
+        url_or_base64: image source.
+        keep_alpha: if True, preserves RGBA mode (needed for inpaint masks).
     """
     if url_or_base64.startswith("data:image"):
-        return base64_to_pil(url_or_base64)
+        return base64_to_pil(url_or_base64, keep_alpha=keep_alpha)
     elif url_or_base64.startswith("http"):
         import httpx
         with httpx.Client(timeout=30.0) as client:
             resp = client.get(url_or_base64)
             resp.raise_for_status()
-            return Image.open(io.BytesIO(resp.content)).convert("RGB")
+            img = Image.open(io.BytesIO(resp.content))
+            if keep_alpha and img.mode == "RGBA":
+                return img
+            return img.convert("RGB")
     else:
         # Assume plain base64
-        return base64_to_pil(url_or_base64)
+        return base64_to_pil(url_or_base64, keep_alpha=keep_alpha)
 
 
 def numpy_to_pil_depth(depth: np.ndarray, cmap: str = "gray") -> Image.Image:
