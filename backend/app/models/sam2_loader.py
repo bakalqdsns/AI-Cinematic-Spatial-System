@@ -220,8 +220,15 @@ class SAM2Model:
         """
         Generate masks for all salient objects (no text/detection prompt).
         Uses SAM2's built-in automatic mask generation.
+
+        Returns:
+            List of dicts, each containing:
+              - segmentation: HxW bool mask
+              - area: int pixel count
+              - bbox: [x1, y1, x2, y2] in pixels
+              - center: [cx_norm, cy_norm] normalized to [0, 1]
         """
-        if self._automatic_generator is None and self._predictor is None:
+        if self._predictor is None:
             raise RuntimeError("SAM2 model not loaded.")
 
         if isinstance(image, Image.Image):
@@ -231,19 +238,58 @@ class SAM2Model:
 
         if self._automatic_generator is not None:
             return self._automatic_generator.generate(image_np)
-        else:
-            # Use ultralytics automatic — reuse the already-loaded predictor
-            results = self._predictor(image_np, verbose=False)
-            masks_out = []
-            for r in results:
-                if r.masks is not None:
-                    mask_arrays = r.masks.data.cpu().numpy()
-                    for mask_np in mask_arrays:
-                        masks_out.append({
-                            "segmentation": mask_np.astype(bool),
-                            "area": int(mask_np.sum()),
-                        })
-            return masks_out
+
+        # ultralytics fallback — no automatic generator available,
+        # so we call the predictor without any box prompt and collect all masks
+        results = self._predictor(image_np, verbose=False)
+        masks_out = []
+        for r in results:
+            if r.masks is not None:
+                mask_arrays = r.masks.data.cpu().numpy()
+                for mask_np in mask_arrays:
+                    mask_bool = mask_np.astype(bool)
+                    masks_out.append({
+                        "segmentation": mask_bool,
+                        "area": int(mask_bool.sum()),
+                        "bbox": _mask_to_bbox(mask_bool),
+                        "center": _mask_to_center(mask_bool),
+                    })
+        return masks_out
+
+
+# ─── Mask-to-bbox helper ──────────────────────────────────────────────────────
+
+def _mask_to_bbox(mask: np.ndarray) -> list[int]:
+    """
+    Compute axis-aligned bounding box [x1, y1, x2, y2] from a bool mask.
+
+    Args:
+        mask: HxW bool array.
+
+    Returns:
+        [x1, y1, x2, y2] in pixel coordinates.
+    """
+    rows, cols = np.where(mask)
+    if rows.size == 0:
+        return [0, 0, 0, 0]
+    return [int(cols.min()), int(rows.min()), int(cols.max()), int(rows.max())]
+
+
+def _mask_to_center(mask: np.ndarray) -> list[float]:
+    """
+    Compute the centroid [cx, cy] of a bool mask.
+
+    Args:
+        mask: HxW bool array.
+
+    Returns:
+        [cx, cy] normalized to [0, 1] range.
+    """
+    rows, cols = np.where(mask)
+    if rows.size == 0:
+        return [0.0, 0.0]
+    h, w = mask.shape
+    return [float(cols.mean() / w), float(rows.mean() / h)]
 
 
 # ─── Edge-refinement helpers ──────────────────────────────────────────────────
