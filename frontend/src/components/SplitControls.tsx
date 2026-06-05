@@ -27,7 +27,7 @@ export function SplitControls() {
 
   const [splitting, setSplitting] = useState(false);
   const [splitProgress, setSplitProgress] = useState(0);
-  const [splitFailed, setSplitFailed] = useState<string[]>([]);
+  const [splitError, setSplitError] = useState<string | null>(null);
   const [splitDone, setSplitDone] = useState(false);
 
   const objects = analysisResult?.objects ?? [];
@@ -100,47 +100,39 @@ export function SplitControls() {
   }, [analysisResult, assignedObjects]);
 
   // ─── Split Image ─────────────────────────────────────────────────────────
-  type BillboardResult = { objId: string; rgbaUrl: string; ok: true }
-    | { objId: string; ok: false; error: string };
-
   const handleSplit = async () => {
     if (!effectiveImageUrl || assignedObjects.length === 0) return;
 
     setSplitting(true);
-    setSplitFailed([]);
+    setSplitError(null);
     setSplitProgress(0);
     setSplitDone(false);
 
-    const results = await Promise.all(
-      assignedObjects.map((obj): Promise<BillboardResult> =>
-        generateBillboard(effectiveImageUrl, obj.id, obj.boundingBox, obj.polygon)
-          .then((rgbaUrl) => ({ objId: obj.id, rgbaUrl, ok: true as const }))
-          .catch((err) => ({ objId: obj.id, ok: false as const, error: String(err) }))
-      )
-    );
-
-    const failedIds: string[] = [];
-    for (const result of results) {
-      if (result.ok) {
-        setBillboardAsset(result.objId, result.rgbaUrl);
-      } else {
-        failedIds.push(result.objId);
-        console.error(`Billboard failed for ${result.objId}:`, result.error);
+    let completed = 0;
+    for (const obj of assignedObjects) {
+      try {
+        const rgbaUrl = await generateBillboard(effectiveImageUrl, obj.id, obj.boundingBox, obj.polygon);
+        setBillboardAsset(obj.id, rgbaUrl);
+        completed++;
+        setSplitProgress(Math.round((completed / assignedObjects.length) * 100));
+      } catch (err) {
+        console.error(`Failed to generate billboard for ${obj.id}:`, err);
+        completed++;
+        setSplitProgress(Math.round((completed / assignedObjects.length) * 100));
       }
     }
 
-    setSplitProgress(100);
     setSplitting(false);
-    setSplitFailed(failedIds);
-    setSplitDone(failedIds.length === 0);
+    setSplitDone(true);
   };
 
   // ─── Split & Inpaint ─────────────────────────────────────────────────────
   const handleSplitAndInpaint = async () => {
     if (!effectiveImageUrl || assignedObjects.length === 0) return;
-
+    
     if (!dashscopeApiKey) {
       setInpaintError('请先在顶部输入 DashScope API Key');
+      setInpaintLoading(false);
       return;
     }
 
@@ -185,7 +177,7 @@ export function SplitControls() {
   const handleReset = () => {
     reset();
     setSplitDone(false);
-    setSplitFailed([]);
+    setSplitError(null);
     setInpaintPreview(null);
     setInpaintError(null);
   };
@@ -193,7 +185,7 @@ export function SplitControls() {
   const assignedCount = assignedObjects.length;
   const hasImage = !!effectiveImageUrl;
   const canSplit = hasImage && assignedCount > 0;
-  const canInpaint = hasImage && assignedCount > 0 && !!dashscopeApiKey;
+  const canInpaint = hasImage && assignedCount > 0;
 
   return (
     <>
@@ -236,14 +228,10 @@ export function SplitControls() {
           </div>
         )}
 
-        {/* Split failed */}
-        {splitFailed.length > 0 && (
+        {splitError && (
           <div className="flex items-center gap-2 text-red-400">
             <AlertCircle size={16} />
-            <span className="text-sm">
-              {splitFailed.length} billboard(s) failed: {splitFailed.slice(0, 3).join(', ')}
-              {splitFailed.length > 3 ? ` +${splitFailed.length - 3} more` : ''}
-            </span>
+            <span className="text-sm">{splitError}</span>
           </div>
         )}
 

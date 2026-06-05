@@ -1,9 +1,8 @@
 """
 Depth Model Loader — Depth Anything V2 via HuggingFace Transformers.
 
-本地优先：使用离线缓存；可通过 AICSS_OFFLINE_ONLY=1 强制离线模式。
+本地优先：加载时使用 local_files_only=True，避免离线时触发 HuggingFace Hub 检查。
 """
-import os
 import torch
 import numpy as np
 from PIL import Image
@@ -33,34 +32,19 @@ class DepthModel:
         self._model = None
 
     def load(self):
-        """Load model, first from local cache then with download fallback."""
-        print(f"[DepthModel] Loading {self.model_name} on {self.device}...")
-        local_only = os.environ.get("AICSS_OFFLINE_ONLY", "").lower() in ("1", "true", "yes")
-
-        for local_only_flag in ([True, False] if not local_only else [True]):
-            try:
-                self._processor = AutoImageProcessor.from_pretrained(
-                    self.model_name,
-                    local_files_only=local_only_flag,
-                )
-                self._model = AutoModelForDepthEstimation.from_pretrained(
-                    self.model_name,
-                    local_files_only=local_only_flag,
-                )
-                self._model.to(self.device)
-                self._model.eval()
-                mode = "local cache" if local_only_flag else "downloaded"
-                print(f"[DepthModel] Loaded ({mode}).")
-                return
-            except FileNotFoundError:
-                if local_only_flag:
-                    raise RuntimeError(
-                        f"Depth model '{self.model_name}' not found in local cache. "
-                        f"Run 'huggingface-cli download {self.model_name}' to cache it, "
-                        f"or unset AICSS_OFFLINE_ONLY to allow download."
-                    )
-                continue
-        raise RuntimeError(f"Failed to load Depth model '{self.model_name}'.")
+        """Load model and processor from local cache only (offline-first)."""
+        print(f"[DepthModel] Loading {self.model_name} on {self.device} (local only)...")
+        self._processor = AutoImageProcessor.from_pretrained(
+            self.model_name,
+            local_files_only=True,
+        )
+        self._model = AutoModelForDepthEstimation.from_pretrained(
+            self.model_name,
+            local_files_only=True,
+        )
+        self._model.to(self.device)
+        self._model.eval()
+        print("[DepthModel] Loaded.")
 
     def predict(self, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
         """

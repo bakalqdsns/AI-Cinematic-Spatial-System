@@ -2,7 +2,7 @@
 // AICSS API Service — calls backend endpoints
 // ─────────────────────────────────────────────────────────────────────────────
 import axios from 'axios';
-import type { AicssResult, BoundingBox, PolygonPoint, DepthModeResult } from '../types';
+import type { AicssResult, BoundingBox, PolygonPoint } from '../types';
 
 const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
 
@@ -16,13 +16,6 @@ export async function analyzeImage(imageUrl: string, shotId: string = 'shot_001'
     imageUrl,
     shotId,
     apiKey: apiKey || undefined,
-  });
-  return resp.data;
-}
-
-export async function generateDepth(imageUrl: string): Promise<DepthModeResult> {
-  const resp = await client.post<DepthModeResult>('/api/aicss/depth', {
-    imageUrl,
   });
   return resp.data;
 }

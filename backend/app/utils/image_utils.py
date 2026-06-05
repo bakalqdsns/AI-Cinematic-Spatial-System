@@ -2,52 +2,10 @@
 Utility functions for image/depth processing.
 """
 import io
-import os
 import base64
 import numpy as np
-import cv2
-import httpx
 from PIL import Image
 from typing import Union
-
-
-# Reuse a single httpx client for image downloads (connection pooling)
-_http_client: httpx.Client | None = None
-
-
-def _get_http_client() -> httpx.Client:
-    global _http_client
-    if _http_client is None:
-        _http_client = httpx.Client(timeout=30.0, follow_redirects=True)
-    return _http_client
-
-
-def pil_to_file(img: Image.Image, filename: str, fmt: str = "PNG") -> str:
-    """
-    Save a PIL Image to a local file and return its public URL path.
-
-    The file is saved under the server's /temp/ mount point so the frontend
-    can access it via GET /temp/{filename}.
-
-    Args:
-        img: PIL Image to save.
-        filename: Unique filename (e.g. "depth_{uuid}.png"). Path traversal is blocked.
-        fmt: Image format (default PNG).
-
-    Returns:
-        Public URL path relative to the server root (e.g. "/temp/depth_abc.png").
-    """
-    # Reject path traversal: only the basename is used
-    safe_name = os.path.basename(filename)
-    if not safe_name or safe_name.startswith("."):
-        raise ValueError(f"Invalid filename: {filename!r}")
-
-    backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    temp_dir = os.path.join(backend_root, "temp")
-    os.makedirs(temp_dir, exist_ok=True)
-    path = os.path.join(temp_dir, safe_name)
-    img.save(path, format=fmt)
-    return f"/temp/{safe_name}"
 
 
 def pil_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
@@ -93,13 +51,14 @@ def load_image_from_url_or_base64(url_or_base64: str, keep_alpha: bool = False) 
     if url_or_base64.startswith("data:image"):
         return base64_to_pil(url_or_base64, keep_alpha=keep_alpha)
     elif url_or_base64.startswith("http"):
-        client = _get_http_client()
-        resp = client.get(url_or_base64)
-        resp.raise_for_status()
-        img = Image.open(io.BytesIO(resp.content))
-        if keep_alpha and img.mode == "RGBA":
-            return img
-        return img.convert("RGB")
+        import httpx
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.get(url_or_base64)
+            resp.raise_for_status()
+            img = Image.open(io.BytesIO(resp.content))
+            if keep_alpha and img.mode == "RGBA":
+                return img
+            return img.convert("RGB")
     else:
         # Assume plain base64
         return base64_to_pil(url_or_base64, keep_alpha=keep_alpha)
@@ -109,17 +68,14 @@ def numpy_to_pil_depth(depth: np.ndarray, cmap: str = "gray") -> Image.Image:
     """
     Convert a normalized depth array (0-1 or raw) to a PIL Image.
     Applies a colormap for visualization.
-    Uses nanmin/nanmax so NaN pixels are ignored when stretching.
     """
-    d_min = float(np.nanmin(depth))
-    d_max = float(np.nanmax(depth))
-    if d_max - d_min < 1e-6:
-        d_max = d_min + 1.0
-    depth_vis = ((depth - d_min) / (d_max - d_min) * 255).clip(0, 255).astype(np.uint8)
+    depth_vis = ((depth - depth.min()) / (depth.max() - depth.min() + 1e-6) * 255).astype(np.uint8)
     if cmap == "gray":
         return Image.fromarray(depth_vis, mode="L")
-    depth_color = cv2.applyColorMap(depth_vis, cv2.COLORMAP_INFERNO)
-    return Image.fromarray(depth_color[:, :, ::-1])
+    else:
+        import cv2
+        depth_color = cv2.applyColorMap(depth_vis, cv2.COLORMAP_INFERNO)
+        return Image.fromarray(depth_color[:, :, ::-1])
 
 
 def depth_to_meters(depth_norm: np.ndarray, scale: float = 50.0) -> np.ndarray:
@@ -190,8 +146,7 @@ def estimate_depth_from_bbox(
     if x2 <= x1 or y2 <= y1:
         return 10.0
     region = depth_map[y1:y2, x1:x2]
-    result = float(np.nanmedian(region))
-    return result if not np.isnan(result) else 10.0
+    return float(np.median(region))
 
 
 def rotate_image_90(img: Image.Image, k: int) -> Image.Image:

@@ -8,7 +8,7 @@ import { LayerSelector } from './components/LayerSelector';
 import { Viewer3D } from './components/Viewer3D';
 import { SplitControls } from './components/SplitControls';
 import { useAppStore } from './store/useAppStore';
-import { analyzeImage, generateDepth } from './services/aicssService';
+import { analyzeImage } from './services/aicssService';
 
 const TARGET_W = 1920;
 const TARGET_H = 1080;
@@ -90,11 +90,7 @@ function Toolbar() {
     setIsAnalyzing(true);
     setAnalysisError(null);
     try {
-      // Run /analyze and /depth in parallel — both pipelines are independent
-      const [result, depthResult] = await Promise.all([
-        analyzeImage(imageUrl, 'shot_001', dashscopeApiKey),
-        generateDepth(imageUrl),
-      ]);
+      const result = await analyzeImage(imageUrl, 'shot_001', dashscopeApiKey);
       if (result.vlmDetectedScene || result.vlmDetectedClasses?.length) {
         console.group('[VLM Detection]');
         console.log('Scene:', result.vlmDetectedScene);
@@ -103,8 +99,6 @@ function Toolbar() {
         console.groupEnd();
       }
       setAnalysisResult(result);
-      // depthModeResult drives LayerSelector + Viewer3D in imageMode='depth'
-      useAppStore.getState().setDepthModeResult(depthResult);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setAnalysisError(msg);
@@ -215,7 +209,6 @@ function Panel2D() {
   const analysisResult = useAppStore((s) => s.analysisResult);
   const croppedImageUrl = useAppStore((s) => s.croppedImageUrl);
   const originalImageBase64 = useAppStore((s) => s.originalImageBase64);
-  const originalImageUrl = useAppStore((s) => s.originalImageUrl);
   const imageWidth = useAppStore((s) => s.imageWidth);
   const imageHeight = useAppStore((s) => s.imageHeight);
   const imageMode = useAppStore((s) => s.imageMode);
@@ -224,16 +217,6 @@ function Panel2D() {
   const imageUrl = analysisResult?.depthMapUrl
     || croppedImageUrl
     || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
-
-  const originalUrl = originalImageUrl || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
-
-  // Depth-mode image URL (displayed when imageMode='depth' but analysisResult is null)
-  const depthImageUrl = useAppStore((s) => s.depthModeResult)?.depthMapUrl ?? '';
-
-  // Effective background URL for the ImageCanvas
-  const effectiveImageUrl = imageMode === 'depth'
-    ? (imageUrl || depthImageUrl)
-    : (originalUrl || imageUrl);
 
   const aspect = imageWidth && imageHeight ? imageWidth / imageHeight : 16 / 9;
   const canvasWidth = 800;
@@ -264,7 +247,7 @@ function Panel2D() {
       </div>
 
       <div className="flex-1 overflow-auto">
-        {effectiveImageUrl ? (
+        {imageUrl ? (
           <ImageCanvas width={canvasWidth || 800} height={canvasHeight || 450} />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-gray-600 bg-gray-900">
@@ -276,7 +259,7 @@ function Panel2D() {
         )}
       </div>
 
-      {(analysisResult || useAppStore((s) => s.depthModeResult) !== null) && <LayerSelector />}
+      {analysisResult && <LayerSelector />}
       {analysisResult && <SplitControls />}
     </div>
   );

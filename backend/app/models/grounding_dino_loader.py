@@ -1,9 +1,11 @@
 """
 Grounding DINO Loader.
 
+Grounding DINO performs open-set object detection — given a text prompt
+and an image, it returns bounding boxes for matching objects.
+
 We use it to get initial detections, then pass boxes to SAM2 for masks.
 """
-import os
 import torch
 import numpy as np
 from PIL import Image
@@ -45,37 +47,21 @@ class GroundingDinoModel:
         self._model = None
 
     def load(self):
-        """Load model, first from local cache then with download fallback."""
-        print(f"[GroundingDINO] Loading {self.model_name} on {self.device}...")
-        local_only = os.environ.get("AICSS_OFFLINE_ONLY", "").lower() in ("1", "true", "yes")
-
-        for local_only_flag in ([True, False] if not local_only else [True]):
-            try:
-                self._processor = AutoProcessor.from_pretrained(
-                    self.model_name,
-                    trust_remote_code=True,
-                    local_files_only=local_only_flag,
-                )
-                self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
-                    self.model_name,
-                    trust_remote_code=True,
-                    local_files_only=local_only_flag,
-                )
-                self._model.to(self.device)
-                self._model.eval()
-                mode = "local cache" if local_only_flag else "downloaded"
-                print(f"[GroundingDINO] Loaded ({mode}).")
-                return
-            except FileNotFoundError:
-                if local_only_flag:
-                    raise RuntimeError(
-                        f"Grounding DINO model '{self.model_name}' not found in local cache. "
-                        f"Run 'huggingface-cli download {self.model_name}' to cache it, "
-                        f"or unset AICSS_OFFLINE_ONLY to allow download."
-                    )
-                # First attempt was online and failed; retry offline to use cache
-                continue
-        raise RuntimeError(f"Failed to load Grounding DINO model '{self.model_name}'.")
+        """Load model from local cache only (offline-first)."""
+        print(f"[GroundingDINO] Loading {self.model_name} on {self.device} (local only)...")
+        self._processor = AutoProcessor.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+        self._model.to(self.device)
+        self._model.eval()
+        print("[GroundingDINO] Loaded.")
 
     def detect(
         self,
@@ -104,24 +90,6 @@ class GroundingDinoModel:
         text_prompt = prompt.strip()
         if not text_prompt.endswith("."):
             text_prompt += "."
-
-        # Hard cap: Grounding DINO base supports max 256 text tokens internally.
-        # If the prompt is longer, truncate to the first ~200 tokens so there is
-        # room for the BOS/EOS special tokens the tokenizer adds.
-        _MAX_TEXT_TOKENS = 200
-        text_inputs = self._processor.tokenizer(
-            text_prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=_MAX_TEXT_TOKENS,
-            add_special_tokens=False,
-        )
-        token_count = int(text_inputs["input_ids"].shape[1])
-        if token_count >= _MAX_TEXT_TOKENS:
-            print(f"[GroundingDINO] Prompt truncated to {token_count} tokens (max {_MAX_TEXT_TOKENS})")
-            text_prompt = self._processor.tokenizer.decode(
-                text_inputs["input_ids"][0], skip_special_tokens=True
-            )
 
         inputs = self._processor(
             text=text_prompt,

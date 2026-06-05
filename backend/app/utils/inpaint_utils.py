@@ -13,9 +13,7 @@ mask 语义：白=待编辑区域（生成内容），黑=保留区域
 import base64
 import io
 import json
-import tempfile
 import time
-import os
 
 import httpx
 import numpy as np
@@ -295,24 +293,21 @@ def generate_inpaint(
             f"Size mismatch: image={img_final_size}, mask={mask_final_size}"
         )
 
-    # 保存调试文件到临时目录（跨平台）
-    _debug_dir = tempfile.mkdtemp(prefix="aicss_inpaint_")
+    # 保存调试文件
     try:
         mask_decoded = Image.open(io.BytesIO(base64.b64decode(
             mask_b64.split(",", 1)[1] if "," in mask_b64 else mask_b64
         )))
-        mask_path = os.path.join(_debug_dir, "mask_for_api.png")
-        mask_decoded.save(mask_path)
+        mask_decoded.save("J:/GitProject/AI Cinematic Spatial System/backend/mask_for_api.png")
         mask_arr = np.array(mask_decoded)
-        print(f"[inpaint DEBUG] mask saved to {mask_path}, "
+        print(f"[inpaint DEBUG] mask_for_api.png: {mask_decoded.size}, "
               f"non-zero={(mask_arr > 0).mean():.4f}, mean={mask_arr.mean():.1f}")
 
         img_decoded = Image.open(io.BytesIO(base64.b64decode(
             image_b64.split(",", 1)[1] if "," in image_b64 else image_b64
         )))
-        img_path = os.path.join(_debug_dir, "img_for_api.jpg")
-        img_decoded.save(img_path)
-        print(f"[inpaint DEBUG] img saved to {img_path}")
+        img_decoded.save("J:/GitProject/AI Cinematic Spatial System/backend/img_for_api.jpg")
+        print(f"[inpaint DEBUG] img_for_api.jpg: {img_decoded.size}")
     except Exception as e:
         print(f"[inpaint DEBUG] debug save failed: {e}")
 
@@ -341,7 +336,7 @@ def generate_inpaint(
         pass
 
     # 保存原始 bytes（不经过 PIL）
-    raw_path = os.path.join(_debug_dir, "raw_result.bin")
+    raw_path = "J:/GitProject/AI Cinematic Spatial System/backend/raw_result.jpg"
     with open(raw_path, "wb") as f:
         f.write(resp.content)
     print(f"[inpaint DEBUG] raw bytes saved: {raw_path} ({len(resp.content)} bytes)")
@@ -355,7 +350,7 @@ def generate_inpaint(
         print(f"[inpaint DEBUG] info keys={list(result_img.info.keys())}")
 
         result_ext = "png" if result_img.mode == "RGBA" or resp.headers.get("Content-Type", "").endswith("png") else "jpg"
-        result_path = os.path.join(_debug_dir, f"result_from_api.{result_ext}")
+        result_path = f"J:/GitProject/AI Cinematic Spatial System/backend/result_from_api.{result_ext}"
         result_img.save(result_path, format=result_ext.upper())
         print(f"[inpaint DEBUG] PIL saved: {result_path}")
 
