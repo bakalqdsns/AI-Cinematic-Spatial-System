@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
-    reload: bool = True
+    reload: bool = False  # Windows: set True only if file-watcher permissions allow WinError 10013
 
     # Device
     device: str = "cuda"  # "cuda" or "cpu"

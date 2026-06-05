@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Viewer3D — Three.js billboard 3D space with director/camera modes
 // ─────────────────────────────────────────────────────────────────────────────
-import { useRef, useMemo, useCallback } from 'react';
+import { useRef, useMemo, useCallback, useEffect } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
@@ -23,57 +23,64 @@ interface BillboardMeshProps {
 
 function BillboardMesh({ obj, colorIndex, texture, onSelect }: BillboardMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
-  const assignments = useAppStore((s) => s.assignments);
+  const materialRef = useRef<THREE.Material | null>(null);
   const billboardOffsets = useAppStore((s) => s.billboardOffsets);
   const editMode = useAppStore((s) => s.editMode);
 
-  const color = LAYER_COLORS[colorIndex];
+  const color = LAYER_COLORS[colorIndex % LAYER_COLORS.length];
   const offset = billboardOffsets[obj.id];
 
-  // World position derived from bounding box + depth
   const posX = useMemo(() => {
-    const cx = obj.boundingBox.x + obj.boundingBox.w / 2; // 0-1 center
+    const cx = obj.boundingBox.x + obj.boundingBox.w / 2;
     return (cx - 0.5) * SCENE_WIDTH + (offset?.offsetX ?? 0);
   }, [obj.boundingBox, offset]);
 
   const posY = useMemo(() => {
-    const cy = 1 - (obj.boundingBox.y + obj.boundingBox.h / 2); // flip Y for 3D
+    const cy = 1 - (obj.boundingBox.y + obj.boundingBox.h / 2);
     return (cy - 0.5) * SCENE_HEIGHT;
   }, [obj.boundingBox]);
 
   const posZ = useMemo(() => {
-    // depth: 0 = close (near camera), higher = far
-    // Map depth to -5 (front) to +5 (back)
     const clampedDepth = Math.max(0, Math.min(obj.depth, 50));
     return (clampedDepth / 50) * 10 - 5;
   }, [obj.depth]);
 
-  // Billboard size in world units
   const sizeX = obj.boundingBox.w * SCENE_WIDTH;
   const sizeY = obj.boundingBox.h * SCENE_HEIGHT;
 
-  // Material
+  // Build material; dispose previous one on texture or color change
   const material = useMemo(() => {
-    if (texture) {
-      return new THREE.MeshBasicMaterial({
-        map: texture,
-        transparent: true,
-        side: THREE.DoubleSide,
-        opacity: 1,
-      });
+    if (materialRef.current) {
+      materialRef.current.dispose();
     }
-    return new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color),
-      transparent: true,
-      opacity: 0.5,
-      side: THREE.DoubleSide,
-    });
+    const mat = texture
+      ? new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          side: THREE.DoubleSide,
+          opacity: 1,
+        })
+      : new THREE.MeshBasicMaterial({
+          color: new THREE.Color(color),
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+        });
+    materialRef.current = mat;
+    return mat;
   }, [texture, color]);
+
+  // Dispose material on unmount
+  useEffect(() => {
+    return () => {
+      material.dispose();
+      materialRef.current = null;
+    };
+  }, []);
 
   const handleClick = useCallback(
     (e: THREE.Event) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (e as any).stopPropagation?.();
+      (e as unknown as { stopPropagation: () => void }).stopPropagation?.();
       onSelect(obj.id);
     },
     [obj.id, onSelect],
@@ -94,7 +101,12 @@ function BillboardMesh({ obj, colorIndex, texture, onSelect }: BillboardMeshProp
 // ─── Background plane ─────────────────────────────────────────────────────────
 function BackgroundPlane() {
   const analysisResult = useAppStore((s) => s.analysisResult);
-  const depthUrl = analysisResult?.depthMapUrl;
+  const depthModeResult = useAppStore((s) => s.depthModeResult);
+  const imageMode = useAppStore((s) => s.imageMode);
+
+  const depthUrl = imageMode === 'depth' && depthModeResult
+    ? depthModeResult.depthMapUrl
+    : analysisResult?.depthMapUrl;
 
   const texture = useMemo(() => {
     if (!depthUrl) return null;
@@ -103,6 +115,13 @@ function BackgroundPlane() {
     tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
   }, [depthUrl]);
+
+  // Dispose texture on unmount
+  useEffect(() => {
+    return () => {
+      texture?.dispose();
+    };
+  }, [texture]);
 
   if (!texture) return null;
 
@@ -121,40 +140,54 @@ interface SceneContentProps {
 
 function SceneContent({ onSelectObject }: SceneContentProps) {
   const analysisResult = useAppStore((s) => s.analysisResult);
+  const depthModeResult = useAppStore((s) => s.depthModeResult);
+  const imageMode = useAppStore((s) => s.imageMode);
   const assignments = useAppStore((s) => s.assignments);
   const billboardAssets = useAppStore((s) => s.billboardAssets);
-  const editMode = useAppStore((s) => s.editMode);
 
-  const objects = analysisResult?.objects ?? [];
+  const objects = imageMode === 'depth' && depthModeResult
+    ? depthModeResult.objects
+    : (analysisResult?.objects ?? []);
 
-  // Only show assigned objects
   const assignedObjects = useMemo(
     () => objects.filter((o) => assignments[o.id] !== undefined),
     [objects, assignments],
   );
 
+  // Cache textures keyed by objectId+rgbaUrl so URL changes are detected
   const textureCache = useRef<Record<string, THREE.Texture>>({});
+
+  // Cleanup all cached textures on unmount
+  useEffect(() => {
+    return () => {
+      for (const tex of Object.values(textureCache.current)) {
+        tex.dispose();
+      }
+      textureCache.current = {};
+    };
+  }, []);
 
   return (
     <>
       <BackgroundPlane />
 
-      {/* Directional light so billboards are visible */}
       <ambientLight intensity={1} />
 
-      {/* Billboards */}
       {assignedObjects.map((obj) => {
         const colorIndex = assignments[obj.id];
         const asset = billboardAssets[obj.id];
 
         let texture: THREE.Texture | undefined;
         if (asset?.rgbaUrl) {
-          if (!textureCache.current[asset.objectId]) {
+          // Invalidate cache if URL changed (e.g. after re-analysis)
+          const cacheKey = `${asset.objectId}:${asset.rgbaUrl}`;
+          if (!textureCache.current[cacheKey]) {
+            textureCache.current[cacheKey]?.dispose();
             const loader = new THREE.TextureLoader();
-            textureCache.current[asset.objectId] = loader.load(asset.rgbaUrl);
-            textureCache.current[asset.objectId].colorSpace = THREE.SRGBColorSpace;
+            textureCache.current[cacheKey] = loader.load(asset.rgbaUrl);
+            textureCache.current[cacheKey].colorSpace = THREE.SRGBColorSpace;
           }
-          texture = textureCache.current[asset.objectId];
+          texture = textureCache.current[cacheKey];
         }
 
         return (
@@ -168,7 +201,6 @@ function SceneContent({ onSelectObject }: SceneContentProps) {
         );
       })}
 
-      {/* Grid helper for spatial reference */}
       <gridHelper args={[SCENE_WIDTH, 20, '#333333', '#222222']} position={[0, -SCENE_HEIGHT / 2, 0]} />
     </>
   );
@@ -185,8 +217,6 @@ function CameraController() {
       dampingFactor={0.05}
       minDistance={5}
       maxDistance={50}
-      // In director mode, camera itself can be manipulated fully
-      // In camera mode, still can rotate/zoom but focus stays on scene
     />
   );
 }
@@ -194,6 +224,7 @@ function CameraController() {
 // ─── Main export ─────────────────────────────────────────────────────────────
 export function Viewer3D() {
   const analysisResult = useAppStore((s) => s.analysisResult);
+  const depthModeResult = useAppStore((s) => s.depthModeResult);
   const selectedObjectId = useAppStore((s) => s.selectedObjectId);
   const setSelectedObjectId = useAppStore((s) => s.setSelectedObjectId);
   const editMode = useAppStore((s) => s.editMode);
@@ -205,9 +236,8 @@ export function Viewer3D() {
     [selectedObjectId, setSelectedObjectId],
   );
 
-  const hasAssignments = analysisResult?.objects
-    ? Object.keys(useAppStore.getState().assignments).length > 0
-    : false;
+  const hasAssignments = Object.keys(useAppStore.getState().assignments).length > 0;
+  const hasResult = !!(analysisResult || depthModeResult);
 
   return (
     <div className="relative w-full h-full bg-gray-950">
@@ -221,7 +251,6 @@ export function Viewer3D() {
         <CameraController />
       </Canvas>
 
-      {/* Mode badge */}
       <div className="absolute top-3 right-3 flex items-center gap-2">
         <span
           className={`
@@ -235,15 +264,13 @@ export function Viewer3D() {
         </span>
       </div>
 
-      {/* Selected object info */}
-      {selectedObjectId && analysisResult && (
+      {selectedObjectId && hasResult && (
         <div className="absolute bottom-3 left-3 bg-black/70 text-white text-xs px-3 py-2 rounded-lg">
           Selected: {selectedObjectId}
         </div>
       )}
 
-      {/* Empty state */}
-      {!hasAssignments && analysisResult && (
+      {!hasAssignments && hasResult && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <p className="text-gray-600 text-sm">
             Assign objects to layers to see them here

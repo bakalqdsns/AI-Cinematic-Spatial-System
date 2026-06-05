@@ -13,6 +13,7 @@ interface Props {
 
 export function ImageCanvas({ width, height }: Props) {
   const analysisResult = useAppStore((s) => s.analysisResult);
+  const depthModeResult = useAppStore((s) => s.depthModeResult);
   const originalImageUrl = useAppStore((s) => s.originalImageUrl);
   const originalImageBase64 = useAppStore((s) => s.originalImageBase64);
   const imageMode = useAppStore((s) => s.imageMode);
@@ -22,10 +23,13 @@ export function ImageCanvas({ width, height }: Props) {
   const toggleObjectLayer = useAppStore((s) => s.toggleObjectLayer);
   const setSelectedObjectId = useAppStore((s) => s.setSelectedObjectId);
 
-  const objects: DetectedObject[] = analysisResult?.objects ?? [];
-
   const originalUrl = originalImageUrl || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
-  const bgUrl = imageMode === 'original' ? originalUrl : analysisResult?.depthMapUrl;
+  const bgUrl = imageMode === 'original' ? originalUrl : (analysisResult?.depthMapUrl || depthModeResult?.depthMapUrl || '');
+
+  // Switch data source by mode: depth mode → depthModeResult.objects, else → analysisResult.objects
+  const objects: DetectedObject[] = imageMode === 'depth' && depthModeResult
+    ? depthModeResult.objects
+    : (analysisResult?.objects ?? []);
 
   const handleObjectClick = useCallback(
     (obj: DetectedObject, e: React.MouseEvent) => {
@@ -159,7 +163,7 @@ export function ImageCanvas({ width, height }: Props) {
       </svg>
 
       {/* Empty state */}
-      {objects.length === 0 && !analysisResult && (
+      {objects.length === 0 && analysisResult === null && depthModeResult === null && (
         <div className="absolute inset-0 flex items-center justify-center text-gray-500">
           <span>Import an image and run analysis</span>
         </div>

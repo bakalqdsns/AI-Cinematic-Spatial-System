@@ -33,15 +33,13 @@ def compute_depth_layer_bounds(
     """
     valid = depth_m[~np.isnan(depth_m)]
     if valid.size == 0:
-        # Fallback: equal spacing from 0 to max
-        d_min, d_max = 0.0, float(depth_m.max())
-    else:
-        d_min, d_max = float(valid.min()), float(valid.max())
+        # All-NaN fallback: use safe defaults so downstream still works
+        return [(0.0, 5.0), (5.0, 15.0), (15.0, 50.0), (50.0, float("inf"))]
+    d_min, d_max = float(valid.min()), float(valid.max())
 
-    # Build percentile boundaries: 0%, 20%, 40%, 60%, 80%, 100%
-    # then use the actual pixel values at those percentiles
-    percentiles = np.linspace(0, 100, n_layers + 1)  # [0, 20, 40, 60, 80, 100]
-    thresholds = np.percentile(depth_m, percentiles)
+    # Use nanpercentile so NaN pixels are excluded from threshold computation
+    percentiles = np.linspace(0, 100, n_layers + 1)
+    thresholds = np.nanpercentile(depth_m, percentiles)
 
     # np.unique deduplicates identical thresholds (flat regions → same value for
     # multiple percentiles). If deduplication happened, all pixels have the same

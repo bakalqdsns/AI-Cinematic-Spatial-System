@@ -47,6 +47,13 @@ export interface DetectedObject {
   layer: string;
 }
 
+// A meter-based depth bucket from the backend config
+export interface DepthBucket {
+  name: string;
+  zMin: number;
+  zMax: number;
+}
+
 // Full analysis result
 export interface AicssResult {
   analysisId: string;
@@ -54,6 +61,8 @@ export interface AicssResult {
   objects: DetectedObject[];
   layers: SpatialLayer[];
   sceneGraph: SceneGraph;
+  // Meter-based depth bucket config (always present)
+  depthBuckets: DepthBucket[];
   // VLM detection (always present — computed by Qwen-VL)
   vlmDetectedClasses?: string[];
   vlmDetectedScene?: string;
@@ -105,3 +114,21 @@ export const LAYER_COLORS: string[] = [
 ];
 
 export const MAX_LAYERS = 15;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Depth Mode — K-layer slicing
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A single percentile quantile value from the backend
+export interface DepthQuantile {
+  q: number;      // 0-100
+  value: number;  // depth in meters
+}
+
+// Depth-mode API response from /api/aicss/depth
+export interface DepthModeResult {
+  depthMapUrl: string;
+  objects: DetectedObject[];
+  depthBounds: DepthQuantile[];  // 11 entries: q0, q10, ..., q100 (legacy)
+  depthBuckets: DepthBucket[];    // meter-based thresholds (uniform with /analyze)
+}

@@ -3,6 +3,7 @@ AICSS API Endpoints.
 
 All endpoints for the AICSS inference pipeline:
   POST /api/aicss/analyze       — Full pipeline (depth + segment + layers + graph)
+  GET  /api/aicss/mask/{id}     — Serve a single object mask PNG on-demand
   POST /api/aicss/depth         — Depth map only
   POST /api/aicss/segment       — Object segmentation only
   POST /api/aicss/layers        — Build spatial layers
@@ -10,8 +11,48 @@ All endpoints for the AICSS inference pipeline:
   POST /api/aicss/billboard     — Generate RGBA billboard texture
   POST /api/aicss/multiface     — Generate 6-face pseudo-3D textures
 """
+# ─── LRU mask store ──────────────────────────────────────────────────────────
+# Stores object_id -> base64 PNG, capped at _MAX_STORED.
+# Oldest entries are evicted when capacity is exceeded.
+from collections import OrderedDict
+
+_MASK_STORE: OrderedDict[str, str] = OrderedDict()
+_MAX_STORED = 200
+
+
+def _store_mask(object_id: str, data_url: str) -> None:
+    if object_id in _MASK_STORE:
+        _MASK_STORE.move_to_end(object_id)
+    _MASK_STORE[object_id] = data_url
+    while len(_MASK_STORE) > _MAX_STORED:
+        _MASK_STORE.popitem(last=False)
+
+
+# ─── URL validation ─────────────────────────────────────────────────────────
+_ALLOWED_IMAGE_SCHEMES = frozenset({"http", "https", "data"})
+
+
+def _validate_image_url(url: str) -> None:
+    """Raise ValueError if url is not a safe image source."""
+    if url.startswith("data:"):
+        return  # base64 data URI is always safe
+    if url.startswith("//"):
+        raise ValueError("Protocol-relative URLs are not allowed.")
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_IMAGE_SCHEMES:
+        raise ValueError(f"URL scheme '{parsed.scheme}' is not allowed. Use http, https, or base64.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Imports
+# ─────────────────────────────────────────────────────────────────────────────
 import asyncio
+import base64
 import io
+import sys
+import time
+import traceback
 import uuid
 import logging
 from typing import Optional
@@ -23,7 +64,7 @@ import cv2
 
 _log = logging.getLogger("aicss")
 from PIL import Image
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.config import settings, DEVICE
@@ -50,6 +91,7 @@ from app.utils.vlm_utils import vlm_detect
 from app.models.auto_prompt import get_auto_prompt, infer_scene_from_image
 from app.models.depth_layer import compute_depth_layer_bounds, assign_mask_to_layer
 from app.utils.nms_utils import nms_masks, filter_small_masks
+from app.utils.image_utils import pil_to_file
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants for AutoMask filtering
@@ -129,7 +171,8 @@ router = APIRouter()
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _load_image(url: str) -> Image.Image:
-    """Load image from URL or base64."""
+    """Load image from URL or base64. Validates URL scheme before fetching."""
+    _validate_image_url(url)
     return load_image_from_url_or_base64(url)
 
 
@@ -154,47 +197,71 @@ async def analyze(request: AnalyzeRequest):
     8. Return all results
     """
     analysis_id = f"aicss_{uuid.uuid4().hex[:8]}"
+    _log.info(f"[{analysis_id}] === Pipeline start ===")
+
+    def _t():
+        return time.perf_counter()
+
+    timings: dict[str, float] = {}
+    t_last = _t()
 
     try:
         # Step 1: Load image
-        print(f"[{analysis_id}] Loading image...")
         image = await _load_image(request.imageUrl)
         w, h = image.size
+        timings["1_image_load"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 1_image_load: {timings['1_image_load']*1000:.0f}ms  ({w}x{h})")
 
-        # Step 2: Depth estimation (starts immediately)
-        print(f"[{analysis_id}] Running depth estimation...")
+        # Step 2: Depth estimation
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
+        timings["2_depth_model"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 2_depth_model: {timings['2_depth_model']*1000:.0f}ms")
 
-        # Convert depth to base64 PNG for frontend
+        # Convert depth to PNG file for frontend
         depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
-        depth_url = pil_to_base64(depth_pil_resized)
+        depth_url = pil_to_file(depth_pil_resized, f"depth_{analysis_id}.png")
+        timings["3_depth_save"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 3_depth_save: {timings['3_depth_save']*1000:.0f}ms")
 
         # Step 2b: Determine detection prompt
-        # Two paths: VLM-enhanced (with apiKey) or fully-local (without)
         if request.apiKey:
-            print(f"[{analysis_id}] VLM detection with apiKey={request.apiKey[:12]}...")
-            detected_classes, detected_scene = await vlm_detect(image, request.apiKey)
-            effective_prompt = ".".join(detected_classes)
-            print(f"[{analysis_id}] VLM scene='{detected_scene}' classes={detected_classes}")
+            _log.debug(f"[{analysis_id}] VLM detection with apiKey=****")
+            try:
+                detected_classes, detected_scene = await vlm_detect(image, request.apiKey)
+                effective_prompt = ".".join(detected_classes)
+                timings["4a_vlm"] = _t() - t_last; t_last = _t()
+                _log.info(f"[{analysis_id}] 4a_vlm: {timings['4a_vlm']*1000:.0f}ms  scene='{detected_scene}' classes={detected_classes}")
+            except Exception as e:
+                _log.warning(f"[{analysis_id}] VLM failed ({e}), falling back to auto-prompt")
+                inferred_scene = infer_scene_from_image(image)
+                effective_prompt = get_auto_prompt(inferred_scene)
+                detected_scene = inferred_scene
+                detected_classes = [c.strip() for c in effective_prompt.split(".") if c.strip()]
+                timings["4a_vlm_fallback"] = _t() - t_last; t_last = _t()
+                _log.info(f"[{analysis_id}] 4a_vlm_fallback: {timings['4a_vlm_fallback']*1000:.0f}ms  scene='{inferred_scene}'")
         else:
-            # Fully local: infer scene type from image and use pre-defined prompt
             inferred_scene = infer_scene_from_image(image)
             effective_prompt = get_auto_prompt(inferred_scene)
             detected_scene = inferred_scene
             detected_classes = [c.strip() for c in effective_prompt.split(".") if c.strip()]
-            print(f"[{analysis_id}] Auto prompt scene='{inferred_scene}' prompt={effective_prompt[:60]}...")
+            timings["4b_auto_prompt"] = _t() - t_last; t_last = _t()
+            _log.info(f"[{analysis_id}] 4b_auto_prompt: {timings['4b_auto_prompt']*1000:.0f}ms  scene='{inferred_scene}'")
 
         # Step 3: Grounding DINO detection
-        print(f"[{analysis_id}] Running Grounding DINO with prompt: {effective_prompt[:60]}...")
         detections = model_manager.grounding_dino.detect(
             image, prompt=effective_prompt, threshold=0.3
         )
+        timings["5_dino"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 5_dino: {timings['5_dino']*1000:.0f}ms  boxes={len(detections)}")
 
         if not detections:
-            print(f"[{analysis_id}] No DINO detections. Falling back to SAM2 auto masks only.")
+            _log.info(f"[{analysis_id}] No DINO detections — falling back to SAM2 auto masks only")
             auto_masks = model_manager.sam2.predict_automatic_masks(image)
+            timings["5b_auto_masks"] = _t() - t_last; t_last = _t()
+            _log.info(f"[{analysis_id}] 5b_auto_masks: {timings['5b_auto_masks']*1000:.0f}ms  found={len(auto_masks)}")
+
             objects = _build_objects_from_auto_masks(
                 auto_masks, depth_m, w, h, analysis_id,
                 image_area=w * h,
@@ -219,48 +286,66 @@ async def analyze(request: AnalyzeRequest):
         masks_and_scores = model_manager.sam2.predict_masks_from_boxes(
             image_np, boxes, scores
         )
+        timings["6_sam2_from_boxes"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 6_sam2_from_boxes: {timings['6_sam2_from_boxes']*1000:.0f}ms  masks={len(masks_and_scores)}")
 
         # Edge refinement: snap mask contours to Canny edges
-        print(f"[{analysis_id}] Refining mask edges...")
         masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
+        timings["7_edge_refine"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 7_edge_refine: {timings['7_edge_refine']*1000:.0f}ms")
 
         # Filter out tiny masks
         masks_and_scores = filter_small_masks(masks_and_scores, min_area=500)
 
         # Step 3b: SAM2 automatic masks for coverage gap filling
-        # Run alongside depth (already done) — adds ~1-2s but fills DINO gaps
-        print(f"[{analysis_id}] Running SAM2 automatic masks for coverage fill...")
         auto_masks = model_manager.sam2.predict_automatic_masks(image)
-        print(f"[{analysis_id}] SAM2 auto found {len(auto_masks)} masks")
+        timings["8_sam2_auto"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 8_sam2_auto: {timings['8_sam2_auto']*1000:.0f}ms  found={len(auto_masks)}")
 
         # Build SpatialObject list from DINO+SAM2 detections
         dino_objects = _build_objects_from_dino_detections(
             masks_and_scores, detections, depth_m, w, h, analysis_id,
         )
+        timings["9_build_dino_objects"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 9_build_dino_objects: {timings['9_build_dino_objects']*1000:.0f}ms  count={len(dino_objects)}")
 
         # Build SpatialObject list from SAM2 auto masks (pre-filtered + area-limited)
         auto_objects = _build_objects_from_auto_masks(
             auto_masks, depth_m, w, h, analysis_id,
             image_area=w * h,
         )
+        timings["10_build_auto_objects"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 10_build_auto_objects: {timings['10_build_auto_objects']*1000:.0f}ms  count={len(auto_objects)}")
 
         # Merge: prefer DINO detections (they have semantic labels).
-        # Auto masks with IoU > 0.6 against any DINO box are discarded (covered).
         merged_objects = _merge_dino_and_auto_objects(
             dino_objects, auto_objects, iou_threshold=AUTO_IOU_THRESHOLD,
         )
-
-        print(f"[{analysis_id}] Final object count: {len(merged_objects)} "
-              f"(DINO={len(dino_objects)}, auto={len(auto_objects)}, "
-              f"merged={len(merged_objects)})")
+        timings["11_merge"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 11_merge: {timings['11_merge']*1000:.0f}ms  final={len(merged_objects)} (DINO={len(dino_objects)}, auto={len(auto_objects)})")
 
         # Step 4: Build spatial layers
         layers = build_spatial_layers_from_objects(merged_objects, depth_m, w, h)
+        timings["12_layers"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 12_layers: {timings['12_layers']*1000:.0f}ms")
 
         # Step 5: Build scene graph
         scene_graph = build_scene_graph_from_objects(request.shotId, merged_objects)
+        timings["13_scene_graph"] = _t() - t_last; t_last = _t()
+        _log.info(f"[{analysis_id}] 13_scene_graph: {timings['13_scene_graph']*1000:.0f}ms  nodes={len(scene_graph.get('nodes', []))}")
 
-        return {
+        # Meter-based layer thresholds (foreground/midground/background/sky in meters)
+        depth_buckets_response = [
+            {"name": name, "zMin": float(z_min), "zMax": float(z_max) if z_max != float("inf") else 9999.0}
+            for z_min, z_max, name in settings.depth_buckets
+        ]
+
+        total_ms = sum(timings.values()) * 1000
+        _log.info(f"[{analysis_id}] === Pipeline done: {total_ms:.0f}ms total ===")
+        for name, sec in timings.items():
+            _log.info(f"[{analysis_id}]   {name}: {sec*1000:.0f}ms ({sec/total_ms*100:.0f}%)")
+
+        response = {
             "analysisId": analysis_id,
             "depthMapUrl": depth_url,
             "objects": merged_objects,
@@ -268,11 +353,12 @@ async def analyze(request: AnalyzeRequest):
             "sceneGraph": scene_graph,
             "vlmDetectedClasses": detected_classes,
             "vlmDetectedScene": detected_scene,
+            "depthBuckets": depth_buckets_response,
         }
+        return response
 
     except Exception as e:
-        print(f"[{analysis_id}] Error: {e}")
-        import traceback
+        _log.error(f"[{analysis_id}] Error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -289,20 +375,22 @@ def _build_objects_from_dino_detections(
     for i, (mask, score) in enumerate(masks_and_scores):
         det = detections[i]
         masked_depth = np.where(mask, depth_m, np.nan)
-        obj_depth = float(np.nanmedian(masked_depth))
+        raw_median = float(np.nanmedian(masked_depth))
+        obj_depth = raw_median if not np.isnan(raw_median) else (float(np.nanmean(masked_depth)) if not np.isnan(float(np.nanmean(masked_depth))) else 0.0)
         layer_name, _, _ = assign_to_depth_layer(obj_depth)
 
         mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-        mask_url = pil_to_base64(mask_img)
+        obj_id = det.object_id
+        _store_mask(obj_id, pil_to_base64(mask_img))
         norm_bbox = bbox_to_xywh(det.box, w, h)
         polygon = extract_polygon_from_mask(mask)
 
         objects.append({
-            "id": det.object_id,
+            "id": obj_id,
             "classLabel": det.label,
             "depth": round(obj_depth, 2),
             "boundingBox": norm_bbox,
-            "maskDataUrl": mask_url,
+            "maskDataUrl": "",
             "polygon": polygon,
             "layer": layer_name,
         })
@@ -345,11 +433,13 @@ def _build_objects_from_auto_masks(
         mask = m["segmentation"]
         bbox = m.get("bbox", [0, 0, 0, 0])
         masked_depth = np.where(mask, depth_m, np.nan)
-        obj_depth = float(np.nanmedian(masked_depth))
+        raw_median = float(np.nanmedian(masked_depth))
+        obj_depth = raw_median if not np.isnan(raw_median) else (float(np.nanmean(masked_depth)) if not np.isnan(float(np.nanmean(masked_depth))) else 0.0)
         layer_name, _, _ = assign_to_depth_layer(obj_depth)
 
         mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-        mask_url = pil_to_base64(mask_img)
+        obj_id = f"auto_{analysis_id}_{counter}"
+        _store_mask(obj_id, pil_to_base64(mask_img))
 
         norm_bbox = {
             "x": float(bbox[0] / w),
@@ -360,11 +450,11 @@ def _build_objects_from_auto_masks(
         polygon = extract_polygon_from_mask(mask)
 
         objects.append({
-            "id": f"auto_{analysis_id}_{counter}",
+            "id": obj_id,
             "classLabel": f"object_{counter}",
             "depth": round(obj_depth, 2),
             "boundingBox": norm_bbox,
-            "maskDataUrl": mask_url,
+            "maskDataUrl": "",
             "polygon": polygon,
             "layer": layer_name,
         })
@@ -432,16 +522,130 @@ def _bbox_iou(a: dict, b: dict) -> float:
 
 @router.post("/depth")
 async def generate_depth(request: DepthRequest):
-    """Generate a depth map from an image."""
+    """
+    Generate a depth map + depth-based segmentation from an image.
+
+    Pipeline (no DINO, no VLM):
+      1. DepthAnything V2 → depth map
+      2. SAM2 automatic masks (full coverage, no detection prompt)
+      3. Per-mask median depth → assign to depth layer
+      4. Return depth map + objects + percentile depth bounds for client-side
+         K-layer slicing
+
+    Response:
+      - depthMapUrl: base64 PNG (full-resolution, 0-1 normalized → gray)
+      - objects: same shape as analyze() objects[], with classLabel = depth_obj_N
+      - depthBounds: 11 quantiles (q0..q100) in meters — for client-side
+        K-layer slicing
+    """
     try:
         image = await _load_image(request.imageUrl)
         w, h = image.size
+        analysis_id = f"depth_{uuid.uuid4().hex[:8]}"
+
+        # 1. DepthAnything V2
         depth_norm = model_manager.depth_model.predict(image)
+        depth_m = depth_to_meters(depth_norm, scale=50.0)
+
+        # 2. Depth map PNG (served as static file, not base64)
         depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
-        return {"depthMapUrl": pil_to_base64(depth_pil_resized)}
+        depth_url = pil_to_file(depth_pil_resized, f"depth_{analysis_id}.png")
+
+        # 3. SAM2 automatic masks
+        auto_masks = model_manager.sam2.predict_automatic_masks(image)
+        image_area = w * h
+
+        # 4. Build objects (same shape as analyze(), no DINO/VLM)
+        objects = _build_depth_objects_from_auto_masks(
+            auto_masks, depth_m, w, h, analysis_id, image_area,
+        )
+
+        # 5. Depth percentile bounds (q0, q10, q20, ..., q100) — 11 values
+        depth_values = depth_m.flatten()
+        depth_values = depth_values[~np.isnan(depth_values)]
+        depth_bounds = [
+            {"q": q, "value": float(np.percentile(depth_values, q))}
+            for q in range(0, 101, 10)
+        ]
+
+        depth_buckets_response = [
+            {"name": name, "zMin": float(z_min), "zMax": float(z_max) if z_max != float("inf") else 9999.0}
+            for z_min, z_max, name in settings.depth_buckets
+        ]
+
+        return {
+            "depthMapUrl": depth_url,
+            "objects": objects,
+            "depthBounds": depth_bounds,
+            "depthBuckets": depth_buckets_response,
+        }
     except Exception as e:
+        _log.error(f"[{analysis_id}] Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _build_depth_objects_from_auto_masks(
+    auto_masks: list[dict],
+    depth_m: np.ndarray,
+    w: int, h: int,
+    analysis_id: str,
+    image_area: int,
+) -> list[dict]:
+    """
+    Build SpatialObject dicts from SAM2 automatic masks for depth mode.
+    Same as _build_objects_from_auto_masks but uses depth-layer naming
+    (no DINO class labels) and assigns layer purely by depth.
+    """
+    min_area = max(500, int(image_area * MIN_AREA_RATIO))
+
+    filtered = []
+    for m in auto_masks:
+        mask = m["segmentation"]
+        area = int(mask.sum())
+        if area < min_area:
+            continue
+        filtered.append((area, m))
+
+    filtered.sort(key=lambda x: x[0], reverse=True)
+    filtered = filtered[:MAX_AUTOMASKS]
+
+    objects = []
+    counter = 1
+    for area, m in filtered:
+        mask = m["segmentation"]
+        bbox = m.get("bbox", [0, 0, 0, 0])
+        masked_depth = np.where(mask, depth_m, np.nan)
+        raw_median = float(np.nanmedian(masked_depth))
+        obj_depth = raw_median if not np.isnan(raw_median) else (
+            float(np.nanmean(masked_depth)) if not np.isnan(float(np.nanmean(masked_depth))) else 0.0
+        )
+        layer_name, _, _ = assign_to_depth_layer(obj_depth)
+
+        mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+        obj_id = f"depth_obj_{analysis_id}_{counter}"
+        _store_mask(obj_id, pil_to_base64(mask_img))
+
+        norm_bbox = {
+            "x": float(bbox[0] / w),
+            "y": float(bbox[1] / h),
+            "w": float((bbox[2] - bbox[0]) / w),
+            "h": float((bbox[3] - bbox[1]) / h),
+        }
+        polygon = extract_polygon_from_mask(mask)
+
+        objects.append({
+            "id": obj_id,
+            "classLabel": f"depth_obj_{counter}",
+            "depth": round(obj_depth, 2),
+            "boundingBox": norm_bbox,
+            "maskDataUrl": "",
+            "polygon": polygon,
+            "layer": layer_name,
+        })
+        counter += 1
+
+    return objects
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -462,13 +666,17 @@ async def segment_objects(request: SegmentRequest):
 
         # Determine prompt: VLM-enhanced or local auto-prompt
         if request.apiKey:
-            print(f"[segment] Running VLM detection with apiKey={request.apiKey[:12]}...")
-            import asyncio
-            detected_classes, detected_scene = await asyncio.create_task(
-                vlm_detect(image, request.apiKey)
-            )
-            prompt = ".".join(detected_classes)
-            print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
+            _log.debug(f"[segment] VLM detection with apiKey=****")
+            try:
+                detected_classes, detected_scene = await vlm_detect(image, request.apiKey)
+                prompt = ".".join(detected_classes)
+                print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
+            except Exception as e:
+                _log.warning(f"[segment] VLM failed ({e}), falling back to auto-prompt")
+                inferred_scene = infer_scene_from_image(image)
+                prompt = get_auto_prompt(inferred_scene)
+                detected_classes = [c.strip() for c in prompt.split(".") if c.strip()]
+                detected_scene = inferred_scene
         else:
             inferred_scene = infer_scene_from_image(image)
             prompt = get_auto_prompt(inferred_scene)
@@ -491,21 +699,23 @@ async def segment_objects(request: SegmentRequest):
         for i, (mask, _) in enumerate(masks_and_scores):
             det = detections[i]
             masked_depth = np.where(mask, depth_m, np.nan)
-            obj_depth = float(np.nanmedian(masked_depth))
+            raw_median = float(np.nanmedian(masked_depth))
+            obj_depth = raw_median if not np.isnan(raw_median) else (float(np.nanmean(masked_depth)) if not np.isnan(float(np.nanmean(masked_depth))) else 0.0)
             layer_name, _, _ = assign_to_depth_layer(obj_depth)
 
             mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-            mask_url = pil_to_base64(mask_img)
+            obj_id = det.object_id
+            _store_mask(obj_id, pil_to_base64(mask_img))
             norm_bbox = bbox_to_xywh(det.box, w, h)
 
             polygon = extract_polygon_from_mask(mask)
 
             objects.append({
-                "id": det.object_id,
+                "id": obj_id,
                 "classLabel": det.label,
                 "depth": round(obj_depth, 2),
                 "boundingBox": norm_bbox,
-                "maskDataUrl": mask_url,
+                "maskDataUrl": "",
                 "polygon": polygon,
                 "layer": layer_name,
             })
@@ -720,7 +930,23 @@ async def inpaint_image(request: InpaintRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[inpaint] Error: {e}\n{tb}")
+        _log.error(f"[inpaint] Error: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET /api/aicss/mask/{object_id} — Serve a single mask PNG on-demand
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/mask/{object_id}")
+async def get_object_mask(object_id: str):
+    """
+    Return a single object mask as a PNG image.
+
+    Masks are stored in-memory when /analyze or /segment builds objects.
+    If not found, returns 404.
+    """
+    if object_id not in _MASK_STORE:
+        raise HTTPException(status_code=404, detail=f"Mask not found for '{object_id}'")
+    raw = base64.b64decode(_MASK_STORE[object_id])
+    return Response(content=raw, media_type="image/png")

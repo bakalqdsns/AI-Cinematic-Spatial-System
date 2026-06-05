@@ -12,6 +12,7 @@ import type {
   BillboardAsset,
   BillboardOffset,
   CropParams,
+  DepthModeResult,
 } from '../types';
 
 const MAX_HISTORY = 50;
@@ -50,6 +51,9 @@ interface AppState {
 
   // Image view mode: 'depth' | 'original'
   imageMode: 'depth' | 'original';
+
+  // Depth mode result (from /api/aicss/depth — SAM2 auto masks, no DINO)
+  depthModeResult: DepthModeResult | null;
 
   // Inpaint
   inpaintPreviewUrl: string | null;
@@ -91,6 +95,9 @@ interface AppState {
   setEditMode: (mode: EditMode) => void;
   setImageMode: (mode: 'depth' | 'original') => void;
 
+  // Depth mode
+  setDepthModeResult: (result: DepthModeResult | null) => void;
+
   // Inpaint
   setInpaintPreview: (url: string | null) => void;
   setInpaintLoading: (v: boolean) => void;
@@ -127,6 +134,7 @@ const initialState = {
   selectedObjectId: null as string | null,
   editMode: 'director' as EditMode,
   imageMode: 'depth' as 'depth' | 'original',
+  depthModeResult: null as DepthModeResult | null,
   inpaintPreviewUrl: null as string | null,
   inpaintLoading: false,
   inpaintError: null as string | null,
@@ -155,15 +163,28 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   assignObjectToLayer: (objectId, colorIndex) => {
     set((state) => ({
+      past: [
+        ...state.past.slice(-MAX_HISTORY + 1),
+        { assignments: { ...state.assignments }, timestamp: Date.now() },
+      ],
+      future: [],
       assignments: { ...state.assignments, [objectId]: colorIndex },
     }));
   },
 
   unassignObject: (objectId) => {
     set((state) => {
-      const next = { ...state.assignments };
-      delete next[objectId];
-      return { assignments: next };
+      if (state.assignments[objectId] === undefined) return {};
+      return {
+        past: [
+          ...state.past.slice(-MAX_HISTORY + 1),
+          { assignments: { ...state.assignments }, timestamp: Date.now() },
+        ],
+        future: [],
+        assignments: Object.fromEntries(
+          Object.entries(state.assignments).filter(([k]) => k !== objectId),
+        ),
+      };
     });
   },
 
@@ -234,6 +255,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setEditMode: (mode) => set({ editMode: mode }),
 
   setImageMode: (mode) => set({ imageMode: mode }),
+
+  setDepthModeResult: (result) => set({ depthModeResult: result }),
 
   setInpaintPreview: (url) => set({ inpaintPreviewUrl: url }),
 

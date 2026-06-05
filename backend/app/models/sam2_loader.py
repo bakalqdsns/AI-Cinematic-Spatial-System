@@ -45,8 +45,8 @@ class SAM2Model:
             "checkpoint": "sam2.1_l.pt",
         },
         "vit_h": {
-            "model_cfg": "sam2.1_hiera_l.yaml",
-            "checkpoint": "sam2.1_l.pt",
+            "model_cfg": "sam2.1_hiera_h.yaml",
+            "checkpoint": "sam2.1_h.pt",
         },
         "vit_b": {
             "model_cfg": "sam2.1_hiera_b+.yaml",
@@ -88,7 +88,6 @@ class SAM2Model:
         from ultralytics import SAM
 
         # Map config names to ultralytics model names
-        # "vit_l" / "vit_h" -> "sam2.1_l.pt" (large), "vit_b" -> "sam2.1_b.pt" (base), etc.
         model_map = {
             "vit_l": "sam2.1_l.pt",
             "vit_h": "sam2.1_l.pt",
@@ -142,6 +141,7 @@ class SAM2Model:
                 device=self.device,
             )
             self._predictor = SAM2ImagePredictor(sam2_model)
+            self._automatic_generator = SAM2AutomaticMaskGenerator(sam2_model)
             print(f"[SAM2] Loaded standalone: {ckpt_path}")
         except Exception as e:
             raise RuntimeError(f"Failed to build SAM2 with checkpoint {ckpt_path}: {e}") from e
