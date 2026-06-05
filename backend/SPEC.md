@@ -1,124 +1,172 @@
 # AICSS Backend — Specification
 
+This file is a lightweight backend reference. The runtime source of truth is:
+
+- `backend/app/config.py`
+- `backend/app/endpoints.py`
+- `backend/app/main.py`
+
+If this file conflicts with code, trust the code.
+
+---
+
 ## Overview
 
-Python FastAPI backend serving the AICSS (AI Cinematic Spatial System) inference pipeline.
-Receives an image URL from the CineGen frontend, runs depth estimation + semantic segmentation,
-and returns structured spatial data (depth maps, object masks, spatial layers, scene graph).
+AICSS backend is a FastAPI inference service that accepts image payloads from the frontend, runs depth estimation and segmentation workflows, derives spatial metadata, and returns image-derived scene structures for the UI.
 
-## Architecture
+---
 
-```
-Frontend (CineGen)  →  FastAPI  →  PyTorch Models
-                                      ├── DepthAnything V2  (depth estimation)
-                                      ├── Grounding DINO   (object detection)
-                                      └── SAM2            (instance segmentation)
-```
+## Runtime Architecture
 
-## API Endpoints
-
-All endpoints accept JSON with `imageUrl` (URL string) unless noted.
-All responses are JSON.
-
-### POST /api/aicss/analyze
-Full pipeline — runs all steps and returns complete AicssData.
-
-**Request:**
-```json
-{ "imageUrl": "https://...", "shotId": "shot_001" }
+```text
+Frontend → FastAPI → Model Manager
+                    ├── DepthAnything V2
+                    ├── Grounding DINO
+                    ├── SAM2
+                    ├── DashScope VLM
+                    └── DashScope Inpaint
 ```
 
-**Response:**
+---
+
+## Effective API Endpoints
+
+All endpoints are mounted under `/api/aicss` unless noted.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/analyze` | full pipeline |
+| `POST` | `/depth` | depth-only generation |
+| `POST` | `/segment` | segmentation-only generation |
+| `POST` | `/layers` | rebuild spatial layers |
+| `POST` | `/scene-graph` | rebuild scene graph |
+| `POST` | `/billboard` | RGBA billboard cutout |
+| `POST` | `/multiface` | six-face pseudo-3D texture generation |
+| `POST` | `/inpaint` | masked image editing via DashScope |
+| `GET` | `/health` | service health |
+| `GET` | `/` | root service metadata |
+
+---
+
+## Request Notes
+
+### `POST /api/aicss/analyze`
+
+Current request model:
+
 ```json
 {
-  "analysisId": "aicss_xxx",
-  "depthMapUrl": "data:image/png;base64,...",
-  "layers": [ { "id": "...", "name": "foreground", "zMin": 0, "zMax": 5, "objects": [...] } ],
-  "objects": [ { "id": "...", "classLabel": "person", "depth": 3.5, "boundingBox": {...}, "maskDataUrl": "..." } ],
-  "sceneGraph": { "shotId": "...", "nodes": [...] }
+  "imageUrl": "data:image/png;base64,...",
+  "shotId": "shot_001",
+  "apiKey": "your_dashscope_key"
 }
 ```
 
-### POST /api/aicss/depth
-Depth map generation via DepthAnything V2.
+Notes:
+- `apiKey` is required by the current request schema.
+- the response can include `vlmDetectedClasses` and `vlmDetectedScene`.
 
-**Request:** `{ "imageUrl": "https://..." }`
-**Response:** `{ "depthMapUrl": "data:image/png;base64,..." }`
+### `POST /api/aicss/segment`
 
-### POST /api/aicss/segment
-Object segmentation via Grounding DINO + SAM2.
+Current request model:
 
-**Request:** `{ "imageUrl": "https://..." }`
-**Response:** `{ "objects": [ { "id": "...", "classLabel": "person", "depth": 3.5, "boundingBox": {...} } ] }`
+```json
+{
+  "imageUrl": "data:image/png;base64,...",
+  "apiKey": "your_dashscope_key"
+}
+```
 
-### POST /api/aicss/layers
-Build spatial layers from depth map + objects.
+### `POST /api/aicss/layers`
 
-**Request:** `{ "depthMap": "data:image/png;base64,...", "objects": [...], "imageWidth": 1024, "imageHeight": 768 }`
-**Response:** `{ "layers": [...] }`
+Current request model:
 
-### POST /api/aicss/scene-graph
-Build spatial relationship graph from objects.
+```json
+{
+  "depthMap": "data:image/png;base64,...",
+  "objects": [],
+  "imageWidth": 1024,
+  "imageHeight": 768
+}
+```
 
-**Request:** `{ "shotId": "...", "objects": [...] }`
-**Response:** `{ "sceneGraph": { "shotId": "...", "nodes": [...] } }`
+### `POST /api/aicss/inpaint`
 
-### POST /api/aicss/billboard
-Generate RGBA billboard texture (cutout) for an object.
+Current request model:
 
-**Request:** `{ "imageUrl": "...", "objectId": "...", "boundingBox": {...} }`
-**Response:** `{ "billboardUrl": "data:image/png;base64,..." }`
+```json
+{
+  "imageUrl": "data:image/png;base64,...",
+  "maskDataUrl": "data:image/png;base64,...",
+  "prompt": "remove the object and reconstruct the background",
+  "apiKey": "your_dashscope_key"
+}
+```
 
-### POST /api/aicss/multiface
-Generate 6-face pseudo-3D textures for an object.
+Notes:
+- `apiKey` is optional only if `AICSS_DASHSCOPE_API_KEY` is configured on the backend.
 
-**Request:** `{ "imageUrl": "...", "objectId": "...", "boundingBox": {...} }`
-**Response:** `{ "faces": { "front": "...", "back": "...", "left": "...", "right": "...", "top": "...", "bottom": "..." } }`
+---
 
 ## Models
 
-| Model | Purpose | Size | Source |
-|-------|---------|------|--------|
-| DepthAnything V2 (ViT-L) | Depth estimation | ~600MB | HuggingFace: depth-anything/.. |
-| Grounding DINO (base) | Object detection | ~400MB | HuggingFace: IDEA-Research/grounding-dino-base |
-| SAM2 (sam2.1_b VIT_H) | Instance segmentation | ~2.5GB | Meta SAM2 |
+| Model | Purpose | Runtime default |
+|---|---|---|
+| `depth-anything/Depth-Anything-V2-Large-hf` | depth estimation | enabled |
+| `IDEA-Research/grounding-dino-base` | object detection | enabled |
+| `SAM2` | instance segmentation | `AICSS_SAM2_MODEL_SIZE=vit_l` |
+| `Qwen-VL` via DashScope | scene and class detection | used during analyze/segment flows |
+| `wanx2.1-imageedit` via DashScope | masked inpaint | used for `/inpaint` |
+
+---
 
 ## Depth Buckets
 
-| Layer | Z range |
-|-------|---------|
-| foreground | 0 – 5m |
-| midground | 5 – 15m |
-| background | 15 – 50m |
-| sky | 50m+ |
+Current defaults from `app/config.py`:
 
-## Spatial Relations
+| Layer | Range |
+|---|---|
+| foreground | 0–5 |
+| midground | 5–15 |
+| background | 15–50 |
+| sky | 50+ |
 
-Objects are related by: `leftOf`, `rightOf`, `inFrontOf`, `behind`, `above`, `below`
-Derived from bounding box overlap and depth ordering.
-
-## Tech Stack
-
-- **Runtime**: Python 3.10+, CUDA 12.x
-- **Web**: FastAPI + Uvicorn
-- **ML**: PyTorch 2.x, torchvision, transformers
-- **Segmentation**: Ultralytics SAM2, Grounding DINO
-- **Image**: Pillow, OpenCV, rembg (optional background removal)
-
-## Running
-
-```bash
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+---
 
 ## Environment Variables
 
-```
-HF_TOKEN=hf_xxx              # HuggingFace token (for gated models)
-AICSS_PORT=8000             # Server port
-AICSS_HOST=0.0.0.0          # Server host
-DEVICE=cuda                  # cuda or cpu
-SAM2_MODEL_SIZE=vit_h       # vit_h or vit_b
-DEPTH_MODEL=depth-anything-v2-vitl
-```
+The backend uses the `AICSS_` prefix.
+
+| Variable | Default |
+|---|---|
+| `AICSS_HOST` | `0.0.0.0` |
+| `AICSS_PORT` | `8000` |
+| `AICSS_RELOAD` | `true` |
+| `AICSS_DEVICE` | `cuda` |
+| `AICSS_HF_TOKEN` | empty |
+| `AICSS_DEPTH_MODEL` | `depth-anything/Depth-Anything-V2-Large-hf` |
+| `AICSS_GROUNDING_DINO_MODEL` | `IDEA-Research/grounding-dino-base` |
+| `AICSS_SAM2_MODEL_SIZE` | `vit_l` |
+| `AICSS_SEGMENTATION_PROMPT` | built-in fallback string |
+| `AICSS_DASHSCOPE_API_KEY` | empty |
+| `AICSS_DASHSCOPE_MODEL` | `wanx2.1-imageedit` |
+| `AICSS_DASHSCOPE_FUNCTION` | `description_edit_with_mask` |
+| `AICSS_INPAINT_TIMEOUT` | `120` |
+
+---
+
+## Operational Notes
+
+- startup preloads models through FastAPI lifespan
+- logs are written to `backend/logs/aicss.log`
+- CORS is open to all origins for development
+- `python run.py` is the recommended launcher
+
+---
+
+## Known Gaps
+
+- this file is intentionally concise and may lag behind implementation unless maintained together with code
+- no deployment or Docker spec is included here
+- no automated test contract is documented here
+- `app/utils/inpaint_utils.py` contains hardcoded debug paths that should be cleaned up

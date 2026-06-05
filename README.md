@@ -1,308 +1,287 @@
 # AI Cinematic Spatial System (AICSS)
 
-> Convert a 2D cinematic image into a depth-layered, pseudo-3D spatial scene — objects segmented by edge-aware masks, arranged in Z-depth layers, rendered as interactive billboards in a Three.js viewport.
+> Convert a 2D image into a depth-layered pseudo-3D scene, segment foreground objects, generate transparent billboard textures, and preview the result in an interactive Three.js workspace.
 
 **[中文版](./README-zh.md)**
 
 ---
 
+## What This Project Does
+
+AICSS is a full-stack toolchain for turning a single image into a layered spatial composition:
+
+- the frontend imports and normalizes an image to a 1920×1080 working canvas
+- the backend estimates depth, detects objects, segments masks, and derives spatial layers
+- the frontend lets users inspect masks, assign color layers, generate billboard cutouts, and preview the result in 3D
+- optional DashScope-powered VLM detection and inpaint flows improve object understanding and patch generation
+
+This repository contains both the browser UI and the inference backend.
+
+---
+
 ## Architecture
 
-```
-User uploads image
-        │
-        ▼
+```text
+User imports image
+      │
+      ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Frontend  (React + Vite + Tailwind)                        │
+│ Frontend (React + Vite + Zustand + Three.js)                │
 │                                                              │
-│  Toolbar  →  ImageCanvas  →  LayerSelector  →  SplitControls│
-│                           (2D SVG)          (palette)        │
+│ Toolbar → ImageCanvas → LayerSelector → SplitControls       │
+│                2D overlay        layer assignment            │
 │                                                              │
-│  Viewer3D (Three.js)  ←  billboard RGBA textures            │
+│ Viewer3D renders generated RGBA billboard textures          │
 └──────────────────────────────────────────────────────────────┘
-        │  POST /api/aicss/analyze
-        ▼
+      │
+      │ POST /api/aicss/analyze
+      ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Backend  (FastAPI + Uvicorn)                               │
+│ Backend (FastAPI + PyTorch)                                  │
 │                                                              │
-│  /analyze          — full pipeline                          │
-│  /billboard        — polygon-cropped RGBA cutout            │
-│  /multiface        — 6-face pseudo-3D textures              │
+│ analyze      full pipeline                                   │
+│ billboard    polygon-aware RGBA cutout                       │
+│ multiface    6-face pseudo-3D textures                       │
+│ inpaint      masked image edit via DashScope                 │
 └──────────────────────────────────────────────────────────────┘
-        │
-        ▼
+      │
+      ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  ML Models (PyTorch, loaded once at startup)                 │
+│ Models and post-processing                                   │
 │                                                              │
-│  DepthAnything V2-Large    ← depth map                      │
-│  Grounding DINO Base       ← detection boxes + scores        │
-│  SAM2.1 ViT-L              ← instance masks                 │
-│                                                              │
-│  Post-processing: Canny edge refinement → polygon contours    │
+│ DepthAnything V2      depth estimation                       │
+│ Grounding DINO        object detection                       │
+│ SAM2                  instance masks                         │
+│ Qwen-VL               scene/category hints                   │
+│ OpenCV post-process   contour refinement                     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## Interface Preview
+---
 
-![AICSS UI — 2D/3D split view](view.png)
+## Repository Layout
 
-## Directory Structure
-
-```
+```text
 .
-├── frontend/                    # React 19 + TypeScript + Vite + Tailwind
+├── frontend/                     React 19 + TypeScript + Vite app
 │   ├── src/
-│   │   ├── App.tsx              # Root layout: Toolbar + 2D/3D split panes
-│   │   ├── main.tsx             # React mount
-│   │   ├── index.css            # Global styles (Tailwind base)
-│   │   ├── components/
-│   │   │   ├── ImageCanvas.tsx  # 2D SVG canvas — polygon/rect masks, layer colors
-│   │   │   ├── LayerSelector.tsx# 15-color swatch palette for depth layers
-│   │   │   ├── SplitControls.tsx# "Split Image" → generate billboard RGBA textures
-│   │   │   └── Viewer3D.tsx     # Three.js canvas — billboards in Z-depth 3D space
-│   │   ├── services/
-│   │   │   └── aicssService.ts  # Axios client for all backend endpoints
-│   │   ├── store/
-│   │   │   └── useAppStore.ts   # Zustand global store
-│   │   └── types/
-│   │       └── index.ts         # TypeScript interfaces
-│   ├── dist/                    # Production build (gitignored)
-│   ├── node_modules/            # (gitignored)
+│   │   ├── App.tsx              root layout and import flow
+│   │   ├── components/          2D/3D UI components
+│   │   ├── services/            backend API client
+│   │   ├── store/               Zustand state store
+│   │   ├── types/               shared frontend types
+│   │   └── utils/               IndexedDB persistence and helpers
+│   ├── .env.example             frontend environment template
 │   ├── package.json
-│   ├── vite.config.ts
 │   └── README.md
 │
-├── backend/                     # Python 3.10+ · FastAPI · PyTorch
+├── backend/                      FastAPI inference service
 │   ├── app/
-│   │   ├── main.py              # FastAPI app, CORS, lifespan (model loading)
-│   │   ├── config.py            # All settings via AICSS_* env vars
-│   │   ├── endpoints.py         # All REST endpoints (analyze, billboard, ...)
-│   │   ├── models/
-│   │   │   ├── model_manager.py # Singleton: loads all 3 ML models at startup
-│   │   │   ├── depth_loader.py  # DepthAnything V2 wrapper
-│   │   │   ├── grounding_dino_loader.py  # Grounding DINO wrapper
-│   │   │   └── sam2_loader.py   # SAM2 + refine_mask_edges + extract_polygon_from_mask
-│   │   └── utils/
-│   │       ├── image_utils.py   # base64/PIL helpers, depth scaling, RGBA builder
-│   │       └── spatial_utils.py # Layer bucketing, scene graph builder
-│   ├── thirdparty/              # Local SAM2 builds (gitignored)
-│   ├── sam2.1_l.pt             # SAM2.1 ViT-L checkpoint (gitignored, ~449 MB)
+│   │   ├── main.py              app entry, CORS, lifespan
+│   │   ├── config.py            all AICSS_* settings
+│   │   ├── endpoints.py         REST endpoints and schemas
+│   │   ├── models/              model loaders and manager
+│   │   └── utils/               image, spatial, VLM, inpaint helpers
 │   ├── requirements.txt
-│   ├── run.py                   # `python run.py` launcher
+│   ├── run.py                   recommended backend launcher
 │   ├── README.md
-│   └── SPEC.md
+│   └── SPEC.md                  older backend spec, currently not fully aligned
 │
-├── .gitignore                   # Covers frontend dist/node_modules, backend .venv/sam2.1_*.pt
-└── README.md                    # (this file)
+├── README.md                     this file
+└── README-zh.md                  Chinese version
 ```
 
 ---
 
-## Pipeline: From Image to 3D Scene
+## End-to-End Flow
 
-### Step 1 — Depth Estimation
-`DepthAnything V2 Large` takes the full image and produces a **depth map** (H×W, normalized 0–1), scaled to approximate meters (default scale = 50 m).
-
-### Step 2 — Object Detection
-`Grounding DINO Base` takes a user-supplied segmentation prompt (e.g. `"person,car,building,tree"`) and returns **bounding boxes + confidence scores** for each detected category.
-
-### Step 3 — Instance Segmentation
-`SAM2.1 ViT-L` takes each detection box as a prompt and produces a **pixel-accurate binary mask** per object.
-
-### Step 4 — Edge Refinement (Post-processing)
-The SAM2 mask contour is extracted and **snapped to nearby Canny edges** (max snap distance = 8 px). This tightens the polygon boundary to match the object's actual silhouette. The result is a simplified polygon (`arc_len * 0.002` Douglas-Peucker tolerance) returned as `[[x_norm, y_norm], ...]`.
-
-### Step 5 — Spatial Layer Assignment
-Each object's **median depth** within its mask is computed from the depth map. Objects are bucketed into:
-
-| Layer      | Z range |
-|------------|---------|
-| foreground | 0 – 5 m |
-| midground  | 5 – 15 m |
-| background | 15 – 50 m |
-| sky        | 50 m+ |
-
-### Step 6 — Scene Graph
-Spatial relations (`leftOf`, `rightOf`, `inFrontOf`, `behind`, `above`, `below`) are derived from bounding-box centroid offsets and depth deltas between all object pairs.
-
-### Step 7 — Billboard Generation
-When the user clicks **Split Image**, each assigned object is sent to `/api/aicss/billboard`. The backend crops the image to the polygon's tight bounding box and uses the polygon mask to produce a **transparent RGBA PNG** (background outside the mask = alpha 0).
-
-### Step 8 — 3D Rendering
-The Three.js `Viewer3D` places each object's billboard as a plane in world space:
-- **X**: derived from bbox center
-- **Y**: derived from bbox center (Y-flipped for 3D)
-- **Z**: derived from median depth, mapped to –5 (near) … +5 (far)
+1. Import an image in the frontend.
+2. The frontend resizes it to a 1920×1080 working surface.
+3. Click `Analyze` to call `POST /api/aicss/analyze`.
+4. The backend:
+   - loads the image
+   - predicts a depth map
+   - uses DashScope VLM to infer scene/object classes
+   - runs Grounding DINO + SAM2 for segmentation
+   - refines contours into polygons
+   - assigns depth layers and builds a scene graph
+5. The frontend displays masks in 2D and lets the user assign color layers.
+6. Click `Split Image` to call `POST /api/aicss/billboard` for selected objects.
+7. The generated RGBA assets are previewed in `Viewer3D`.
+8. Optional inpaint uses `POST /api/aicss/inpaint` for masked edits.
 
 ---
 
-## API Reference
-
-Base URL: `http://localhost:8000` (configurable via `VITE_AICSS_BACKEND`)
-
-### Full Pipeline
-```
-POST /api/aicss/analyze
-Body:   { "imageUrl": "data:image/...", "segmentationPrompt": "person,car,tree", "shotId": "shot_001" }
-Reply:  { analysisId, depthMapUrl, objects[], layers[], sceneGraph }
-```
-
-### Billboard (RGBA Cutout)
-```
-POST /api/aicss/billboard
-Body:   { "imageUrl": "...", "objectId": "...", "boundingBox": {x,y,w,h}, "polygon": [[x,y],...] }
-Reply:  { "billboardUrl": "data:image/png;base64,..." }
-```
-`polygon` overrides `boundingBox` when provided (3+ points). Falls back to rectangle if empty.
-
-### 6-Face Pseudo-3D
-```
-POST /api/aicss/multiface
-Body:   { "imageUrl": "...", "objectId": "...", "boundingBox": {...}, "polygon": [...] }
-Reply:  { "faces": { front, back, left, right, top, bottom } }
-```
-
-### Depth Only / Segment Only / Layers / Scene Graph
-```
-POST /api/aicss/depth        → { depthMapUrl }
-POST /api/aicss/segment      → { objects[] }
-POST /api/aicss/layers       → { layers[] }
-POST /api/aicss/scene-graph  → { sceneGraph }
-GET  /health                 → { status, device, models_loaded }
-```
-
-Interactive docs: `http://localhost:8000/docs` (Swagger UI) or `http://localhost:8000/redoc` (ReDoc).
-
----
-
-## Configuration
+## Tech Stack
 
 ### Frontend
-
-| File | Variable | Default | Meaning |
-|---|---|---|---|
-| `frontend/.env` | `VITE_AICSS_BACKEND` | `http://localhost:8000` | Backend base URL |
+- React 19
+- TypeScript 6
+- Vite 8
+- Tailwind CSS v4
+- Zustand 5
+- Three.js + `@react-three/fiber` + `@react-three/drei`
+- Axios
+- IndexedDB for local session persistence
 
 ### Backend
-
-| Environment Variable | Default | Meaning |
-|---|---|---|
-| `AICSS_HOST` | `0.0.0.0` | Server bind address |
-| `AICSS_PORT` | `8000` | Server port |
-| `AICSS_DEVICE` | `cuda` | `cuda` or `cpu` |
-| `AICSS_DEPTH_MODEL` | `depth-anything/Depth-Anything-V2-Large-hf` | HuggingFace model ID |
-| `AICSS_GROUNDING_DINO_MODEL` | `IDEA-Research/grounding-dino-base` | HuggingFace model ID |
-| `AICSS_SAM2_MODEL_SIZE` | `vit_l` | SAM2 size: `vit_l`, `vit_b`, `vit_s`, `vit_t` |
-| `AICSS_SEGMENTATION_PROMPT` | `person,car,building,tree,...` | Comma-separated classes to detect |
-| `AICSS_HF_TOKEN` | _(empty)_ | HuggingFace token for gated models |
+- Python 3.10+
+- FastAPI + Uvicorn
+- PyTorch + TorchVision
+- Transformers
+- OpenCV + Pillow + NumPy
+- DashScope APIs for VLM and inpaint
 
 ---
 
-## Quick Start
+## Local Development Quick Start
 
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+
-- CUDA 12.x (for GPU acceleration)
+- npm 9+
+- CUDA 12.x recommended for usable inference speed
+- DashScope API key for `analyze`, `segment`, and inpaint-related workflows
 
-### 1 — Backend
+### 1. Start the backend
 
 ```bash
 cd backend
-
-# Create venv
 python -m venv .venv
-
-# Activate (PowerShell)
 .\.venv\Scripts\Activate.ps1
-
-# Install PyTorch (CUDA 12.1) + all deps
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
-
-# Download SAM2 checkpoint (place sam2.1_l.pt in backend/)
-# https://github.com/facebookresearch/segment-anything-2
-
-# Start server (models load on startup)
 python run.py
-# or: .venv\Scripts\python run.py
 ```
 
-### 2 — Frontend
+If you do not have CUDA, install dependencies without the CUDA wheel and run:
+
+```bash
+python run.py --cpu
+```
+
+### 2. Configure the frontend
 
 ```bash
 cd frontend
-
+copy .env.example .env
 npm install
-npm run dev      # http://localhost:5173
+npm run dev
 ```
 
-### 3 — Use
+The default frontend setting is:
 
-1. Open `http://localhost:5173`
-2. Click **Import Image** and select a photo
-3. Optionally edit the segmentation prompt (e.g. `"person,tree,building"`)
-4. Click **Analyze** — wait for depth map + masks + layers
-5. Assign objects to depth layers by clicking them + a color swatch
-6. Click **Split Image** — billboards are generated
-7. Switch to **Camera** mode to orbit the 3D scene
-
----
-
-## Model Disk Space
-
-| Model | Approx. Size |
-|-------|-------------|
-| DepthAnything V2 Large | ~600 MB |
-| Grounding DINO Base | ~400 MB |
-| SAM2.1 ViT-L | ~449 MB |
-| **Total (excluding cache)** | **~1.4 GB** |
-
-HuggingFace download cache (`~/.cache/huggingface/`) and thirdparty SAM2 builds are gitignored.
-
----
-
-## Key Data Structures
-
-```typescript
-// Polygon contour — edge-refined, normalized 0-1
-type PolygonPoint = [number, number];
-
-// Single detected object
-interface DetectedObject {
-  id: string;
-  classLabel: string;
-  depth: number;              // median depth in meters
-  boundingBox: BoundingBox;   // {x, y, w, h} normalized 0-1
-  maskDataUrl: string;        // base64 PNG mask
-  polygon: PolygonPoint[];     // edge-refined contour (Douglas-Peucker simplified)
-  layer: string;              // "foreground" | "midground" | "background" | "sky"
-}
-
-// Full analysis response
-interface AicssResult {
-  analysisId: string;
-  depthMapUrl: string;
-  objects: DetectedObject[];
-  layers: SpatialLayer[];
-  sceneGraph: SceneGraph;
-}
+```env
+VITE_AICSS_BACKEND=http://localhost:8000
 ```
 
+### 3. Verify the system
+
+- backend health: `http://localhost:8000/health`
+- backend docs: `http://localhost:8000/docs`
+- frontend dev server: `http://localhost:5173`
+
+### 4. Use the app
+
+1. Open the frontend in a browser.
+2. Paste or type a DashScope API key in the toolbar.
+3. Import an image.
+4. Click `Analyze`.
+5. Select layers and assign objects.
+6. Click `Split Image`.
+7. Inspect the billboards in the 3D viewer.
+
 ---
 
-## Frontend State (Zustand)
+## Configuration Summary
 
-`useAppStore` is the single source of truth:
+### Frontend
 
-| Key | Type | Purpose |
+| Variable | Default | Purpose |
 |---|---|---|
-| `originalImageUrl` | `string` | Full data URL of imported image |
-| `imageWidth / imageHeight` | `number` | Original pixel dimensions |
-| `analysisResult` | `AicssResult \| null` | Full pipeline response |
-| `imageMode` | `'depth' \| 'original'` | 2D panel background |
-| `assignments` | `Record<objectId, colorIndex>` | Object → layer color |
-| `selectedLayerIndex` | `number \| null` | Active color swatch |
-| `billboardAssets` | `Record<objectId, BillboardAsset>` | RGBA textures from backend |
-| `editMode` | `'director' \| 'camera'` | Director = assign layers; Camera = move billboards |
-| `past / future` | `HistoryEntry[]` | Undo/redo stack for assignments |
+| `VITE_AICSS_BACKEND` | `http://localhost:8000` | Backend base URL |
+
+### Backend
+
+Actual backend settings are defined in `backend/app/config.py`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AICSS_HOST` | `0.0.0.0` | Bind host |
+| `AICSS_PORT` | `8000` | Bind port |
+| `AICSS_RELOAD` | `true` | Auto reload in development |
+| `AICSS_DEVICE` | `cuda` | `cuda` or `cpu` |
+| `AICSS_HF_TOKEN` | empty | HuggingFace token |
+| `AICSS_DEPTH_MODEL` | `depth-anything/Depth-Anything-V2-Large-hf` | Depth model ID |
+| `AICSS_GROUNDING_DINO_MODEL` | `IDEA-Research/grounding-dino-base` | Detection model ID |
+| `AICSS_SAM2_MODEL_SIZE` | `vit_l` | SAM2 checkpoint size |
+| `AICSS_SEGMENTATION_PROMPT` | built-in default list | fallback prompt |
+| `AICSS_DASHSCOPE_API_KEY` | empty | server-side DashScope key fallback |
+| `AICSS_DASHSCOPE_MODEL` | `wanx2.1-imageedit` | inpaint model |
+| `AICSS_INPAINT_TIMEOUT` | `120` | inpaint timeout in seconds |
+
+---
+
+## API Surface
+
+All backend endpoints are mounted under `/api/aicss`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/analyze` | full pipeline, requires `imageUrl`, `shotId`, `apiKey` |
+| `POST` | `/depth` | depth only |
+| `POST` | `/segment` | segmentation only, requires `imageUrl`, `apiKey` |
+| `POST` | `/layers` | rebuild layers from `depthMap` and objects |
+| `POST` | `/scene-graph` | rebuild scene graph |
+| `POST` | `/billboard` | generate transparent cutout |
+| `POST` | `/multiface` | generate 6 pseudo-3D faces |
+| `POST` | `/inpaint` | masked image edit, `apiKey` optional if env var exists |
+| `GET` | `/health` | runtime status |
+
+For exact request/response schemas, use:
+- `http://localhost:8000/docs`
+- `backend/app/endpoints.py`
+- `frontend/src/services/aicssService.ts`
+
+---
+
+## Development Notes
+
+- Imported images are normalized to 1920×1080 in the frontend before analysis.
+- The frontend stores the DashScope key in local state and uses it during `analyze` and inpaint requests.
+- IndexedDB session restoration exists, but the current UI only restores the latest saved session path and does not expose a full session manager.
+- `crop` and billboard offset related state exists in the frontend store, but the full interaction flow is not yet surfaced in the UI.
+- Backend model loading happens during app startup via FastAPI lifespan.
+
+---
+
+## Known Issues and Risks
+
+- `backend/SPEC.md` is not fully aligned with the running code.
+- `backend/app/utils/inpaint_utils.py` contains hardcoded local debug paths that should be removed or replaced.
+- There is no backend `.env.example` in the current repository.
+- There are no automated tests or deployment docs in the current codebase.
+- CORS is currently open to all origins for development convenience.
+
+---
+
+## Recommended Reading Order
+
+- Start here: `README.md`
+- Backend setup and API details: `backend/README.md`
+- Frontend structure and workflow: `frontend/README.md`
+- Runtime truth for backend config: `backend/app/config.py`
+- Runtime truth for backend endpoints: `backend/app/endpoints.py`
+
+---
+
+## Current Documentation Scope
+
+This documentation now focuses on local development and codebase understanding. It does not yet include:
+
+- production deployment guidance
+- Docker setup
+- CI/CD instructions
+- automated testing workflows
+
+Those should be added separately when the project is ready for handoff or release.

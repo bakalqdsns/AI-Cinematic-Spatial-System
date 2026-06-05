@@ -13,7 +13,10 @@ mask 语义：白=待编辑区域（生成内容），黑=保留区域
 import base64
 import io
 import json
+import os
+import tempfile
 import time
+from pathlib import Path
 
 import httpx
 import numpy as np
@@ -27,6 +30,32 @@ BASE_URL = dashscope.base_http_api_url
 
 # DashScope 对 base64 data URI 的长度限制（留余量）
 MAX_BASE64_LEN = 8 * 1024 * 1024  # 8 MB（DashScope 限制 10 MB）
+DEBUG_INPAINT_MASK = os.environ.get("DEBUG_INPAINT_MASK") == "1"
+DEBUG_INPAINT_OUTPUT_DIR = os.environ.get("AICSS_INPAINT_DEBUG_DIR", "")
+
+
+def _write_debug_image(filename: str, image: Image.Image, *, format: str | None = None) -> Path | None:
+    """在启用调试时，将图像写入临时目录或指定目录。"""
+    if not DEBUG_INPAINT_MASK and not DEBUG_INPAINT_OUTPUT_DIR:
+        return None
+
+    target_dir = Path(DEBUG_INPAINT_OUTPUT_DIR) if DEBUG_INPAINT_OUTPUT_DIR else Path(tempfile.gettempdir()) / "aicss_inpaint_debug"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / filename
+    image.save(path, format=format)
+    return path
+
+
+def _write_debug_bytes(filename: str, data: bytes) -> Path | None:
+    """在启用调试时，将原始 bytes 写入调试目录。"""
+    if not DEBUG_INPAINT_MASK and not DEBUG_INPAINT_OUTPUT_DIR:
+        return None
+
+    target_dir = Path(DEBUG_INPAINT_OUTPUT_DIR) if DEBUG_INPAINT_OUTPUT_DIR else Path(tempfile.gettempdir()) / "aicss_inpaint_debug"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / filename
+    path.write_bytes(data)
+    return path
 
 
 def _compute_resize_ratio(
@@ -155,8 +184,7 @@ def _create_imageedit_task(
     }
 
     # ── DEBUG: 强制用极端 prompt 测试 mask 是否生效 ──
-    import os
-    if os.environ.get("DEBUG_INPAINT_MASK") == "1":
+    if DEBUG_INPAINT_MASK:
         payload["input"]["prompt"] = (
             "paper_diorama.paper_cutout.layered_scene.multiplane.parallax."
             "storybook.illustrated_texture.handcrafted.collage.aquarelle."
@@ -298,16 +326,16 @@ def generate_inpaint(
         mask_decoded = Image.open(io.BytesIO(base64.b64decode(
             mask_b64.split(",", 1)[1] if "," in mask_b64 else mask_b64
         )))
-        mask_decoded.save("J:/GitProject/AI Cinematic Spatial System/backend/mask_for_api.png")
+        debug_mask_path = _write_debug_image("mask_for_api.png", mask_decoded)
         mask_arr = np.array(mask_decoded)
-        print(f"[inpaint DEBUG] mask_for_api.png: {mask_decoded.size}, "
-              f"non-zero={(mask_arr > 0).mean():.4f}, mean={mask_arr.mean():.1f}")
+        print(f"[inpaint DEBUG] mask_for_api: {mask_decoded.size}, "
+              f"non-zero={(mask_arr > 0).mean():.4f}, mean={mask_arr.mean():.1f}, path={debug_mask_path}")
 
         img_decoded = Image.open(io.BytesIO(base64.b64decode(
             image_b64.split(",", 1)[1] if "," in image_b64 else image_b64
         )))
-        img_decoded.save("J:/GitProject/AI Cinematic Spatial System/backend/img_for_api.jpg")
-        print(f"[inpaint DEBUG] img_for_api.jpg: {img_decoded.size}")
+        debug_image_path = _write_debug_image("img_for_api.jpg", img_decoded, format="JPEG")
+        print(f"[inpaint DEBUG] img_for_api: {img_decoded.size}, path={debug_image_path}")
     except Exception as e:
         print(f"[inpaint DEBUG] debug save failed: {e}")
 
@@ -336,10 +364,9 @@ def generate_inpaint(
         pass
 
     # 保存原始 bytes（不经过 PIL）
-    raw_path = "J:/GitProject/AI Cinematic Spatial System/backend/raw_result.jpg"
-    with open(raw_path, "wb") as f:
-        f.write(resp.content)
-    print(f"[inpaint DEBUG] raw bytes saved: {raw_path} ({len(resp.content)} bytes)")
+    raw_path = _write_debug_bytes("raw_result.bin", resp.content)
+    if raw_path:
+        print(f"[inpaint DEBUG] raw bytes saved: {raw_path} ({len(resp.content)} bytes)")
 
     # PIL 分析与保存
     result_img = Image.open(io.BytesIO(resp.content))
@@ -350,9 +377,13 @@ def generate_inpaint(
         print(f"[inpaint DEBUG] info keys={list(result_img.info.keys())}")
 
         result_ext = "png" if result_img.mode == "RGBA" or resp.headers.get("Content-Type", "").endswith("png") else "jpg"
-        result_path = f"J:/GitProject/AI Cinematic Spatial System/backend/result_from_api.{result_ext}"
-        result_img.save(result_path, format=result_ext.upper())
-        print(f"[inpaint DEBUG] PIL saved: {result_path}")
+        result_path = _write_debug_image(
+            f"result_from_api.{result_ext}",
+            result_img,
+            format="PNG" if result_ext == "png" else "JPEG",
+        )
+        if result_path:
+            print(f"[inpaint DEBUG] PIL saved: {result_path}")
 
         result_arr = np.array(result_img)
         print(f"[inpaint DEBUG] result pixels: "

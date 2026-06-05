@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Viewer3D — Three.js billboard 3D space with director/camera modes
 // ─────────────────────────────────────────────────────────────────────────────
-import { useRef, useMemo, useCallback } from 'react';
+import { useRef, useMemo, useCallback, useEffect } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
@@ -23,7 +23,6 @@ interface BillboardMeshProps {
 
 function BillboardMesh({ obj, colorIndex, texture, onSelect }: BillboardMeshProps) {
   const meshRef = useRef<THREE.Mesh>(null);
-  const assignments = useAppStore((s) => s.assignments);
   const billboardOffsets = useAppStore((s) => s.billboardOffsets);
   const editMode = useAppStore((s) => s.editMode);
 
@@ -54,21 +53,28 @@ function BillboardMesh({ obj, colorIndex, texture, onSelect }: BillboardMeshProp
 
   // Material
   const material = useMemo(() => {
-    if (texture) {
-      return new THREE.MeshBasicMaterial({
-        map: texture,
-        transparent: true,
-        side: THREE.DoubleSide,
-        opacity: 1,
-      });
-    }
-    return new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color),
-      transparent: true,
-      opacity: 0.5,
-      side: THREE.DoubleSide,
-    });
+    const nextMaterial = texture
+      ? new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          side: THREE.DoubleSide,
+          opacity: 1,
+        })
+      : new THREE.MeshBasicMaterial({
+          color: new THREE.Color(color),
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+        });
+
+    return nextMaterial;
   }, [texture, color]);
+
+  useEffect(() => {
+    return () => {
+      material.dispose();
+    };
+  }, [material]);
 
   const handleClick = useCallback(
     (e: THREE.Event) => {
@@ -123,7 +129,6 @@ function SceneContent({ onSelectObject }: SceneContentProps) {
   const analysisResult = useAppStore((s) => s.analysisResult);
   const assignments = useAppStore((s) => s.assignments);
   const billboardAssets = useAppStore((s) => s.billboardAssets);
-  const editMode = useAppStore((s) => s.editMode);
 
   const objects = analysisResult?.objects ?? [];
 
@@ -134,6 +139,13 @@ function SceneContent({ onSelectObject }: SceneContentProps) {
   );
 
   const textureCache = useRef<Record<string, THREE.Texture>>({});
+
+  useEffect(() => {
+    return () => {
+      Object.values(textureCache.current).forEach((texture) => texture.dispose());
+      textureCache.current = {};
+    };
+  }, []);
 
   return (
     <>
@@ -176,8 +188,6 @@ function SceneContent({ onSelectObject }: SceneContentProps) {
 
 // ─── Camera controller ────────────────────────────────────────────────────────
 function CameraController() {
-  const editMode = useAppStore((s) => s.editMode);
-
   return (
     <OrbitControls
       makeDefault

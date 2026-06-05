@@ -161,11 +161,12 @@ export function SplitControls() {
     const base64 = inpaintPreviewUrl.split(',')[1] || '';
     const img = new Image();
     img.onload = () => {
-      useAppStore.getState().setImage(inpaintPreviewUrl, base64, img.naturalWidth, img.naturalHeight);
-      useAppStore.getState().setCroppedImage(inpaintPreviewUrl, null);
+      const { setImage, setCroppedImage, setAnalysisResult, clearAllAssignments } = useAppStore.getState();
+      setImage(inpaintPreviewUrl, base64, img.naturalWidth, img.naturalHeight);
+      setCroppedImage(inpaintPreviewUrl, null);
+      clearAllAssignments();
       setInpaintPreview(null);
-      // Clear analysis so user can re-analyze the new image
-      useAppStore.getState().setAnalysisResult(null as any);
+      setAnalysisResult(null as never);
     };
     img.src = inpaintPreviewUrl;
   };

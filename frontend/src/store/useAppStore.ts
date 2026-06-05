@@ -66,7 +66,7 @@ interface AppState {
   // Actions
   setImage: (url: string, base64: string, width: number, height: number) => void;
   setCroppedImage: (url: string, params: CropParams | null) => void;
-  setAnalysisResult: (result: AicssResult) => void;
+  setAnalysisResult: (result: AicssResult | null) => void;
   setIsAnalyzing: (v: boolean) => void;
   setAnalysisError: (msg: string | null) => void;
 
