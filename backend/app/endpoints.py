@@ -10,9 +10,10 @@ All endpoints for the AICSS inference pipeline:
   POST /api/aicss/billboard     — Generate RGBA billboard texture
   POST /api/aicss/multiface     — Generate 6-face pseudo-3D textures
 """
-import asyncio
 import io
+import base64
 import uuid
+import time
 import logging
 from typing import Optional
 
@@ -34,6 +35,9 @@ from app.utils.image_utils import (
     base64_to_pil,
     numpy_to_pil_depth,
     depth_to_meters,
+    create_layer_mask,
+    apply_mask_to_image,
+    create_rgba_from_masked_image,
     bbox_to_xywh,
     estimate_depth_from_bbox,
     rotate_image_90,
@@ -47,17 +51,6 @@ from app.utils.spatial_utils import (
 from app.models.sam2_loader import refine_mask_edges, extract_polygon_from_mask
 from app.utils.inpaint_utils import generate_inpaint
 from app.utils.vlm_utils import vlm_detect
-from app.models.auto_prompt import get_auto_prompt, infer_scene_from_image
-from app.models.depth_layer import compute_depth_layer_bounds, assign_mask_to_layer
-from app.utils.nms_utils import nms_masks, filter_small_masks
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Constants for AutoMask filtering
-# ─────────────────────────────────────────────────────────────────────────────
-
-MIN_AREA_RATIO = 0.002   # AutoMask area / image area must exceed this threshold
-MAX_AUTOMASKS = 100      # Keep only the top-N largest AutoMasks by area
-AUTO_IOU_THRESHOLD = 0.6  # AutoMask IoU > this with DINO result → discarded
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +65,7 @@ class ImageUrlRequest(BaseModel):
 class AnalyzeRequest(BaseModel):
     imageUrl: str
     shotId: str
-    apiKey: Optional[str] = Field(None, description="DashScope API key — optional; if not provided, uses automatic scene detection")
+    apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
 
 
 class DepthRequest(BaseModel):
@@ -81,7 +74,7 @@ class DepthRequest(BaseModel):
 
 class SegmentRequest(BaseModel):
     imageUrl: str
-    apiKey: Optional[str] = Field(None, description="DashScope API key — optional")
+    apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
 
 
 class LayersRequest(BaseModel):
@@ -140,71 +133,54 @@ async def _load_image(url: str) -> Image.Image:
 @router.post("/analyze")
 async def analyze(request: AnalyzeRequest):
     """
-    Full AICSS analysis pipeline (fully local — no API key required).
+    Full AICSS analysis pipeline.
 
     1. Load image
-    2. Run DepthAnything V2 → depth map (async with DINO)
-    3. Run Grounding DINO + SAM2 → object masks (async with depth)
-       - If apiKey provided: VLM-enhanced class list
-       - Otherwise: automatic scene-specific prompt
-    4. Run SAM2 automatic masks → fill coverage gaps
-    5. Merge all detections, apply NMS
-    6. Build spatial layers
-    7. Build scene graph
-    8. Return all results
+    2. Run DepthAnything V2 → depth map
+    3. Run Grounding DINO + SAM2 → object masks
+    4. Assign objects to spatial layers
+    5. Build scene graph
+    6. Return all results
     """
     analysis_id = f"aicss_{uuid.uuid4().hex[:8]}"
 
     try:
         # Step 1: Load image
-        print(f"[{analysis_id}] Loading image...")
+        print(f"[{analysis_id}] Loading image from {request.imageUrl[:50]}...")
         image = await _load_image(request.imageUrl)
         w, h = image.size
 
-        # Step 2: Depth estimation (starts immediately)
+        # Step 2: Depth estimation (start immediately)
         print(f"[{analysis_id}] Running depth estimation...")
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
 
-        # Convert depth to base64 PNG for frontend
+        # Convert depth to base64 PNG
         depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
         depth_url = pil_to_base64(depth_pil_resized)
 
-        # Step 2b: Determine detection prompt
-        # Two paths: VLM-enhanced (with apiKey) or fully-local (without)
-        if request.apiKey:
-            print(f"[{analysis_id}] VLM detection with apiKey={request.apiKey[:12]}...")
-            detected_classes, detected_scene = await vlm_detect(image, request.apiKey)
-            effective_prompt = ".".join(detected_classes)
-            print(f"[{analysis_id}] VLM scene='{detected_scene}' classes={detected_classes}")
-        else:
-            # Fully local: infer scene type from image and use pre-defined prompt
-            inferred_scene = infer_scene_from_image(image)
-            effective_prompt = get_auto_prompt(inferred_scene)
-            detected_scene = inferred_scene
-            detected_classes = [c.strip() for c in effective_prompt.split(".") if c.strip()]
-            print(f"[{analysis_id}] Auto prompt scene='{inferred_scene}' prompt={effective_prompt[:60]}...")
+        # Step 2b: VLM detection — always runs. Key is required.
+        # Runs concurrently with depth estimation to avoid adding latency.
+        print(f"[{analysis_id}] Running VLM detection with apiKey={request.apiKey[:12]}...")
+        import asyncio
+        vlm_task = asyncio.create_task(vlm_detect(image, request.apiKey))
+        # Yield to event loop so depth estimation can finish concurrently
+        detected_classes, detected_scene = await vlm_task
+        effective_prompt = ".".join(detected_classes)
+        print(f"[{analysis_id}] VLM scene='{detected_scene}' classes={detected_classes}")
 
-        # Step 3: Grounding DINO detection
-        print(f"[{analysis_id}] Running Grounding DINO with prompt: {effective_prompt[:60]}...")
-        detections = model_manager.grounding_dino.detect(
-            image, prompt=effective_prompt, threshold=0.3
-        )
+        # Step 3: Object detection + segmentation
+        print(f"[{analysis_id}] Running Grounding DINO + SAM2 with prompt: {effective_prompt[:60]}...")
+        detections = model_manager.grounding_dino.detect(image, prompt=effective_prompt, threshold=0.3)
 
         if not detections:
-            print(f"[{analysis_id}] No DINO detections. Falling back to SAM2 auto masks only.")
-            auto_masks = model_manager.sam2.predict_automatic_masks(image)
-            objects = _build_objects_from_auto_masks(
-                auto_masks, depth_m, w, h, analysis_id,
-                image_area=w * h,
-            )
-            layers = build_spatial_layers_from_objects(objects, depth_m, w, h)
+            print(f"[{analysis_id}] No objects detected.")
             return {
                 "analysisId": analysis_id,
                 "depthMapUrl": depth_url,
-                "objects": objects,
-                "layers": layers,
+                "objects": [],
+                "layers": [],
                 "sceneGraph": {"shotId": request.shotId, "nodes": []},
                 "vlmDetectedClasses": detected_classes,
                 "vlmDetectedScene": detected_scene,
@@ -213,57 +189,58 @@ async def analyze(request: AnalyzeRequest):
         # Get boxes and scores for SAM2
         boxes = np.array([d.box for d in detections])
         scores = np.array([d.score for d in detections])
+        labels = [d.label for d in detections]
 
-        # SAM2 segmentation from detection boxes
-        image_np = np.array(image)
+        # SAM2 segmentation
         masks_and_scores = model_manager.sam2.predict_masks_from_boxes(
-            image_np, boxes, scores
+            np.array(image), boxes, scores
         )
 
-        # Edge refinement: snap mask contours to Canny edges
+        # Edge refinement: snap each mask contour to nearby Canny edges
         print(f"[{analysis_id}] Refining mask edges...")
+        image_np = np.array(image)
         masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
 
-        # Filter out tiny masks
-        masks_and_scores = filter_small_masks(masks_and_scores, min_area=500)
+        # Build SpatialObject list
+        objects = []
+        for i, (mask, score) in enumerate(masks_and_scores):
+            det = detections[i]
+            # Estimate depth from median in masked region
+            masked_depth = np.where(mask, depth_m, np.nan)
+            obj_depth = float(np.nanmedian(masked_depth))
+            layer_name, _, _ = assign_to_depth_layer(obj_depth)
 
-        # Step 3b: SAM2 automatic masks for coverage gap filling
-        # Run alongside depth (already done) — adds ~1-2s but fills DINO gaps
-        print(f"[{analysis_id}] Running SAM2 automatic masks for coverage fill...")
-        auto_masks = model_manager.sam2.predict_automatic_masks(image)
-        print(f"[{analysis_id}] SAM2 auto found {len(auto_masks)} masks")
+            # Encode mask as base64 PNG
+            mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+            mask_url = pil_to_base64(mask_img)
 
-        # Build SpatialObject list from DINO+SAM2 detections
-        dino_objects = _build_objects_from_dino_detections(
-            masks_and_scores, detections, depth_m, w, h, analysis_id,
-        )
+            # Normalized bounding box
+            norm_bbox = bbox_to_xywh(det.box, w, h)
 
-        # Build SpatialObject list from SAM2 auto masks (pre-filtered + area-limited)
-        auto_objects = _build_objects_from_auto_masks(
-            auto_masks, depth_m, w, h, analysis_id,
-            image_area=w * h,
-        )
+            # Extract polygon contour
+            polygon = extract_polygon_from_mask(mask)
+            print(f"[{analysis_id}] {det.label}: mask sum={mask.sum()}, polygon points={len(polygon)}")
 
-        # Merge: prefer DINO detections (they have semantic labels).
-        # Auto masks with IoU > 0.6 against any DINO box are discarded (covered).
-        merged_objects = _merge_dino_and_auto_objects(
-            dino_objects, auto_objects, iou_threshold=AUTO_IOU_THRESHOLD,
-        )
-
-        print(f"[{analysis_id}] Final object count: {len(merged_objects)} "
-              f"(DINO={len(dino_objects)}, auto={len(auto_objects)}, "
-              f"merged={len(merged_objects)})")
+            objects.append({
+                "id": det.object_id,
+                "classLabel": det.label,
+                "depth": round(obj_depth, 2),
+                "boundingBox": norm_bbox,
+                "maskDataUrl": mask_url,
+                "polygon": polygon,
+                "layer": layer_name,
+            })
 
         # Step 4: Build spatial layers
-        layers = build_spatial_layers_from_objects(merged_objects, depth_m, w, h)
+        layers = build_spatial_layers_from_objects(objects, depth_m, w, h)
 
         # Step 5: Build scene graph
-        scene_graph = build_scene_graph_from_objects(request.shotId, merged_objects)
+        scene_graph = build_scene_graph_from_objects(request.shotId, objects)
 
         return {
             "analysisId": analysis_id,
             "depthMapUrl": depth_url,
-            "objects": merged_objects,
+            "objects": objects,
             "layers": layers,
             "sceneGraph": scene_graph,
             "vlmDetectedClasses": detected_classes,
@@ -272,158 +249,7 @@ async def analyze(request: AnalyzeRequest):
 
     except Exception as e:
         print(f"[{analysis_id}] Error: {e}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
-
-def _build_objects_from_dino_detections(
-    masks_and_scores: list[tuple[np.ndarray, float]],
-    detections,
-    depth_m: np.ndarray,
-    w: int, h: int,
-    analysis_id: str,
-) -> list[dict]:
-    """Build a list of SpatialObject dicts from DINO+SAM2 results."""
-    objects = []
-    for i, (mask, score) in enumerate(masks_and_scores):
-        det = detections[i]
-        masked_depth = np.where(mask, depth_m, np.nan)
-        obj_depth = float(np.nanmedian(masked_depth))
-        layer_name, _, _ = assign_to_depth_layer(obj_depth)
-
-        mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-        mask_url = pil_to_base64(mask_img)
-        norm_bbox = bbox_to_xywh(det.box, w, h)
-        polygon = extract_polygon_from_mask(mask)
-
-        objects.append({
-            "id": det.object_id,
-            "classLabel": det.label,
-            "depth": round(obj_depth, 2),
-            "boundingBox": norm_bbox,
-            "maskDataUrl": mask_url,
-            "polygon": polygon,
-            "layer": layer_name,
-        })
-    return objects
-
-
-def _build_objects_from_auto_masks(
-    auto_masks: list[dict],
-    depth_m: np.ndarray,
-    w: int, h: int,
-    analysis_id: str,
-    image_area: int,
-) -> list[dict]:
-    """
-    Build SpatialObject dicts from SAM2 automatic masks.
-
-    Filters:
-    - MIN_AREA_RATIO: mask must cover at least 0.2% of image area
-    - MAX_AUTOMASKS: keep only top-100 by area (largest first)
-    - Small mask fallback (< 500 px) always discarded
-    """
-    # 1. Area + ratio filter
-    min_area = max(500, int(image_area * MIN_AREA_RATIO))
-
-    filtered = []
-    for m in auto_masks:
-        mask = m["segmentation"]
-        area = int(mask.sum())
-        if area < min_area:
-            continue
-        filtered.append((area, m))
-
-    # 2. Keep only top-N by area
-    filtered.sort(key=lambda x: x[0], reverse=True)
-    filtered = filtered[:MAX_AUTOMASKS]
-
-    objects = []
-    counter = 1
-    for area, m in filtered:
-        mask = m["segmentation"]
-        bbox = m.get("bbox", [0, 0, 0, 0])
-        masked_depth = np.where(mask, depth_m, np.nan)
-        obj_depth = float(np.nanmedian(masked_depth))
-        layer_name, _, _ = assign_to_depth_layer(obj_depth)
-
-        mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-        mask_url = pil_to_base64(mask_img)
-
-        norm_bbox = {
-            "x": float(bbox[0] / w),
-            "y": float(bbox[1] / h),
-            "w": float((bbox[2] - bbox[0]) / w),
-            "h": float((bbox[3] - bbox[1]) / h),
-        }
-        polygon = extract_polygon_from_mask(mask)
-
-        objects.append({
-            "id": f"auto_{analysis_id}_{counter}",
-            "classLabel": f"object_{counter}",
-            "depth": round(obj_depth, 2),
-            "boundingBox": norm_bbox,
-            "maskDataUrl": mask_url,
-            "polygon": polygon,
-            "layer": layer_name,
-        })
-        counter += 1
-
-    return objects
-
-
-def _merge_dino_and_auto_objects(
-    dino_objects: list[dict],
-    auto_objects: list[dict],
-    iou_threshold: float = 0.6,
-) -> list[dict]:
-    """
-    Merge DINO detections with SAM2 auto masks.
-
-    Two-phase approach:
-    1. All DINO results are kept (they have semantic class labels).
-    2. Auto masks that overlap (IoU > threshold) with any DINO box are discarded
-       — they are already covered by labeled detections.
-    3. Remaining auto masks (no DINO overlap) are appended as unlabeled objects.
-
-    Returns the merged list (DINO first, then unique auto masks).
-    """
-    if not dino_objects:
-        return auto_objects
-    if not auto_objects:
-        return dino_objects
-
-    # Build a quick lookup of DINO boxes for IoU checking
-    auto_kept = []
-    for auto_obj in auto_objects:
-        auto_bbox = auto_obj["boundingBox"]
-        overlap = False
-        for dino_obj in dino_objects:
-            dino_bbox = dino_obj["boundingBox"]
-            iou = _bbox_iou(auto_bbox, dino_bbox)
-            if iou > iou_threshold:
-                overlap = True
-                break
-        if not overlap:
-            auto_kept.append(auto_obj)
-
-    return dino_objects + auto_kept
-
-
-def _bbox_iou(a: dict, b: dict) -> float:
-    """Compute IoU between two normalized {x, y, w, h} bounding boxes."""
-    x1 = max(a["x"], b["x"])
-    y1 = max(a["y"], b["y"])
-    x2 = min(a["x"] + a["w"], b["x"] + b["w"])
-    y2 = min(a["y"] + a["h"], b["y"] + b["h"])
-    inter_w = max(0, x2 - x1)
-    inter_h = max(0, y2 - y1)
-    inter = inter_w * inter_h
-    area_a = a["w"] * a["h"]
-    area_b = b["w"] * b["h"]
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -460,21 +286,14 @@ async def segment_objects(request: SegmentRequest):
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
 
-        # Determine prompt: VLM-enhanced or local auto-prompt
-        if request.apiKey:
-            print(f"[segment] Running VLM detection with apiKey={request.apiKey[:12]}...")
-            import asyncio
-            detected_classes, detected_scene = await asyncio.create_task(
-                vlm_detect(image, request.apiKey)
-            )
-            prompt = ".".join(detected_classes)
-            print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
-        else:
-            inferred_scene = infer_scene_from_image(image)
-            prompt = get_auto_prompt(inferred_scene)
-            detected_classes = [c.strip() for c in prompt.split(".") if c.strip()]
-            detected_scene = inferred_scene
-            print(f"[segment] Auto prompt scene='{inferred_scene}'")
+        # Always use VLM to detect classes
+        print(f"[segment] Running VLM detection with apiKey={request.apiKey[:12]}...")
+        import asyncio
+        detected_classes, detected_scene = await asyncio.create_task(
+            vlm_detect(image, request.apiKey)
+        )
+        prompt = ".".join(detected_classes)
+        print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
 
         detections = model_manager.grounding_dino.detect(image, prompt=prompt, threshold=0.3)
 
