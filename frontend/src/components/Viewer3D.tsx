@@ -2,16 +2,23 @@
 // Viewer3D — Three.js billboard 3D space with director/camera modes
 // ─────────────────────────────────────────────────────────────────────────────
 import { useRef, useMemo, useCallback, useEffect } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
+import { Canvas } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import { useAppStore } from '../store/useAppStore';
 import { LAYER_COLORS } from '../types';
-import type { DetectedObject } from '../types';
+import type { DepthLayerKey, DetectedObject } from '../types';
 
 // Scene dimensions (world units)
 const SCENE_WIDTH = 20;
 const SCENE_HEIGHT = 15;
+const DEPTH_LAYER_ORDER: DepthLayerKey[] = ['foreground', 'midground', 'background', 'sky'];
+const DEPTH_LAYER_Z: Record<DepthLayerKey, number> = {
+  foreground: -2,
+  midground: -6,
+  background: -12,
+  sky: -20,
+};
 
 // ─── Billboard mesh ───────────────────────────────────────────────────────────
 interface BillboardMeshProps {
@@ -97,6 +104,34 @@ function BillboardMesh({ obj, colorIndex, texture, onSelect }: BillboardMeshProp
   );
 }
 
+interface DepthLayerMeshProps {
+  layer: DepthLayerKey;
+  texture: THREE.Texture;
+}
+
+function DepthLayerMesh({ layer, texture }: DepthLayerMeshProps) {
+  const material = useMemo(() => new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    side: THREE.DoubleSide,
+    opacity: 0.92,
+    depthWrite: false,
+  }), [texture]);
+
+  useEffect(() => {
+    return () => {
+      material.dispose();
+    };
+  }, [material]);
+
+  return (
+    <mesh position={[0, 0, DEPTH_LAYER_Z[layer]]}>
+      <planeGeometry args={[SCENE_WIDTH, SCENE_HEIGHT]} />
+      <primitive object={material} attach="material" />
+    </mesh>
+  );
+}
+
 // ─── Background plane ─────────────────────────────────────────────────────────
 function BackgroundPlane() {
   const analysisResult = useAppStore((s) => s.analysisResult);
@@ -129,6 +164,7 @@ function SceneContent({ onSelectObject }: SceneContentProps) {
   const analysisResult = useAppStore((s) => s.analysisResult);
   const assignments = useAppStore((s) => s.assignments);
   const billboardAssets = useAppStore((s) => s.billboardAssets);
+  const depthLayerBillboardAssets = useAppStore((s) => s.depthLayerBillboardAssets);
 
   const objects = analysisResult?.objects ?? [];
 
@@ -153,6 +189,26 @@ function SceneContent({ onSelectObject }: SceneContentProps) {
 
       {/* Directional light so billboards are visible */}
       <ambientLight intensity={1} />
+
+      {/* Depth layer billboards */}
+      {DEPTH_LAYER_ORDER.map((layer) => {
+        const asset = depthLayerBillboardAssets[layer];
+        if (!asset?.rgbaUrl) return null;
+
+        if (!textureCache.current[`depth-layer:${layer}`]) {
+          const loader = new THREE.TextureLoader();
+          textureCache.current[`depth-layer:${layer}`] = loader.load(asset.rgbaUrl);
+          textureCache.current[`depth-layer:${layer}`].colorSpace = THREE.SRGBColorSpace;
+        }
+
+        return (
+          <DepthLayerMesh
+            key={layer}
+            layer={layer}
+            texture={textureCache.current[`depth-layer:${layer}`]}
+          />
+        );
+      })}
 
       {/* Billboards */}
       {assignedObjects.map((obj) => {

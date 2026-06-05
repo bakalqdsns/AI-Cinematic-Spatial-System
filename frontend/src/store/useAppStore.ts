@@ -3,15 +3,20 @@
 // Manages: image, analysis result, layer assignments, edit mode, history, crop, inpaint
 // ─────────────────────────────────────────────────────────────────────────────
 import { create } from 'zustand';
+import { DEFAULT_DEPTH_SPLIT_THRESHOLDS } from '../utils/depthSplit';
 import type {
   AicssResult,
-  DetectedObject,
   LayerAssignments,
   EditMode,
+  ImageViewMode,
   HistoryEntry,
   BillboardAsset,
+  DepthLayerBillboardAsset,
   BillboardOffset,
   CropParams,
+  DepthLayerKey,
+  DepthSplitResult,
+  DepthSplitThresholds,
 } from '../types';
 
 const MAX_HISTORY = 50;
@@ -38,6 +43,7 @@ interface AppState {
 
   // Billboard assets (RGBA textures from backend)
   billboardAssets: Record<string, BillboardAsset>;
+  depthLayerBillboardAssets: Partial<Record<DepthLayerKey, DepthLayerBillboardAsset>>;
 
   // Billboard 3D offsets
   billboardOffsets: Record<string, BillboardOffset>;
@@ -48,8 +54,16 @@ interface AppState {
   // Edit mode
   editMode: EditMode;
 
-  // Image view mode: 'depth' | 'original'
-  imageMode: 'depth' | 'original';
+  // Image view mode: 'depth' | 'original' | 'depth-layer'
+  imageMode: ImageViewMode;
+
+  // Depth split preview
+  depthSplitResult: DepthSplitResult | null;
+  depthSplitLoading: boolean;
+  depthSplitError: string | null;
+  selectedDepthLayer: DepthLayerKey | null;
+  depthSplitThresholds: DepthSplitThresholds;
+  depthSplitConfirmed: boolean;
 
   // Inpaint
   inpaintPreviewUrl: string | null;
@@ -80,6 +94,8 @@ interface AppState {
 
   // Billboard assets
   setBillboardAsset: (objectId: string, rgbaUrl: string) => void;
+  setDepthLayerBillboardAsset: (layer: DepthLayerKey, rgbaUrl: string) => void;
+  clearDepthLayerBillboardAssets: () => void;
 
   // Billboard offsets (3D drag)
   setBillboardOffset: (objectId: string, offsetX: number, offsetZ: number) => void;
@@ -89,7 +105,16 @@ interface AppState {
 
   // Edit mode
   setEditMode: (mode: EditMode) => void;
-  setImageMode: (mode: 'depth' | 'original') => void;
+  setImageMode: (mode: ImageViewMode) => void;
+
+  // Depth split
+  setDepthSplitResult: (result: DepthSplitResult | null) => void;
+  setDepthSplitLoading: (v: boolean) => void;
+  setDepthSplitError: (msg: string | null) => void;
+  setSelectedDepthLayer: (layer: DepthLayerKey | null) => void;
+  setDepthSplitThresholds: (thresholds: DepthSplitThresholds) => void;
+  setDepthSplitConfirmed: (confirmed: boolean) => void;
+  clearDepthSplit: () => void;
 
   // Inpaint
   setInpaintPreview: (url: string | null) => void;
@@ -123,10 +148,17 @@ const initialState = {
   assignments: {} as LayerAssignments,
   selectedLayerIndex: null as number | null,
   billboardAssets: {} as Record<string, BillboardAsset>,
+  depthLayerBillboardAssets: {} as Partial<Record<DepthLayerKey, DepthLayerBillboardAsset>>,
   billboardOffsets: {} as Record<string, BillboardOffset>,
   selectedObjectId: null as string | null,
   editMode: 'director' as EditMode,
-  imageMode: 'depth' as 'depth' | 'original',
+  imageMode: 'depth' as ImageViewMode,
+  depthSplitResult: null as DepthSplitResult | null,
+  depthSplitLoading: false,
+  depthSplitError: null as string | null,
+  selectedDepthLayer: null as DepthLayerKey | null,
+  depthSplitThresholds: DEFAULT_DEPTH_SPLIT_THRESHOLDS,
+  depthSplitConfirmed: false,
   inpaintPreviewUrl: null as string | null,
   inpaintLoading: false,
   inpaintError: null as string | null,
@@ -139,7 +171,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   ...initialState,
 
   setImage: (url, base64, width, height) =>
-    set({ originalImageUrl: url, originalImageBase64: base64, imageWidth: width, imageHeight: height }),
+    set({
+      originalImageUrl: url,
+      originalImageBase64: base64,
+      imageWidth: width,
+      imageHeight: height,
+      depthSplitResult: null,
+      depthSplitError: null,
+      selectedDepthLayer: null,
+      depthLayerBillboardAssets: {},
+      depthSplitConfirmed: false,
+      imageMode: 'original',
+    }),
 
   setCroppedImage: (url, params) =>
     set({ croppedImageUrl: url, cropParams: params }),
@@ -221,6 +264,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
     })),
 
+  setDepthLayerBillboardAsset: (layer, rgbaUrl) =>
+    set((state) => ({
+      depthLayerBillboardAssets: {
+        ...state.depthLayerBillboardAssets,
+        [layer]: { layer, rgbaUrl },
+      },
+    })),
+
+  clearDepthLayerBillboardAssets: () => set({ depthLayerBillboardAssets: {} }),
+
   setBillboardOffset: (objectId, offsetX, offsetZ) =>
     set((state) => ({
       billboardOffsets: {
@@ -234,6 +287,29 @@ export const useAppStore = create<AppState>((set, get) => ({
   setEditMode: (mode) => set({ editMode: mode }),
 
   setImageMode: (mode) => set({ imageMode: mode }),
+
+  setDepthSplitResult: (result) => set({ depthSplitResult: result }),
+
+  setDepthSplitLoading: (v) => set({ depthSplitLoading: v }),
+
+  setDepthSplitError: (msg) => set({ depthSplitError: msg }),
+
+  setSelectedDepthLayer: (layer) => set({ selectedDepthLayer: layer }),
+
+  setDepthSplitThresholds: (thresholds) => set({ depthSplitThresholds: thresholds }),
+
+  setDepthSplitConfirmed: (confirmed) => set({ depthSplitConfirmed: confirmed }),
+
+  clearDepthSplit: () =>
+    set({
+      depthSplitResult: null,
+      depthSplitLoading: false,
+      depthSplitError: null,
+      selectedDepthLayer: null,
+      depthLayerBillboardAssets: {},
+      depthSplitConfirmed: false,
+      imageMode: 'original',
+    }),
 
   setInpaintPreview: (url) => set({ inpaintPreviewUrl: url }),
 
@@ -294,14 +370,19 @@ if (typeof window !== 'undefined') {
 
 // Persist DashScope API key in localStorage
 const STORED_KEY = 'aicss_dashscope_apikey';
-const stored = localStorage.getItem(STORED_KEY);
-if (stored) {
-  useAppStore.getState().setDashscopeApiKey(stored);
-}
-useAppStore.subscribe(
-  (state) => state.dashscopeApiKey,
-  (key) => {
-    if (key) localStorage.setItem(STORED_KEY, key);
+if (typeof window !== 'undefined') {
+  const stored = localStorage.getItem(STORED_KEY);
+  if (stored) {
+    useAppStore.getState().setDashscopeApiKey(stored);
+  }
+
+  let previousDashscopeApiKey = useAppStore.getState().dashscopeApiKey;
+  useAppStore.subscribe((state) => {
+    const nextKey = state.dashscopeApiKey;
+    if (nextKey === previousDashscopeApiKey) return;
+    previousDashscopeApiKey = nextKey;
+
+    if (nextKey) localStorage.setItem(STORED_KEY, nextKey);
     else localStorage.removeItem(STORED_KEY);
-  },
-);
+  });
+}

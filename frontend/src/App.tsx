@@ -208,22 +208,30 @@ function Toolbar() {
 function Panel2D() {
   const analysisResult = useAppStore((s) => s.analysisResult);
   const croppedImageUrl = useAppStore((s) => s.croppedImageUrl);
+  const originalImageUrl = useAppStore((s) => s.originalImageUrl);
   const originalImageBase64 = useAppStore((s) => s.originalImageBase64);
   const imageWidth = useAppStore((s) => s.imageWidth);
   const imageHeight = useAppStore((s) => s.imageHeight);
   const imageMode = useAppStore((s) => s.imageMode);
   const setImageMode = useAppStore((s) => s.setImageMode);
+  const depthSplitResult = useAppStore((s) => s.depthSplitResult);
+  const selectedDepthLayer = useAppStore((s) => s.selectedDepthLayer);
+  const setSelectedDepthLayer = useAppStore((s) => s.setSelectedDepthLayer);
 
-  const imageUrl = analysisResult?.depthMapUrl
-    || croppedImageUrl
-    || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
+  const displayOriginalUrl = croppedImageUrl || originalImageUrl || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
+
+  const imageUrl = imageMode === 'depth-layer'
+    ? (selectedDepthLayer && depthSplitResult ? depthSplitResult[selectedDepthLayer] : '')
+    : imageMode === 'depth'
+      ? (analysisResult?.depthMapUrl || '')
+      : displayOriginalUrl;
 
   const aspect = imageWidth && imageHeight ? imageWidth / imageHeight : 16 / 9;
   const canvasWidth = 800;
   const canvasHeight = Math.round(canvasWidth / aspect);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full min-h-0 overflow-y-auto overflow-x-hidden">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-800 bg-gray-900">
         <span className="text-xs text-gray-500 uppercase tracking-wider mr-1">View:</span>
         <div className="flex rounded-lg overflow-hidden border border-gray-600">
@@ -243,10 +251,22 @@ function Panel2D() {
           >
             Original
           </button>
+          <button
+            onClick={() => {
+              if (!depthSplitResult || !selectedDepthLayer) return;
+              setImageMode('depth-layer');
+            }}
+            disabled={!depthSplitResult || !selectedDepthLayer}
+            className={`px-3 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:text-gray-600 ${
+              imageMode === 'depth-layer' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'
+            }`}
+          >
+            Layer
+          </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto min-h-0">
         {imageUrl ? (
           <ImageCanvas width={canvasWidth || 800} height={canvasHeight || 450} />
         ) : (

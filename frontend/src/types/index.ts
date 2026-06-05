@@ -64,11 +64,25 @@ export type LayerAssignments = Record<string, number>;
 
 // Edit mode
 export type EditMode = 'director' | 'camera';
+export type ImageViewMode = 'depth' | 'original' | 'depth-layer';
+export type DepthLayerKey = 'foreground' | 'midground' | 'background' | 'sky';
+export type DepthSplitResult = Record<DepthLayerKey, string>;
+
+export interface DepthSplitThresholds {
+  foregroundMin: number;
+  midgroundMin: number;
+  backgroundMin: number;
+}
 
 // Billboard with RGBA texture for 3D
 export interface BillboardAsset {
   objectId: string;
   rgbaUrl: string;  // base64 RGBA PNG from backend
+}
+
+export interface DepthLayerBillboardAsset {
+  layer: DepthLayerKey;
+  rgbaUrl: string;
 }
 
 // History entry for undo/redo

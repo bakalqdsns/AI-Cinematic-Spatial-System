@@ -1,11 +1,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SplitControls — split image, generate 3D, reset, inpaint
 // ─────────────────────────────────────────────────────────────────────────────
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '../store/useAppStore';
+import type { DepthSplitThresholds } from '../types';
 import { generateBillboard, inpaintImage } from '../services/aicssService';
+import { DEFAULT_DEPTH_SPLIT_THRESHOLDS, splitDepthLayers } from '../utils/depthSplit';
 import { InpaintPreviewDialog } from './InpaintPreviewDialog';
-import { Scissors, Wand2, RotateCcw, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { DepthSplitPanel } from './DepthSplitPanel';
+import { Scissors, Wand2, RotateCcw, Loader2, CheckCircle, AlertCircle, Layers3 } from 'lucide-react';
 
 export function SplitControls() {
   const analysisResult = useAppStore((s) => s.analysisResult);
@@ -15,10 +18,26 @@ export function SplitControls() {
   const assignments = useAppStore((s) => s.assignments);
   const billboardAssets = useAppStore((s) => s.billboardAssets);
   const setBillboardAsset = useAppStore((s) => s.setBillboardAsset);
+  const setDepthLayerBillboardAsset = useAppStore((s) => s.setDepthLayerBillboardAsset);
+  const clearDepthLayerBillboardAssets = useAppStore((s) => s.clearDepthLayerBillboardAssets);
   const clearAllAssignments = useAppStore((s) => s.clearAllAssignments);
   const reset = useAppStore((s) => s.reset);
   const inpaintPreviewUrl = useAppStore((s) => s.inpaintPreviewUrl);
   const setInpaintPreview = useAppStore((s) => s.setInpaintPreview);
+  const depthSplitResult = useAppStore((s) => s.depthSplitResult);
+  const setDepthSplitResult = useAppStore((s) => s.setDepthSplitResult);
+  const depthSplitLoading = useAppStore((s) => s.depthSplitLoading);
+  const setDepthSplitLoading = useAppStore((s) => s.setDepthSplitLoading);
+  const depthSplitConfirmed = useAppStore((s) => s.depthSplitConfirmed);
+  const setDepthSplitConfirmed = useAppStore((s) => s.setDepthSplitConfirmed);
+  const depthSplitError = useAppStore((s) => s.depthSplitError);
+  const setDepthSplitError = useAppStore((s) => s.setDepthSplitError);
+  const selectedDepthLayer = useAppStore((s) => s.selectedDepthLayer);
+  const setSelectedDepthLayer = useAppStore((s) => s.setSelectedDepthLayer);
+  const depthSplitThresholds = useAppStore((s) => s.depthSplitThresholds);
+  const setDepthSplitThresholds = useAppStore((s) => s.setDepthSplitThresholds);
+  const imageMode = useAppStore((s) => s.imageMode);
+  const setImageMode = useAppStore((s) => s.setImageMode);
   const inpaintLoading = useAppStore((s) => s.inpaintLoading);
   const setInpaintLoading = useAppStore((s) => s.setInpaintLoading);
   const inpaintError = useAppStore((s) => s.inpaintError);
@@ -29,9 +48,32 @@ export function SplitControls() {
   const [splitProgress, setSplitProgress] = useState(0);
   const [splitError, setSplitError] = useState<string | null>(null);
   const [splitDone, setSplitDone] = useState(false);
+  const lastPreviewThresholdsRef = useRef<string | null>(null);
 
   const objects = analysisResult?.objects ?? [];
   const assignedObjects = objects.filter((o) => assignments[o.id] !== undefined);
+
+  const updateDepthThreshold = (key: keyof DepthSplitThresholds, value: number) => {
+    const clamped = Math.max(0, Math.min(255, value));
+    const next = { ...depthSplitThresholds, [key]: clamped };
+
+    if (key === 'foregroundMin' && next.foregroundMin < next.midgroundMin) {
+      next.midgroundMin = next.foregroundMin;
+    }
+    if (key === 'midgroundMin') {
+      if (next.midgroundMin > next.foregroundMin) {
+        next.foregroundMin = next.midgroundMin;
+      }
+      if (next.midgroundMin < next.backgroundMin) {
+        next.backgroundMin = next.midgroundMin;
+      }
+    }
+    if (key === 'backgroundMin' && next.backgroundMin > next.midgroundMin) {
+      next.midgroundMin = next.backgroundMin;
+    }
+
+    setDepthSplitThresholds(next);
+  };
 
   // The image used for inpaint: croppedImageUrl (set on import, auto-resized to 1920×1080)
   const effectiveImageUrl =
@@ -154,6 +196,96 @@ export function SplitControls() {
     }
   };
 
+  const handleDepthSplit = useCallback(async (options?: { keepCurrentLayer?: boolean; switchToLayerView?: boolean }) => {
+    const keepCurrentLayer = options?.keepCurrentLayer ?? true;
+    const switchToLayerView = options?.switchToLayerView ?? true;
+
+    if (!analysisResult?.depthMapUrl || !effectiveImageUrl) {
+      setDepthSplitError('请先导入图片并完成 Analyze');
+      return;
+    }
+
+    setDepthSplitLoading(true);
+    setDepthSplitError(null);
+    setDepthSplitConfirmed(false);
+
+    try {
+      const result = await splitDepthLayers(
+        analysisResult.depthMapUrl,
+        effectiveImageUrl,
+        depthSplitThresholds,
+      );
+      setDepthSplitResult(result);
+      if (!keepCurrentLayer || !selectedDepthLayer) {
+        setSelectedDepthLayer('foreground');
+      }
+      if (switchToLayerView) {
+        lastPreviewThresholdsRef.current = JSON.stringify(depthSplitThresholds);
+        setImageMode('depth-layer');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDepthSplitError(msg);
+      console.error('Depth split failed:', err);
+    } finally {
+      setDepthSplitLoading(false);
+    }
+  }, [
+    analysisResult?.depthMapUrl,
+    effectiveImageUrl,
+    depthSplitThresholds,
+    selectedDepthLayer,
+    setDepthSplitConfirmed,
+    setDepthSplitError,
+    setDepthSplitLoading,
+    setDepthSplitResult,
+    setImageMode,
+    setSelectedDepthLayer,
+  ]);
+
+  const thresholdSignature = JSON.stringify(depthSplitThresholds);
+
+  useEffect(() => {
+    if (imageMode !== 'depth-layer') {
+      lastPreviewThresholdsRef.current = thresholdSignature;
+      return;
+    }
+
+    if (!depthSplitResult || !analysisResult?.depthMapUrl || !effectiveImageUrl) {
+      lastPreviewThresholdsRef.current = null;
+      return;
+    }
+
+    if (lastPreviewThresholdsRef.current === thresholdSignature) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      lastPreviewThresholdsRef.current = thresholdSignature;
+      void handleDepthSplit({ keepCurrentLayer: true, switchToLayerView: false });
+    }, 120);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    analysisResult?.depthMapUrl,
+    depthSplitResult,
+    effectiveImageUrl,
+    handleDepthSplit,
+    imageMode,
+    thresholdSignature,
+  ]);
+
+  const handleConfirmDepthSplit = useCallback(() => {
+    const { depthSplitResult } = useAppStore.getState();
+    if (!depthSplitResult) return;
+
+    clearDepthLayerBillboardAssets();
+    Object.entries(depthSplitResult).forEach(([layer, rgbaUrl]) => {
+      setDepthLayerBillboardAsset(layer as keyof typeof depthSplitResult, rgbaUrl);
+    });
+    setDepthSplitConfirmed(true);
+  }, [clearDepthLayerBillboardAssets, setDepthLayerBillboardAsset, setDepthSplitConfirmed]);
+
   // ─── Confirm inpaint → replace cropped image ────────────────────────────
   const handleConfirmInpaint = () => {
     if (!inpaintPreviewUrl) return;
@@ -190,7 +322,7 @@ export function SplitControls() {
 
   return (
     <>
-      <div className="flex flex-col gap-3 p-4 bg-gray-900 border-t border-gray-700">
+      <div className="flex flex-col gap-3 p-4 bg-gray-900 border-t border-gray-700 shrink-0">
         {/* Inpaint loading */}
         {inpaintLoading && (
           <div className="flex items-center gap-3">
@@ -206,6 +338,85 @@ export function SplitControls() {
             <span className="text-sm">{inpaintError}</span>
           </div>
         )}
+
+        {/* Depth split error */}
+        {depthSplitError && (
+          <div className="flex items-center gap-2 text-amber-400">
+            <AlertCircle size={16} />
+            <span className="text-sm">{depthSplitError}</span>
+          </div>
+        )}
+
+        {/* Depth split thresholds */}
+        <div className="rounded-xl border border-cyan-900/60 bg-gray-950/70 p-3">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div className="text-sm font-medium text-cyan-200">Depth Split 阈值</div>
+              <div className="text-xs text-gray-400">当前按“白近黑远”解释：更亮的区域更靠前。</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="text-[11px] text-gray-500">foreground ≥ midground ≥ background</div>
+              <button
+                type="button"
+                onClick={() => setDepthSplitThresholds(DEFAULT_DEPTH_SPLIT_THRESHOLDS)}
+                className="px-2.5 py-1 rounded-md border border-gray-700 bg-gray-900 text-xs text-gray-300 hover:border-cyan-700 hover:text-cyan-200 transition-colors"
+              >
+                重置默认阈值
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-3">
+            <label className="flex flex-col gap-2">
+              <div className="flex items-center justify-between text-xs text-gray-300">
+                <span>前景下限</span>
+                <span>{depthSplitThresholds.foregroundMin}</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={255}
+                value={depthSplitThresholds.foregroundMin}
+                onChange={(e) => updateDepthThreshold('foregroundMin', Number(e.target.value))}
+                className="w-full accent-cyan-400"
+              />
+            </label>
+
+            <label className="flex flex-col gap-2">
+              <div className="flex items-center justify-between text-xs text-gray-300">
+                <span>中景下限</span>
+                <span>{depthSplitThresholds.midgroundMin}</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={255}
+                value={depthSplitThresholds.midgroundMin}
+                onChange={(e) => updateDepthThreshold('midgroundMin', Number(e.target.value))}
+                className="w-full accent-cyan-400"
+              />
+            </label>
+
+            <label className="flex flex-col gap-2">
+              <div className="flex items-center justify-between text-xs text-gray-300">
+                <span>背景下限</span>
+                <span>{depthSplitThresholds.backgroundMin}</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={255}
+                value={depthSplitThresholds.backgroundMin}
+                onChange={(e) => updateDepthThreshold('backgroundMin', Number(e.target.value))}
+                className="w-full accent-cyan-400"
+              />
+            </label>
+          </div>
+
+          <div className="mt-3 text-xs text-gray-500">
+            sky &lt; {depthSplitThresholds.backgroundMin}，background {`≥ ${depthSplitThresholds.backgroundMin}`}，midground {`≥ ${depthSplitThresholds.midgroundMin}`}，foreground {`≥ ${depthSplitThresholds.foregroundMin}`}
+          </div>
+        </div>
 
         {/* Split progress bar */}
         {splitting && (
@@ -256,6 +467,22 @@ export function SplitControls() {
           </button>
 
           <button
+            onClick={() => {
+              void handleDepthSplit({ keepCurrentLayer: false, switchToLayerView: true });
+            }}
+            disabled={splitting || inpaintLoading || depthSplitLoading || !analysisResult?.depthMapUrl || !hasImage}
+            className={`
+              flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
+              ${splitting || inpaintLoading || depthSplitLoading || !analysisResult?.depthMapUrl || !hasImage
+                ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                : 'bg-cyan-600 hover:bg-cyan-500 text-white active:scale-95'}
+            `}
+          >
+            {depthSplitLoading ? <Loader2 size={16} className="animate-spin" /> : <Layers3 size={16} />}
+            {depthSplitLoading ? '分层中...' : 'Depth Split'}
+          </button>
+
+          <button
             onClick={handleSplitAndInpaint}
             disabled={splitting || inpaintLoading || !canInpaint}
             className={`
@@ -294,6 +521,19 @@ export function SplitControls() {
           )}
         </div>
       </div>
+
+      {depthSplitResult && (
+        <DepthSplitPanel
+          result={depthSplitResult}
+          selectedLayer={selectedDepthLayer}
+          isConfirmed={depthSplitConfirmed}
+          onSelectLayer={(layer) => {
+            setSelectedDepthLayer(layer);
+            setImageMode('depth-layer');
+          }}
+          onConfirm={handleConfirmDepthSplit}
+        />
+      )}
 
       {/* Inpaint preview dialog */}
       {inpaintPreviewUrl && (
