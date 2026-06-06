@@ -10,6 +10,7 @@ import * as THREE from 'three';
 import { useAppStore } from '../store/useAppStore';
 import { LAYER_COLORS } from '../types';
 import type { DepthLayerKey, DetectedObject } from '../types';
+import { ExportPanel } from './ExportPanel';
 
 // Scene dimensions (world units)
 // 20:15 = 4:3 比例，与大多数相机的默认画幅比例接近，
@@ -620,6 +621,18 @@ function SceneContent({ onSelectObject }: SceneContentProps) {
   );
 }
 
+// ─── Expose WebGL canvas DOM element via ref ─────────────────────────────────────
+interface GlDomElementProps {
+  onDomReady: (el: HTMLCanvasElement) => void;
+}
+
+function GlDomElement({ onDomReady }: GlDomElementProps) {
+  const { gl } = useThree();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { onDomReady(gl.domElement); }, []);
+  return null;
+}
+
 // ─── Camera controller ─────────────────────────────────────────────────────────
 function CameraController() {
   return (
@@ -640,6 +653,9 @@ export function Viewer3D() {
   const setSelectedObjectId = useAppStore((s) => s.setSelectedObjectId);
   const editMode = useAppStore((s) => s.editMode);
   const dioramaMode = useAppStore((s) => s.dioramaMode);
+
+  // Hold the WebGL canvas DOM element (obtained via useThree inside the Canvas)
+  const [glCanvas, setGlCanvas] = useState<HTMLCanvasElement | null>(null);
 
   const handleSelect = useCallback(
     (id: string) => {
@@ -663,6 +679,7 @@ export function Viewer3D() {
         style={{ background: '#0a0a0f' }}
       >
         <color attach="background" args={['#0a0a0f']} />
+        <GlDomElement onDomReady={setGlCanvas} />
         <SceneContent onSelectObject={handleSelect} />
         <CameraController />
       </Canvas>
@@ -675,7 +692,7 @@ export function Viewer3D() {
             ${dioramaMode === 'paper' ? 'bg-amber-600 text-white' : 'bg-blue-600 text-white'}
           `}
         >
-          {dioramaMode === 'paper' ? 'Paper Diorama' : 'Billboard'}
+          {dioramaMode === 'paper' ? '纸雕模式' : '层片模式'}
         </span>
         <span
           className={`
@@ -709,6 +726,9 @@ export function Viewer3D() {
           </p>
         </div>
       )}
+
+      {/* Export Panel */}
+      <ExportPanel canvasRef={{ current: glCanvas }} />
     </div>
   );
 }

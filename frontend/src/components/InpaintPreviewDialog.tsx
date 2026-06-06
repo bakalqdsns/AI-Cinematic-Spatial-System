@@ -64,7 +64,7 @@ export function InpaintPreviewDialog({ originalUrl, resultUrl, onConfirm, onCanc
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium
               bg-green-600 hover:bg-green-500 text-white transition-colors"
           >
-            {/* 确认后：将补全结果图设为新的 croppedImageUrl，同时清空所有物体分配与分析结果，强制重新开始 */}
+            确认后需重新分配物体（分析结果已保留）
             <Check size={16} />
             确认替换
           </button>

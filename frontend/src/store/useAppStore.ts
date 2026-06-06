@@ -83,6 +83,14 @@ interface AppState {
   parallaxEnabled: boolean;
   parallaxIntensity: number;
 
+  // Auto-generate state (one-click pipeline)
+  autoGenPhase: 'idle' | 'analyzing' | 'splitting' | 'generating' | 'done' | 'error';
+  autoGenProgress: number;
+  autoGenError: string | null;
+
+  // VLM detection hint shown in toolbar
+  vlmHint: string | null;
+
   // Inpaint
   inpaintPreviewUrl: string | null;
   inpaintLoading: boolean;
@@ -149,6 +157,11 @@ interface AppState {
   setParallaxEnabled: (enabled: boolean) => void;
   setParallaxIntensity: (intensity: number) => void;
 
+  setVlmHint: (hint: string | null) => void;
+  setAutoGenPhase: (phase: AppState['autoGenPhase']) => void;
+  setAutoGenProgress: (progress: number) => void;
+  setAutoGenError: (error: string | null) => void;
+
   // Inpaint
   setInpaintPreview: (url: string | null) => void;
   setInpaintLoading: (v: boolean) => void;
@@ -201,6 +214,10 @@ const initialState = {
   outlineEnabled: true,
   parallaxEnabled: false,
   parallaxIntensity: 0.5,
+  autoGenPhase: 'idle' as const,
+  autoGenProgress: 0,
+  autoGenError: null,
+  vlmHint: null,
   inpaintPreviewUrl: null as string | null,
   inpaintLoading: false,
   inpaintError: null as string | null,
@@ -391,7 +408,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setParallaxEnabled: (enabled) => set({ parallaxEnabled: enabled }),
 
-  setParallaxIntensity: (intensity) => set({ parallaxIntensity: intensity }),
+  setParallaxIntensity: (intensity: number) => set({ parallaxIntensity: intensity }),
+
+  setAutoGenPhase: (phase) => set({ autoGenPhase: phase }),
+  setAutoGenProgress: (progress) => set({ autoGenProgress: progress }),
+  setAutoGenError: (error) => set({ autoGenError: error }),
+  setVlmHint: (hint) => set({ vlmHint: hint }),
 
   setInpaintPreview: (url) => set({ inpaintPreviewUrl: url }),
 
@@ -432,7 +454,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   canUndo: () => get().past.length > 0,
   canRedo: () => get().future.length > 0,
 
-  reset: () => set(initialState),
+  reset: () => set({
+    ...initialState,
+    vlmHint: null,
+    autoGenPhase: 'idle',
+    autoGenProgress: 0,
+    autoGenError: null,
+  }),
 }));
 
 // Keyboard shortcut handler for undo/redo

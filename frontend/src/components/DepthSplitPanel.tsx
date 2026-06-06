@@ -1,5 +1,7 @@
-import { Image, CheckCircle2 } from 'lucide-react';
+import { Image, CheckCircle2, Wand2 } from 'lucide-react';
 import type { DepthLayerKey, DepthSplitResult } from '../types';
+import { generatePaperLayer } from '../services/aicssService';
+import { useAppStore } from '../store/useAppStore';
 
 interface DepthSplitPanelProps {
   result: DepthSplitResult;
@@ -24,6 +26,41 @@ const LAYER_ORDER: DepthLayerKey[] = ['foreground', 'midground', 'background', '
 // 这与 z-buffer 深度顺序一致：近处物体遮挡远处物体
 // 2x2 网格而非 1x4 列表的原因：预览图 16:9 比例下 2 列布局每格宽高比更接近原始画面
 export function DepthSplitPanel({ result, selectedLayer, isConfirmed, onSelectLayer, onConfirm }: DepthSplitPanelProps) {
+  const dioramaLoading = useAppStore((s) => s.dioramaLoading);
+  const setDioramaLoading = useAppStore((s) => s.setDioramaLoading);
+  const setDioramaError = useAppStore((s) => s.setDioramaError);
+  const setDepthLayerDioramaAsset = useAppStore((s) => s.setDepthLayerDioramaAsset);
+  const setDioramaMode = useAppStore((s) => s.setDioramaMode);
+  const dioramaParams = useAppStore((s) => s.dioramaParams);
+
+  const handleConfirmAndGenerate = async () => {
+    onConfirm();
+    setDioramaLoading(true);
+    setDioramaError(null);
+    try {
+      await Promise.all(
+        LAYER_ORDER.map(async (layer) => {
+          const layerUrl = result[layer];
+          if (!layerUrl) return;
+          const textures = await generatePaperLayer(layerUrl, null, dioramaParams);
+          setDepthLayerDioramaAsset(layer, {
+            layer,
+            rgbaUrl: textures.paper_style_url,
+            thicknessGrayUrl: textures.thickness_gray_url,
+            normalMapUrl: textures.normal_map_url,
+            outlinedUrl: textures.outlined_url,
+            paperStyleUrl: textures.paper_style_url,
+          });
+        }),
+      );
+      setDioramaMode('paper');
+    } catch (err) {
+      setDioramaError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDioramaLoading(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3 p-4 bg-gray-900 border-t border-gray-700 shrink-0">
       <div className="flex items-center justify-between gap-3">
@@ -39,19 +76,33 @@ export function DepthSplitPanel({ result, selectedLayer, isConfirmed, onSelectLa
             2. 触发 Paper Diorama 面板的启用（父组件通过 isConfirmed 控制）
             3. 后续对象分配、层级编辑均基于此次确认的分层数据进行
         */}
-        <button
-  type="button"
-  onClick={onConfirm}
-  className={[
-            'inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
-            isConfirmed
-              ? 'bg-emerald-700/70 text-emerald-100 border border-emerald-500/60'
-              : 'bg-cyan-600 text-white hover:bg-cyan-500 border border-cyan-500/60',
-          ].join(' ')}
-        >
-          <CheckCircle2 size={14} />
-          {isConfirmed ? '已确认分层' : '确认分层生成面片'}
-        </button>
+        <div className="flex items-center gap-2">
+          {!isConfirmed && (
+            <button
+              type="button"
+              onClick={handleConfirmAndGenerate}
+              disabled={dioramaLoading}
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-50"
+            >
+              <Wand2 size={12} />
+              {dioramaLoading ? '生成中...' : '确认并生成纸雕'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={isConfirmed}
+            className={[
+              'inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
+              isConfirmed
+                ? 'bg-emerald-700/70 text-emerald-100 border border-emerald-500/60 cursor-default'
+                : 'bg-cyan-600 text-white hover:bg-cyan-500 border border-cyan-500/60',
+            ].join(' ')}
+          >
+            <CheckCircle2 size={14} />
+            {isConfirmed ? '已确认分层' : '确认分层'}
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3">

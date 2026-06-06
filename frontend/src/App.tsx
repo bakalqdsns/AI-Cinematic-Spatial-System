@@ -2,13 +2,17 @@
 // App — Main layout: top toolbar + split pane (2D editor | 3D viewer)
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useRef, useState, useEffect } from 'react';
-import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key } from 'lucide-react';
+import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key, Sparkles } from 'lucide-react';
+import type { DepthLayerKey } from './types';
+import type { DepthLayerDioramaAsset } from './types';
 import { ImageCanvas } from './components/ImageCanvas';
 import { LayerSelector } from './components/LayerSelector';
 import { Viewer3D } from './components/Viewer3D';
 import { SplitControls } from './components/SplitControls';
 import { useAppStore } from './store/useAppStore';
 import { analyzeImage } from './services/aicssService';
+import { splitDepthLayers } from './utils/depthSplit';
+import { generatePaperLayer } from './services/aicssService';
 
 const TARGET_W = 1920;
 const TARGET_H = 1080;
@@ -88,6 +92,15 @@ function Toolbar() {
     setAnalysisResult,
     setAnalysisError,
     croppedImageUrl,
+    autoGenPhase,
+    autoGenProgress,
+    autoGenError,
+    setAutoGenPhase,
+    setAutoGenProgress,
+    setAutoGenError,
+    vlmHint,
+    setVlmHint,
+    analysisError,
   } = useAppStore();
 
   const dashscopeApiKey = useAppStore((s) => s.dashscopeApiKey);
@@ -99,21 +112,121 @@ function Toolbar() {
     if (!imageUrl) return;
     setIsAnalyzing(true);
     setAnalysisError(null);
+    setVlmHint('正在识别场景内容...');
     try {
       const result = await analyzeImage(imageUrl, 'shot_001', dashscopeApiKey);
-      if (result.vlmDetectedScene || result.vlmDetectedClasses?.length) {
-        console.group('[VLM Detection]');
-        console.log('Scene:', result.vlmDetectedScene);
-        console.log('Classes:', result.vlmDetectedClasses?.join(', '));
-        console.log('Full result:', result);
-        console.groupEnd();
+      if (result.vlmDetectedClasses?.length) {
+        setVlmHint(`场景：${result.vlmDetectedScene || '未知'} | 识别到 ${result.vlmDetectedClasses.length} 个类别`);
+      } else {
+        setVlmHint('未能识别任何物体，请检查 API Key 或图片质量');
       }
       setAnalysisResult(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setAnalysisError(msg);
+      setVlmHint(`分析失败：${msg}`);
     } finally {
       setIsAnalyzing(false);
+    }
+  };
+
+  // One-click auto-generate: analyze → depth split → paper layer generation
+  const handleAutoGenerate = async () => {
+    if (!imageUrl || !dashscopeApiKey) return;
+
+    setAutoGenPhase('analyzing');
+    setAutoGenProgress(5);
+    setAutoGenError(null);
+    setIsAnalyzing(true);
+
+    try {
+      const result = await analyzeImage(imageUrl, 'shot_001', dashscopeApiKey);
+      setAnalysisResult(result);
+      setAutoGenProgress(30);
+
+      if (result.vlmDetectedClasses?.length) {
+        setVlmHint(`场景：${result.vlmDetectedScene || '未知'} | 识别到 ${result.vlmDetectedClasses.length} 个类别`);
+      } else {
+        setVlmHint('未能识别任何物体');
+      }
+
+      // Phase 2: depth split (frontend compute)
+      setAutoGenPhase('splitting');
+      setAutoGenProgress(40);
+
+      const depthSplit = await splitDepthLayers(
+        result.depthMapUrl,
+        imageUrl,
+        { foregroundMin: 192, midgroundMin: 128, backgroundMin: 64 },
+      );
+
+      setAutoGenProgress(60);
+
+      // Phase 3: paper layer generation (backend)
+      setAutoGenPhase('generating');
+
+      const LAYER_ORDER: DepthLayerKey[] = ['foreground', 'midground', 'background', 'sky'];
+      const layerAssets: Partial<Record<DepthLayerKey, DepthLayerDioramaAsset>> = {};
+
+      await Promise.all(
+        LAYER_ORDER.map(async (layer, idx) => {
+          const layerUrl = depthSplit[layer];
+          if (!layerUrl) return;
+          const textures = await generatePaperLayer(layerUrl, null, {});
+          const asset: DepthLayerDioramaAsset = {
+            layer,
+            rgbaUrl: textures.paper_style_url,
+            thicknessGrayUrl: textures.thickness_gray_url,
+            normalMapUrl: textures.normal_map_url,
+            outlinedUrl: textures.outlined_url,
+            paperStyleUrl: textures.paper_style_url,
+          };
+          layerAssets[layer] = asset;
+          setAutoGenProgress(60 + Math.round(((idx + 1) / 4) * 35));
+        }),
+      );
+
+      // Write all layer assets to store
+      const { setDepthSplitResult, setDepthLayerDioramaAsset, setDepthLayerBillboardAsset, setDioramaMode, setImageMode, clearDepthLayerBillboardAssets, setDepthSplitConfirmed, setSelectedDepthLayer } = useAppStore.getState();
+      setDepthSplitResult(depthSplit);
+      // Write billboard assets (RGBA PNG from depth split) for Billboard mode
+      clearDepthLayerBillboardAssets();
+      Object.entries(depthSplit).forEach(([layer, rgbaUrl]) => {
+        setDepthLayerBillboardAsset(layer as DepthLayerKey, rgbaUrl);
+      });
+      // Write diorama assets (paper textures) for Paper Diorama mode
+      Object.entries(layerAssets).forEach(([layer, asset]) => {
+        if (asset) setDepthLayerDioramaAsset(layer as DepthLayerKey, asset);
+      });
+      setDepthSplitConfirmed(true);
+      setSelectedDepthLayer('foreground');
+      setDioramaMode('paper');
+      setImageMode('original');
+
+      setAutoGenPhase('done');
+      setAutoGenProgress(100);
+      setVlmHint(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAutoGenPhase('error');
+      setAutoGenError(msg);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const isAutoGenerating = autoGenPhase !== 'idle' && autoGenPhase !== 'done' && autoGenPhase !== 'error';
+  const autoGenDone = autoGenPhase === 'done';
+  const autoGenHasError = autoGenPhase === 'error';
+
+  const getAutoGenLabel = () => {
+    switch (autoGenPhase) {
+      case 'analyzing': return 'AI 分析中...';
+      case 'splitting': return '深度分层中...';
+      case 'generating': return '生成纹理中...';
+      case 'done': return '生成完成';
+      case 'error': return '生成失败';
+      default: return '一键生成';
     }
   };
 
@@ -163,6 +276,38 @@ function Toolbar() {
         {isAnalyzing ? 'Analyzing...' : 'Analyze'}
       </button>
 
+      {/* One-click Auto Generate */}
+      <button
+        onClick={handleAutoGenerate}
+        disabled={!imageUrl || !dashscopeApiKey || isAutoGenerating}
+        title={!dashscopeApiKey ? '请先输入 DashScope API Key' : '一键完成分析、分层与纸雕生成'}
+        className={`
+          flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
+          ${!imageUrl || !dashscopeApiKey || isAutoGenerating
+            ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+            : 'bg-green-600 hover:bg-green-500 text-white active:scale-95'}
+        `}
+      >
+        {isAutoGenerating ? <RefreshCw size={16} className="animate-spin" /> : <Sparkles size={16} />}
+        {getAutoGenLabel()}
+        {isAutoGenerating && autoGenProgress > 0 && (
+          <span className="ml-1 text-xs opacity-75">{autoGenProgress}%</span>
+        )}
+      </button>
+
+      {/* VLM hint area */}
+      {vlmHint && (
+        <span className={`text-xs px-2 py-1 rounded ${
+          autoGenHasError || (analysisError && vlmHint.includes('失败'))
+            ? 'text-red-400 bg-red-900/30'
+            : vlmHint.includes('未能识别')
+              ? 'text-amber-400 bg-amber-900/30'
+              : 'text-green-400 bg-green-900/30'
+        }`}>
+          {vlmHint}
+        </span>
+      )}
+
       <div className="w-px h-6 bg-gray-700" />
 
       <button onClick={undo} disabled={!canUndo()} title="Undo (Ctrl+Z)"
@@ -208,6 +353,14 @@ function Toolbar() {
             {analysisResult.objects.length} objects
           </span>
           <span>{analysisResult.analysisId}</span>
+        </div>
+      )}
+
+      {/* Auto-generate error */}
+      {autoGenHasError && autoGenError && (
+        <div className="flex items-center gap-2 text-xs text-red-400">
+          <span>{autoGenError}</span>
+          <button onClick={() => setAutoGenPhase('idle')} className="underline hover:text-red-300">重试</button>
         </div>
       )}
     </header>
@@ -265,22 +418,16 @@ function Panel2D() {
           >
             Original
           </button>
-          <button
-            onClick={() => {
-              if (!depthSplitResult || !selectedDepthLayer) return;
-              setImageMode('depth-layer');
-            }}
-            disabled={!depthSplitResult || !selectedDepthLayer}
-            className={`px-3 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:text-gray-600 ${
-              imageMode === 'depth-layer' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'
-            }`}
-          >
-            Layer
-          </button>
         </div>
+        <span className="ml-auto text-[10px] text-gray-600">
+          点击下方分层预览选择层
+        </span>
       </div>
 
-      <div className="flex-1 overflow-auto min-h-0">
+      <div
+        className="relative"
+        style={{ height: canvasHeight || 450 }}
+      >
         {imageUrl ? (
           <ImageCanvas width={canvasWidth || 800} height={canvasHeight || 450} />
         ) : (

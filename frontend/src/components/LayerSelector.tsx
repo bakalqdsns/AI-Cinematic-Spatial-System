@@ -38,7 +38,7 @@ export function LayerSelector() {
   return (
     <div className="flex flex-col gap-2 p-3 bg-gray-900 border-t border-gray-700">
       <div className="flex items-center justify-between">
-        <span className="text-xs text-gray-400 uppercase tracking-wider">Layers</span>
+        <span className="text-xs text-gray-400 uppercase tracking-wider">对象分组</span>
         <span className="text-xs text-gray-500">
           {usedIndices.size} / {MAX_LAYERS} used
         </span>
@@ -112,8 +112,8 @@ export function LayerSelector() {
       {/* 选中色块 → 点击画布中的对象完成分配 → 分配完成后可取消选中继续浏览 */}
       <p className="text-xs text-gray-600">
         {selectedLayerIndex !== null
-          ? `Click objects to assign to Layer ${selectedLayerIndex + 1}`
-          : 'Select a layer, then click objects to assign'}
+          ? `点击画布中物体分配到分组 ${selectedLayerIndex + 1}`
+          : '选择分组颜色，再点击画布中物体进行分配'}
       </p>
     </div>
   );

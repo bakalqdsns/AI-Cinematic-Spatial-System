@@ -317,19 +317,18 @@ export function SplitControls() {
     setDepthSplitConfirmed(true);
   }, [clearDepthLayerBillboardAssets, setDepthLayerBillboardAsset, setDepthSplitConfirmed]);
 
-  // ─── Confirm inpaint → replace cropped image ────────────────────────────
+  // Confirm inpaint → replace cropped image, keep analysisResult for re-use
   const handleConfirmInpaint = () => {
     if (!inpaintPreviewUrl) return;
     // Convert data URL to base64 for store compatibility
     const base64 = inpaintPreviewUrl.split(',')[1] || '';
     const img = new Image();
     img.onload = () => {
-      const { setImage, setCroppedImage, setAnalysisResult, clearAllAssignments } = useAppStore.getState();
+      const { setImage, setCroppedImage, clearAllAssignments } = useAppStore.getState();
       setImage(inpaintPreviewUrl, base64, img.naturalWidth, img.naturalHeight);
       setCroppedImage(inpaintPreviewUrl, null);
       clearAllAssignments();
       setInpaintPreview(null);
-      setAnalysisResult(null as never);
     };
     img.src = inpaintPreviewUrl;
   };
@@ -491,7 +490,7 @@ export function SplitControls() {
             `}
           >
             <Scissors size={16} />
-            {splitting ? 'Splitting...' : 'Split Image'}
+            {splitting ? '抠取中...' : '抠取物体'}
             {assignedCount > 0 && !splitting && (
               <span className="ml-1 bg-blue-700 rounded px-1.5 py-0.5 text-xs">{assignedCount}</span>
             )}
@@ -510,7 +509,7 @@ export function SplitControls() {
             `}
           >
             {depthSplitLoading ? <Loader2 size={16} className="animate-spin" /> : <Layers3 size={16} />}
-            {depthSplitLoading ? '分层中...' : 'Depth Split'}
+            {depthSplitLoading ? '分层中...' : '按深度分层'}
           </button>
 
           <button
@@ -524,7 +523,7 @@ export function SplitControls() {
             `}
           >
             {inpaintLoading ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
-            {inpaintLoading ? '补全中...' : 'Split & Inpaint'}
+            {inpaintLoading ? '补全中...' : '补全背景'}
             {assignedCount > 0 && !inpaintLoading && (
               <span className="ml-1 bg-purple-700 rounded px-1.5 py-0.5 text-xs">{assignedCount}</span>
             )}

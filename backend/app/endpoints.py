@@ -561,9 +561,9 @@ async def inpaint_image(request: InpaintRequest):
       - Black (alpha=0):   selected objects — will be retained
     prompt: describes what to fill in the white (edited) regions
     """
-        effective_key = request.apiKey or settings.dashscope_api_key
-        # 优先级：请求体 apiKey > 环境变量 AICSS_DASHSCOPE_API_KEY
-        # 若两者均未提供，返回 503 而非 500，方便前端区分"未配置"与"服务器错误"
+    effective_key = request.apiKey or settings.dashscope_api_key
+    # 优先级：请求体 apiKey > 环境变量 AICSS_DASHSCOPE_API_KEY
+    # 若两者均未提供，返回 503 而非 500，方便前端区分"未配置"与"服务器错误"
     if not effective_key:
         raise HTTPException(
             status_code=503,
