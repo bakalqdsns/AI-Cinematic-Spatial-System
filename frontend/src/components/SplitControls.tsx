@@ -8,6 +8,7 @@ import { generateBillboard, inpaintImage } from '../services/aicssService';
 import { DEFAULT_DEPTH_SPLIT_THRESHOLDS, splitDepthLayers } from '../utils/depthSplit';
 import { InpaintPreviewDialog } from './InpaintPreviewDialog';
 import { DepthSplitPanel } from './DepthSplitPanel';
+import { DioramaSettingsPanel } from './DioramaSettingsPanel';
 import { Scissors, Wand2, RotateCcw, Loader2, CheckCircle, AlertCircle, Layers3 } from 'lucide-react';
 
 export function SplitControls() {
@@ -75,13 +76,25 @@ export function SplitControls() {
     setDepthSplitThresholds(next);
   };
 
-  // The image used for inpaint: croppedImageUrl (set on import, auto-resized to 1920×1080)
+  // effectiveImageUrl 优先级链：
+  // 1. croppedImageUrl — 用户裁剪后的图片（导入时自动缩放到 1920×1080），最精确
+  // 2. originalImageUrl — Blob URL，未裁剪，适合需要完整画布的场景
+  // 3. originalImageBase64 → data URI — 最终兜底，确保任何情况下都有可用图片
+  // 裁剪图优先是因为 inpaint 需要精确的 mask 与图片尺寸对齐，原始图可能导致 mask 错位
   const effectiveImageUrl =
     croppedImageUrl ||
     originalImageUrl ||
     (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
 
   // ─── Compute inverse mask from assigned object polygons ───────────────────
+  // Mask 语义（与 DashScope API 约定一致）：
+  //   - 白色区域（alpha=255）→ 需要被 inpaint 填充的区域（编辑区）
+  //   - 黑色区域（alpha=0）  → 保留原样不动（物体遮罩）
+  //
+  // 双通道处理的原因：
+  //   Canvas 2D 的 fillRect 默认为不透明，getImageData 只能读到 R/G/B，没有 alpha。
+  //   因此需要两步：先用灰度绘制黑白遮罩，再将灰度值映射到 RGBA 的 alpha 通道，
+  //   这样导出的 PNG 才能正确携带透明信息。
   const computeInverseMask = useCallback((): Promise<string> => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -169,9 +182,11 @@ export function SplitControls() {
   };
 
   // ─── Split & Inpaint ─────────────────────────────────────────────────────
+  // API Key 检查放在最前面：在 UI 交互触发时就尽早失败，避免走到网络请求才发现问题
+  // 注意：检查的是 dashscopeApiKey store 状态，若用户从未设置或未保存，此处直接拦截
   const handleSplitAndInpaint = async () => {
     if (!effectiveImageUrl || assignedObjects.length === 0) return;
-    
+
     if (!dashscopeApiKey) {
       setInpaintError('请先在顶部输入 DashScope API Key');
       setInpaintLoading(false);
@@ -243,8 +258,21 @@ export function SplitControls() {
     setSelectedDepthLayer,
   ]);
 
+  // JSON 序列化作为阈值"签名"：三个数字组合成一个稳定字符串，
+  // 用于精确判断阈值是否真正发生变化（引用比较不够，需比较内容）
   const thresholdSignature = JSON.stringify(depthSplitThresholds);
 
+  // ─── 阈值滑动时的防抖 + 增量预览 ────────────────────────────────────────
+  // 防抖机制的作用：
+  //   1. 避免用户拖动滑块时每次微小的数值变化都触发一次深度分层计算
+  //   2. 120ms 延迟确保在快速连续拖动期间只执行最后一次有效更新
+  //
+  // thresholdSignature 比较逻辑：
+  //   进入 depth-layer 模式后，将 ref 与当前签名对比——若相同则跳过（已是最新的预览结果），
+  //   若不同才重新调用 handleDepthSplit，从而在阈值更新和实际计算之间建立缓冲。
+  //
+  // switchToLayerView: false 的意义：
+  //   useEffect 触发时不切换视图模式，避免用户在调节滑块时被强制跳转回深度分层视图
   useEffect(() => {
     if (imageMode !== 'depth-layer') {
       lastPreviewThresholdsRef.current = thresholdSignature;
@@ -275,6 +303,9 @@ export function SplitControls() {
     thresholdSignature,
   ]);
 
+  // 确认后：将分层结果从临时预览状态写入 store 的 depthLayerBillboardAssets，
+  // 并将 depthSplitConfirmed 置为 true——这是 DioramaSettingsPanel 的渲染条件。
+  // 换言之，只有确认后，Paper Diorama 2.0 面板才允许操作深度分层资源。
   const handleConfirmDepthSplit = useCallback(() => {
     const { depthSplitResult } = useAppStore.getState();
     if (!depthSplitResult) return;
@@ -534,6 +565,12 @@ export function SplitControls() {
           onConfirm={handleConfirmDepthSplit}
         />
       )}
+
+      {/* Paper Diorama 2.0 — always visible when depth split exists */}
+      <DioramaSettingsPanel
+        effectiveImageUrl={effectiveImageUrl}
+        depthSplitResult={depthSplitResult}
+      />
 
       {/* Inpaint preview dialog */}
       {inpaintPreviewUrl && (

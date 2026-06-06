@@ -7,6 +7,14 @@ import type {
   DepthSplitThresholds,
 } from '../types';
 
+// "白近黑远" 语义约定：深度图的亮度代表物体到相机的距离。
+// 越亮 = 越近（前景），越暗 = 越远（背景/天空）。
+// brightness ∈ [0, 255]，按阈值划分：
+//   192+ → foreground（最近）
+//   128-191 → midground（中景）
+//    64-127 → background（远景）
+//   <64 → sky（天空/最远）
+// 阈值可由调用方通过 thresholds 参数覆盖，默认值见 DEFAULT_DEPTH_SPLIT_THRESHOLDS。
 const LAYER_ORDER: DepthLayerKey[] = ['foreground', 'midground', 'background', 'sky'];
 
 export const DEFAULT_DEPTH_SPLIT_THRESHOLDS: DepthSplitThresholds = {
@@ -76,6 +84,10 @@ export async function splitDepthLayers(
     LAYER_ORDER.map((layer) => [layer, new ImageData(width, height)]),
   ) as Record<DepthLayerKey, ImageData>;
 
+  // 双重循环策略：对每个像素，遍历全部 LAYER_ORDER 候选层。
+  // 仅当 candidate === 实际所属 layer 时写入完整 RGBA（alpha=255），
+  // 其余候选层写入纯黑（alpha=0）。这样保证每个像素在所有图层中只出现一次，
+  // 即便原始深度图有噪声导致阈值边界抖动，也不会出现同一像素被两个图层争抢的情况。
   for (let i = 0; i < depthPixels.length; i += 4) {
     const brightness = depthPixels[i];
     const layer = getLayerForBrightness(brightness, thresholds);

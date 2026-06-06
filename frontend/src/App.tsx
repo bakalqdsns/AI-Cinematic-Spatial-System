@@ -13,6 +13,16 @@ import { analyzeImage } from './services/aicssService';
 const TARGET_W = 1920;
 const TARGET_H = 1080;
 
+// 将任意比例图像缩放填充到 1920×1080，边缘留黑（letterbox/pillarbox）。
+// 策略：取原图宽高比与目标比例 16:9 比较——
+//
+//   - 原图更宽（如 21:9 带鱼屏）：高度填满，高度方向居中，
+//     宽度方向会超出画布，用 fillRect 填黑边（左右黑条）
+//   - 原图更高（如 9:16 手机竖图）：宽度填满，宽度方向居中，
+//     高度方向会超出画布，用 fillRect 填黑边（上下黑条）
+//
+// 这样 ML pipeline 收到的永远是标准化 1920×1080 输入，
+// 避免原图尺寸差异导致 depth/segmentation 模型输出分辨率不一致。
 function autoResizeTo1920x1080(file: File): Promise<{ dataUrl: string; base64: string }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -220,6 +230,10 @@ function Panel2D() {
 
   const displayOriginalUrl = croppedImageUrl || originalImageUrl || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
 
+  // imageMode 控制 2D 面板显示哪一路 URL：
+  //   - 'original'   → 显示裁剪图或原图（用户最终看到的画面）
+  //   - 'depth'       → 显示 ML 推理出的深度图
+  //   - 'depth-layer' → 显示选定深度层的分割掩码图（selectedDepthLayer 指明是哪层）
   const imageUrl = imageMode === 'depth-layer'
     ? (selectedDepthLayer && depthSplitResult ? depthSplitResult[selectedDepthLayer] : '')
     : imageMode === 'depth'
@@ -304,6 +318,9 @@ export default function App() {
         const last = sessions[0];
         const session = await loadSession(last.id);
         if (!session) return;
+        // 只恢复裁剪图（croppedImageBlob）——这是用户的编辑结果，应该保留。
+        // 不恢复 analysisResult：ML 分析结果依赖于服务器状态，刷新页面后
+        // analysisId 已失效，重新渲染会报错；用户重新点击 Analyze 即可恢复。
         if (session.croppedImageBlob) {
           const url = blobToUrl(session.croppedImageBlob);
           setCroppedImage(url, session.cropParams ?? null);
@@ -314,7 +331,8 @@ export default function App() {
     })();
   }, [setCroppedImage]);
 
-  // Auto-resize to 1920x1080 on import
+  // 导入图片时强制 resize 到 1920×1080，确保 ML pipeline 收到的输入尺寸固定。
+  // 原图比例不匹配时 autoResizeTo1920x1080 会自动加黑边保持内容不变形。
   const handleFileChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -335,6 +353,8 @@ export default function App() {
     const onMove = (e: MouseEvent) => {
       if (!isDragging || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
+      // 拖拽分割条时限制在 20%~80% 之间——防止任一面板被压到几乎不可见，
+      // 也避免 3D viewer 因为宽高比极端而渲染出错（Three.js 容易报 invalid frustum）。
       setSplitRatio(Math.max(20, Math.min(80, ((e.clientX - rect.left) / rect.width) * 100)));
     };
     const onUp = () => setIsDragging(false);

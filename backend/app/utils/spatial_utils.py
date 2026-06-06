@@ -11,6 +11,11 @@ def assign_to_depth_layer(depth_meters: float) -> tuple[str, float, float]:
     Assign a depth value to the appropriate spatial layer.
 
     Returns (layer_name, z_min, z_max).
+
+    深度值映射逻辑：
+    - 深度图本质上是灰度图：白色(255)=近，黑色(0)=远
+    - 因此 depth_meters 值越小（物体越近）→ 对应越靠前的前景层
+    - depth_meters 值越大（物体越远）→ 对应越靠后的背景层
     """
     for z_min, z_max, name in settings.depth_buckets:
         if z_min <= depth_meters < z_max:
@@ -63,6 +68,14 @@ def build_scene_graph_from_objects(
       - leftOf / rightOf: horizontal overlap
       - inFrontOf / behind: depth ordering
       - above / below: vertical overlap
+
+    空间关系判定规则：
+    - leftOf/rightOf: 使用 0.3/0.7 重叠因子而非 0.5 中线，允许 30% 的边界重叠，
+      避免两个相邻物体因边界接触而被误判为无关系（更宽松的判定）
+    - inFrontOf/behind: 深度差需 > 1.0 米才认为有前后遮挡关系，
+      避免同一平面内微小深度差异导致的误判
+    - 深度关系仅在物体水平对齐（|x_a - x_b| < 0.3）时判定，
+      否则物体虽然深度更近但并非"遮挡"而是"并排"
     """
     nodes = []
     for i, obj_a in enumerate(objects):

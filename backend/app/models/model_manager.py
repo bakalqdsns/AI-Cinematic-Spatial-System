@@ -1,6 +1,13 @@
 """
 Model Manager — singleton that loads and manages all ML models.
 
+单例模式说明：
+- 模型在 GPU 上加载后占用大量显存，多个实例会浪费内存
+- 整个应用只需要一份模型副本，所有请求共享使用
+- __init__ 仅初始化占位符（None），真正的模型在 load_all() 时才加载
+  —— 这就是延迟加载（lazy loading），避免启动时一次性加载所有模型导致卡顿
+- 三个 @property 装饰的属性也体现了延迟加载思想：访问时才检查是否已加载
+
 Usage:
     manager = ModelManager()
     manager.load_all()
@@ -71,7 +78,14 @@ class ModelManager:
         return self._loaded
 
     def unload_all(self):
-        """Free GPU memory."""
+        """
+        释放 GPU 显存中的模型。
+
+        深度学习模型（尤其是在 GPU 上运行的）不会自动被 Python GC 回收，
+        因为 PyTorch 会维护对 GPU 内存的引用。显式设置为 None 后调用
+        torch.cuda.empty_cache() 才能将显存归还给 GPU 驱动，
+        防止长时间运行的服务（如 API 服务）因显存泄漏而崩溃。
+        """
         self._depth = None
         self._grounding_dino = None
         self._sam2 = None

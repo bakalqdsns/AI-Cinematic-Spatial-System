@@ -1,5 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// LayerSelector — 15 color swatches, shows which layer is active
+// LayerSelector — 2D 画布叠加层的颜色分组工具
+// 注意：这里的 15 个色块是用于 2D 叠加层视觉区分的任意颜色序号
+// 与 DepthSplitPanel 中的深度分层（前景/中景/背景/天空）是完全不同的概念
+// 深度分层是 AI 语义分割结果；这些色块只是给用户标记物体的视觉手段
+// 对象可以被分配到任意一个色块中，色块颜色仅起视觉区分作用
 // ─────────────────────────────────────────────────────────────────────────────
 import { useMemo, useCallback } from 'react';
 import { useAppStore } from '../store/useAppStore';
@@ -16,10 +20,13 @@ export function LayerSelector() {
 
   const objects = analysisResult?.objects ?? [];
 
-  // Show all MAX_LAYERS swatches so the user can always pick a layer to assign to
+  // 始终显示全部 15 个色块（而非仅已使用的）：
+  //   - 用户可随时选择任意色块进行分配，无需先清空再添加
+  //   - 空白色块同样可以作为分组用途（例如"待定"组）
   const displayCount = MAX_LAYERS;
 
-  // Keep usedIndices for the counter display
+  // usedIndices 用于显示"已用 N / 15"的计数器
+  // 用 Set 去重：因为多个对象可能分配到同一色块，Object.values 会产生重复索引
   const usedIndices = useMemo(() => new Set(Object.values(assignments)), [assignments]);
 
   const handleClear = useCallback((e: React.MouseEvent, colorIndex: number) => {
@@ -46,8 +53,12 @@ export function LayerSelector() {
 
           return (
             <div key={i} className="relative group" title={`Layer ${i + 1} (${objectsInLayer.length} objects)`}>
+              {/*
+                点击已选中的色块时传入 null，即取消选中（toggle 行为）
+                这样用户无需额外操作即可退出分配模式
+              */}
               <button
-                onClick={() => selectLayer(isActive ? null : i)}
+            onClick={() => selectLayer(isActive ? null : i)}
                 className={`
                   w-10 h-10 rounded-lg border-2 transition-all duration-150 flex items-center justify-center
                   ${isActive ? 'border-white scale-110 shadow-lg' : 'border-transparent hover:border-gray-500'}
@@ -97,6 +108,8 @@ export function LayerSelector() {
       </div>
 
       {/* Hint */}
+            {/* 提示文案：告知用户当前工作流程 */}
+      {/* 选中色块 → 点击画布中的对象完成分配 → 分配完成后可取消选中继续浏览 */}
       <p className="text-xs text-gray-600">
         {selectedLayerIndex !== null
           ? `Click objects to assign to Layer ${selectedLayerIndex + 1}`

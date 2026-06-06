@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { create } from 'zustand';
 import { DEFAULT_DEPTH_SPLIT_THRESHOLDS } from '../utils/depthSplit';
+import { DEFAULT_PAPER_DIORAMA_PARAMS } from '../types';
 import type {
   AicssResult,
   LayerAssignments,
@@ -17,6 +18,9 @@ import type {
   DepthLayerKey,
   DepthSplitResult,
   DepthSplitThresholds,
+  PaperDioramaParams,
+  DepthLayerDioramaAsset,
+  ObjectDioramaAsset,
 } from '../types';
 
 const MAX_HISTORY = 50;
@@ -42,6 +46,9 @@ interface AppState {
   selectedLayerIndex: number | null;
 
   // Billboard assets (RGBA textures from backend)
+  // billboardAssets: 按 objectId 索引，存储每个物体抠出的 RGBA 贴图（用于 billboard 模式）
+  // depthLayerBillboardAssets: 按 DepthLayerKey 索引，存储每个深度层的 RGBA 贴图（用于 depth-layer 模式）
+  // 两者的区别在于切分粒度：billboardAssets 以单个物体为单位，depthLayerBillboardAssets 以深度层级为单位
   billboardAssets: Record<string, BillboardAsset>;
   depthLayerBillboardAssets: Partial<Record<DepthLayerKey, DepthLayerBillboardAsset>>;
 
@@ -65,6 +72,17 @@ interface AppState {
   depthSplitThresholds: DepthSplitThresholds;
   depthSplitConfirmed: boolean;
 
+  // Paper Diorama 2.0
+  dioramaParams: PaperDioramaParams;
+  dioramaLoading: boolean;
+  dioramaError: string | null;
+  depthLayerDioramaAssets: Partial<Record<DepthLayerKey, DepthLayerDioramaAsset>>;
+  objectDioramaAssets: Record<string, ObjectDioramaAsset>;
+  dioramaMode: 'billboard' | 'paper';  // 渲染模式：'billboard' 使用 flat PlaneGeometry（扁平面片），'paper' 使用 BoxGeometry（含厚度）模拟纸模效果
+  outlineEnabled: boolean;
+  parallaxEnabled: boolean;
+  parallaxIntensity: number;
+
   // Inpaint
   inpaintPreviewUrl: string | null;
   inpaintLoading: boolean;
@@ -74,6 +92,9 @@ interface AppState {
   dashscopeApiKey: string;
 
   // History for undo/redo
+  // 使用双栈结构：past 存储历史状态（Ctrl+Z 回退），future 存储已撤销的状态（Ctrl+Y 重做）
+  // pushHistory 时将当前 assignments 快照写入 past，并清空 future（因为新操作打断了撤销链）
+  // MAX_HISTORY = 50 限制历史栈深度，防止内存溢出
   past: HistoryEntry[];
   future: HistoryEntry[];
 
@@ -115,6 +136,18 @@ interface AppState {
   setDepthSplitThresholds: (thresholds: DepthSplitThresholds) => void;
   setDepthSplitConfirmed: (confirmed: boolean) => void;
   clearDepthSplit: () => void;
+
+  // Paper Diorama 2.0
+  setDioramaParams: (params: Partial<PaperDioramaParams>) => void;
+  setDioramaLoading: (v: boolean) => void;
+  setDioramaError: (msg: string | null) => void;
+  setDepthLayerDioramaAsset: (layer: DepthLayerKey, asset: DepthLayerDioramaAsset) => void;
+  setObjectDioramaAsset: (objectId: string, asset: ObjectDioramaAsset) => void;
+  clearDioramaAssets: () => void;
+  setDioramaMode: (mode: 'billboard' | 'paper') => void;
+  setOutlineEnabled: (enabled: boolean) => void;
+  setParallaxEnabled: (enabled: boolean) => void;
+  setParallaxIntensity: (intensity: number) => void;
 
   // Inpaint
   setInpaintPreview: (url: string | null) => void;
@@ -159,6 +192,15 @@ const initialState = {
   selectedDepthLayer: null as DepthLayerKey | null,
   depthSplitThresholds: DEFAULT_DEPTH_SPLIT_THRESHOLDS,
   depthSplitConfirmed: false,
+  dioramaParams: DEFAULT_PAPER_DIORAMA_PARAMS,
+  dioramaLoading: false,
+  dioramaError: null as string | null,
+  depthLayerDioramaAssets: {} as Partial<Record<DepthLayerKey, DepthLayerDioramaAsset>>,
+  objectDioramaAssets: {} as Record<string, ObjectDioramaAsset>,
+  dioramaMode: 'billboard' as const,
+  outlineEnabled: true,
+  parallaxEnabled: false,
+  parallaxIntensity: 0.5,
   inpaintPreviewUrl: null as string | null,
   inpaintLoading: false,
   inpaintError: null as string | null,
@@ -311,6 +353,46 @@ export const useAppStore = create<AppState>((set, get) => ({
       imageMode: 'original',
     }),
 
+  // Paper Diorama 2.0
+  setDioramaParams: (params) =>
+    set((state) => ({
+      dioramaParams: { ...state.dioramaParams, ...params },
+    })),
+
+  setDioramaLoading: (v) => set({ dioramaLoading: v }),
+
+  setDioramaError: (msg) => set({ dioramaError: msg }),
+
+  setDepthLayerDioramaAsset: (layer, asset) =>
+    set((state) => ({
+      depthLayerDioramaAssets: {
+        ...state.depthLayerDioramaAssets,
+        [layer]: asset,
+      },
+    })),
+
+  setObjectDioramaAsset: (objectId, asset) =>
+    set((state) => ({
+      objectDioramaAssets: {
+        ...state.objectDioramaAssets,
+        [objectId]: asset,
+      },
+    })),
+
+  clearDioramaAssets: () =>
+    set({
+      depthLayerDioramaAssets: {},
+      objectDioramaAssets: {},
+    }),
+
+  setDioramaMode: (mode) => set({ dioramaMode: mode }),
+
+  setOutlineEnabled: (enabled) => set({ outlineEnabled: enabled }),
+
+  setParallaxEnabled: (enabled) => set({ parallaxEnabled: enabled }),
+
+  setParallaxIntensity: (intensity) => set({ parallaxIntensity: intensity }),
+
   setInpaintPreview: (url) => set({ inpaintPreviewUrl: url }),
 
   setInpaintLoading: (v) => set({ inpaintLoading: v }),
@@ -354,6 +436,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 }));
 
 // Keyboard shortcut handler for undo/redo
+// 在模块顶层注册 keydown 监听器，而非在 React 组件中注册，
+// 这样可以确保无论哪个组件获得焦点，Ctrl+Z / Ctrl+Y 都能正常工作。
+// 检测 e.ctrlKey || e.metaKey 以兼容 macOS 的 Command 键。
 if (typeof window !== 'undefined') {
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     const ctrl = e.ctrlKey || e.metaKey;
@@ -369,6 +454,8 @@ if (typeof window !== 'undefined') {
 }
 
 // Persist DashScope API key in localStorage
+// 使用 localStorage 而非 Zustand 的 sessionStorage，因为 API key 需要在浏览器会话间持久保存，
+// 且不同于其他全局状态（页面刷新后应保留），不存入 store session 是合理的隐私/持久化权衡。
 const STORED_KEY = 'aicss_dashscope_apikey';
 if (typeof window !== 'undefined') {
   const stored = localStorage.getItem(STORED_KEY);

@@ -83,6 +83,7 @@ def _find_best_quality_and_size(
     给定原始图像、缩放比例和 base64 长度限制，
     尝试找到满足限制的编码方案。
 
+    策略：先降质量（95→15），再缩小尺寸。两阶段确保即使极高分辨率图像也能传入 API。
     返回 (base64_data_uri, 最终尺寸)。
     """
     w, h = orig_size
@@ -117,6 +118,7 @@ def _find_best_quality_and_size(
 def _encode_image(img: Image.Image) -> tuple[str, tuple[int, int]]:
     """将 PIL Image 编码为 base64 JPEG data URI，返回 (data_uri, 最终尺寸)。"""
     if img.mode == "RGBA":
+        # RGBA → RGB：白色背景合成（alpha 混合），避免透明区域变黑影响 API 识别内容
         rgb = Image.new("RGB", img.size, (255, 255, 255))
         rgb.paste(img, mask=img.split()[3])
         img = rgb

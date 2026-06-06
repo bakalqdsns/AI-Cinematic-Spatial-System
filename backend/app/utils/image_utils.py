@@ -114,6 +114,8 @@ def create_rgba_from_masked_image(
     Pixels outside the mask become transparent.
     """
     rgb = np.array(image.convert("RGB"))
+    # mask > 0 的区域 alpha=255（保留，不透明）；mask = 0 的区域 alpha=0（丢弃，透明）
+    # 这是因为补全任务中 mask 标记的是需要"保留"的原始像素，inverse 后就是目标合成区域
     alpha = (mask > 0).astype(np.uint8) * 255
     rgba = np.dstack([rgb, alpha])
     return Image.fromarray(rgba, mode="RGBA")
@@ -146,11 +148,16 @@ def estimate_depth_from_bbox(
     if x2 <= x1 or y2 <= y1:
         return 10.0
     region = depth_map[y1:y2, x1:x2]
+    # 用中位数而非均值：边界像素的深度值可能不完整（部分传感器对边缘采样不足），
+    # 中位数对这些异常值更鲁棒，能更准确地代表该物体到相机的实际距离
     return float(np.median(region))
 
 
 def rotate_image_90(img: Image.Image, k: int) -> Image.Image:
     """Rotate image by k*90 degrees counterclockwise."""
+    # expand=True：旋转时自动扩大画布，避免图片被裁剪到画布边缘
+    # fillcolor 对于 RGBA 模式必须用 (0,0,0,0) 透明填充；若用 (0,0,0) 会产生黑色伪影，
+    # 尤其是在后续合成时这些黑色像素会被误当作有效内容处理
     return img.rotate(k * 90, expand=True, fillcolor=(0, 0, 0, 0) if img.mode == "RGBA" else (0, 0, 0))
 
 
@@ -161,5 +168,7 @@ def flip_image(img: Image.Image, direction: str) -> Image.Image:
     elif direction == "vertical":
         return img.transpose(Image.FLIP_TOP_BOTTOM)
     elif direction == "both":
+        # 深度图的 "both" 翻转等价于恒等变换：先水平翻转再垂直翻转，
+        # 坐标两次反向互相抵消，结果与原图完全相同
         return img.transpose(Image.FLIP_TOP_BOTTOM).transpose(Image.FLIP_LEFT_RIGHT)
     return img

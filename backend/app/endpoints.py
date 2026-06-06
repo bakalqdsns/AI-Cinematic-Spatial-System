@@ -110,6 +110,43 @@ class InpaintRequest(BaseModel):
     apiKey: Optional[str] = Field(None, description="DashScope API key — falls back to AICSS_DASHSCOPE_API_KEY env var if not provided")
 
 
+# ─── Paper Diorama 2.0 request models ─────────────────────────────────────────
+
+class PaperStyleRequest(BaseModel):
+    imageUrl: str = Field(..., description="Image URL or base64 data URL")
+    colorLevels: int = Field(12, ge=3, le=30, description="Colour quantisation levels (lower = flatter)")
+    styleStrength: float = Field(0.7, ge=0.0, le=1.0, description="Bilateral filter strength")
+    edgeLow: int = Field(50, ge=0, le=255, description="Canny edge low threshold")
+    edgeHigh: int = Field(150, ge=0, le=255, description="Canny edge high threshold")
+
+
+class PaperDioramaRequest(BaseModel):
+    imageUrl: str = Field(..., description="Full image URL or base64 data URL")
+    maskDataUrl: str = Field(..., description="Object mask base64 PNG, 255=object, 0=background")
+    thicknessMin: float = Field(1.0, ge=0.1, le=20.0, description="Min paper thickness in mm")
+    thicknessMax: float = Field(5.0, ge=0.1, le=20.0, description="Max paper thickness in mm")
+    outlineWidth: int = Field(3, ge=0, le=20, description="Paper-cut outline width in pixels")
+    colorLevels: int = Field(12, ge=3, le=30, description="Colour quantisation levels")
+    styleStrength: float = Field(0.7, ge=0.0, le=1.0, description="Style smoothing strength")
+
+
+class PaperLayerRequest(BaseModel):
+    """
+    Generate paper-diorama texture for a full depth layer (not just one object).
+
+    与 PaperDioramaRequest 的区别：
+      - PaperDiorama：切割单个物体的 mask，将物体转为纸模纹理（逐 object）
+      - PaperLayer  ：对整层图像应用纸模效果，可选叠加 layerMask（逐 depth layer）
+    """
+    layerImageUrl: str = Field(..., description="Layer image URL or base64 data URL (RGBA PNG)")
+    layerMaskUrl: Optional[str] = Field(None, description="Optional layer mask base64 PNG")
+    thicknessMin: float = Field(1.0, ge=0.1, le=20.0)
+    thicknessMax: float = Field(5.0, ge=0.1, le=20.0)
+    outlineWidth: int = Field(3, ge=0, le=20)
+    colorLevels: int = Field(12, ge=3, le=30)
+    styleStrength: float = Field(0.7, ge=0.0, le=1.0)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Router
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,6 +190,8 @@ async def analyze(request: AnalyzeRequest):
         # Step 2: Depth estimation (start immediately)
         print(f"[{analysis_id}] Running depth estimation...")
         depth_norm = model_manager.depth_model.predict(image)
+        # scale=50.0 将深度图像素值线性映射到米：pixel_value (0-255) → depth_m = pixel * 50.0 / 255.0
+        # 即最远可表示 ~50m，与室内场景和大多数电影镜头场景吻合
         depth_m = depth_to_meters(depth_norm, scale=50.0)
 
         # Convert depth to base64 PNG
@@ -160,13 +199,15 @@ async def analyze(request: AnalyzeRequest):
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
         depth_url = pil_to_base64(depth_pil_resized)
 
-        # Step 2b: VLM detection — always runs. Key is required.
-        # Runs concurrently with depth estimation to avoid adding latency.
+        # Step 2b: VLM 检测 — 始终运行，需要 API Key。
+        # 与深度估计并行启动（asyncio.create_task），避免串行执行带来的额外延迟。
+        # VLM 返回的类别列表直接拼成 "." 分隔字符串，作为 Grounding DINO 的检测提示词。
         print(f"[{analysis_id}] Running VLM detection with apiKey={request.apiKey[:12]}...")
         import asyncio
         vlm_task = asyncio.create_task(vlm_detect(image, request.apiKey))
-        # Yield to event loop so depth estimation can finish concurrently
+        # 将控制权交还给事件循环，使深度估计能够同时执行
         detected_classes, detected_scene = await vlm_task
+        # Grounding DINO 使用 "." 作为类别之间的分隔符，因此用 "." 拼接
         effective_prompt = ".".join(detected_classes)
         print(f"[{analysis_id}] VLM scene='{detected_scene}' classes={detected_classes}")
 
@@ -196,7 +237,9 @@ async def analyze(request: AnalyzeRequest):
             np.array(image), boxes, scores
         )
 
-        # Edge refinement: snap each mask contour to nearby Canny edges
+        # SAM2 分割完成后，对每个预测 mask 进行边缘细化：
+        # 用 Canny 边缘检测原图，将 mask 轮廓上的像素吸附到距离最近的 Canny 边缘。
+        # 这样可以消除 SAM2 软边界导致的锯齿和毛边，使 paper-cut 纹理效果更干净锐利。
         print(f"[{analysis_id}] Refining mask edges...")
         image_np = np.array(image)
         masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
@@ -205,7 +248,9 @@ async def analyze(request: AnalyzeRequest):
         objects = []
         for i, (mask, score) in enumerate(masks_and_scores):
             det = detections[i]
-            # Estimate depth from median in masked region
+            # 从 mask 覆盖区域内取深度值的中位数（忽略 NaN）：
+            # nanmedian 比普通 median 更鲁棒，因为 mask 边缘像素可能位于深度图的有效区域之外，
+            # 直接求 median 会受到边缘无效值干扰；nanmedian 自动跳过这些无效像素。
             masked_depth = np.where(mask, depth_m, np.nan)
             obj_depth = float(np.nanmedian(masked_depth))
             layer_name, _, _ = assign_to_depth_layer(obj_depth)
@@ -282,7 +327,9 @@ async def segment_objects(request: SegmentRequest):
         w, h = image.size
         image_np = np.array(image)
 
-        # Get depth for depth estimation
+        # depth_model 用于估计每个检测到的物体实例的深度值（用于分配到深度层）。
+        # 虽然标注为"segment only"，但深度是 assign_to_depth_layer 的必要输入，无法省略。
+        # 如果不需要深度信息，请直接使用 segment endpoint 而不传 apiKey。
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
 
@@ -399,7 +446,11 @@ async def generate_billboard(request: BillboardRequest):
         _log.info(f"[billboard] objectId=%s polygon_points=%s bbox=%s", request.objectId, len(polygon), request.boundingBox)
 
         if polygon and len(polygon) >= 3:
-            # Full-image polygon mask
+            # 多边形裁剪流程：
+            #   1. 用 cv2.fillPoly 在全图尺寸上绘制多边形蒙版（255=保留区域）
+            #   2. 计算多边形边界框，裁剪出最小矩形区域
+            #   3. 从全图蒙版中同步裁剪对应区域，与图像保持尺寸一致
+            # polygon 优先于 boundingBox：多边形能精确跟随物体轮廓，矩形会包含多余背景
             mask_np = np.zeros((h, w), dtype=np.uint8)
             pts = np.array([[int(px * w), int(py * h)] for [px, py] in polygon], dtype=np.int32)
             if pts.shape[0] < 3:
@@ -416,7 +467,9 @@ async def generate_billboard(request: BillboardRequest):
             cropped = image.crop((px1, py1, px2, py2))
             mask_cropped = mask_np[py1:py2, px1:px2]
         else:
-            # Rectangle fallback
+            # 矩形兜底裁剪：用 boundingBox 坐标在原图上切出物体区域
+            # mask_np 同样在全图尺寸上创建（而非直接创建 crop 尺寸），
+            # 以便与 polygon 分支共用同一套 mask 处理逻辑（create_rgba_from_masked_image）
             bbox = request.boundingBox
             x1 = int(bbox["x"] * w)
             y1 = int(bbox["y"] * h)
@@ -508,7 +561,9 @@ async def inpaint_image(request: InpaintRequest):
       - Black (alpha=0):   selected objects — will be retained
     prompt: describes what to fill in the white (edited) regions
     """
-    effective_key = request.apiKey or settings.dashscope_api_key
+        effective_key = request.apiKey or settings.dashscope_api_key
+        # 优先级：请求体 apiKey > 环境变量 AICSS_DASHSCOPE_API_KEY
+        # 若两者均未提供，返回 503 而非 500，方便前端区分"未配置"与"服务器错误"
     if not effective_key:
         raise HTTPException(
             status_code=503,
@@ -542,4 +597,129 @@ async def inpaint_image(request: InpaintRequest):
         import traceback
         tb = traceback.format_exc()
         print(f"[inpaint] Error: {e}\n{tb}")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/aicss/paper-style — Paper illustration style transfer
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/paper-style")
+async def paper_style_transfer(request: PaperStyleRequest):
+    """
+    Convert a photograph to paper-cut / illustration style.
+    Applies bilateral filtering + colour quantisation + edge detection.
+    """
+    try:
+        image = await _load_image(request.imageUrl)
+        from app.utils.paper_diorama import cartoonize_image
+        styled = cartoonize_image(
+            image,
+            color_quantization_levels=request.colorLevels,
+            bilateral_filter_sigma_color=request.styleStrength * 10,
+            bilateral_filter_sigma_space=request.styleStrength * 10,
+            edge_canny_low=request.edgeLow,
+            edge_canny_high=request.edgeHigh,
+        )
+        return {"styledImageUrl": pil_to_base64(styled, fmt="PNG")}
+    except Exception as e:
+        _log.exception("[paper-style] Error")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/aicss/paper-diorama — Full diorama texture set for one object
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/paper-diorama")
+async def paper_diorama_generate(request: PaperDioramaRequest):
+    """
+    Generate a complete paper-diorama texture set for a single object:
+      - paper_style_url    : illustrated paper style image
+      - thickness_url      : thickness/height field (false-colour PNG)
+      - normal_map_url     : surface normal map
+      - outlined_url       : paper-style image with cut edges + shadow
+      - thickness_gray_url : thickness as grayscale PNG
+    """
+    try:
+        image = await _load_image(request.imageUrl)
+
+        if request.maskDataUrl.startswith("data:"):
+            import base64
+            from io import BytesIO
+            raw = request.maskDataUrl.split(",", 1)[1]
+            data = base64.b64decode(raw)
+            mask_pil = Image.open(BytesIO(data)).convert("L")
+        else:
+            import requests as _requests
+            resp = _requests.get(request.maskDataUrl, timeout=30)
+            resp.raise_for_status()
+            from io import BytesIO as _BytesIO
+            mask_pil = Image.open(_BytesIO(resp.content)).convert("L")
+
+        if mask_pil.size != image.size:
+            mask_pil = mask_pil.resize(image.size, Image.LANCZOS)
+
+        mask = np.array(mask_pil)
+        if mask.dtype != np.uint8:
+            mask = mask.astype(np.uint8)
+
+        from app.utils.paper_diorama import generate_paper_diorama_textures
+        textures = generate_paper_diorama_textures(
+            image=image,
+            mask=mask,
+            thickness_range_mm=(request.thicknessMin, request.thicknessMax),
+            outline_width=request.outlineWidth,
+            color_levels=request.colorLevels,
+            style_strength=request.styleStrength,
+        )
+        return textures
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("[paper-diorama] Error")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/aicss/paper-layer — Paper diorama texture for a depth layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/paper-layer")
+async def paper_layer_generate(request: PaperLayerRequest):
+    """
+    Generate paper-diorama texture for a full depth layer image.
+    Returns the same texture fields as /paper-diorama.
+    """
+    try:
+        image = await _load_image(request.layerImageUrl)
+
+        if request.layerMaskUrl:
+            mask_pil = base64_to_pil(request.layerMaskUrl).convert("L")
+        else:
+            mask_pil = Image.new("L", image.size, 255)
+
+        if mask_pil.size != image.size:
+            mask_pil = mask_pil.resize(image.size, Image.LANCZOS)
+
+        mask = np.array(mask_pil)
+        if mask.dtype != np.uint8:
+            mask = mask.astype(np.uint8)
+
+        from app.utils.paper_diorama import generate_paper_diorama_textures
+        textures = generate_paper_diorama_textures(
+            image=image,
+            mask=mask,
+            thickness_range_mm=(request.thicknessMin, request.thicknessMax),
+            outline_width=request.outlineWidth,
+            color_levels=request.colorLevels,
+            style_strength=request.styleStrength,
+        )
+        return textures
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[paper-layer] Error: {e}\n{tb}")
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")

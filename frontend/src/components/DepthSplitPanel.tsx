@@ -18,6 +18,11 @@ const LAYER_LABELS: Record<DepthLayerKey, string> = {
 
 const LAYER_ORDER: DepthLayerKey[] = ['foreground', 'midground', 'background', 'sky'];
 
+// LAYER_ORDER 的顺序与 UI 2x2 网格布局对应：
+//   前两个（前景/中景）→ 左列（离观众更近）
+//   后两个（背景/天空）→ 右列（离观众更远）
+// 这与 z-buffer 深度顺序一致：近处物体遮挡远处物体
+// 2x2 网格而非 1x4 列表的原因：预览图 16:9 比例下 2 列布局每格宽高比更接近原始画面
 export function DepthSplitPanel({ result, selectedLayer, isConfirmed, onSelectLayer, onConfirm }: DepthSplitPanelProps) {
   return (
     <div className="flex flex-col gap-3 p-4 bg-gray-900 border-t border-gray-700 shrink-0">
@@ -27,10 +32,17 @@ export function DepthSplitPanel({ result, selectedLayer, isConfirmed, onSelectLa
           <span>Depth Split Preview</span>
         </div>
 
+        {/*
+          确认分层：锁定深度分层的分割结果
+          确认后：
+            1. 按钮状态变为"已确认分层"（绿色），不可再次点击
+            2. 触发 Paper Diorama 面板的启用（父组件通过 isConfirmed 控制）
+            3. 后续对象分配、层级编辑均基于此次确认的分层数据进行
+        */}
         <button
-          type="button"
-          onClick={onConfirm}
-          className={[
+  type="button"
+  onClick={onConfirm}
+  className={[
             'inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors',
             isConfirmed
               ? 'bg-emerald-700/70 text-emerald-100 border border-emerald-500/60'
@@ -58,6 +70,11 @@ export function DepthSplitPanel({ result, selectedLayer, isConfirmed, onSelectLa
               ].join(' ')}
             >
               <div className="aspect-video bg-black">
+                {/*
+                  result[layer] 是后端返回的 base64 PNG，每层对应一组前景掩码
+                  object-contain 使图像完整显示在框内，letterbox 不变形
+                  aspect-video 确保四格等大，便于视觉对比各层覆盖范围
+                */}
                 <img
                   src={result[layer]}
                   alt={LAYER_LABELS[layer]}
