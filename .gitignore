@@ -33,6 +33,7 @@ htmlcov/
 backend/.cache/
 backend/logs/
 backend/pip-log/
+backend/.workspace/
 backend/sam2.1_l.pt
 backend/sam2.1_b.pt
 backend/sam2.1_s.pt

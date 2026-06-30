@@ -65,12 +65,19 @@ class Settings(BaseSettings):
     dashscope_function: str = "description_edit_with_mask"
     inpaint_timeout: int = 120
 
+    # Project Workspace
+    workspace_dir: Path = BASE_DIR / ".workspace"
+    project_id_format: str = "{timestamp}_{shot_id}"
+
     class Config:
         env_prefix = "AICSS_"
         extra = "ignore"
 
 
 settings = Settings()
+
+# Ensure workspace directories exist on startup
+(settings.workspace_dir / "projects").mkdir(parents=True, exist_ok=True)
 
 # Convenience
 DEVICE = settings.device

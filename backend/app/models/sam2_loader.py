@@ -107,7 +107,12 @@ class SAM2Model:
         Returns the full path if found, None otherwise.
         """
         import glob
-        hf_hub_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        # 优先读取 config.py 已通过 HF_HUB_CACHE 环境变量重定向后的路径，
+        # 保证 SAM2 checkpoint 回退查找仍走 backend/.cache/huggingface/hub，
+        # 与项目其它模型的缓存位置保持一致；只有在环境变量未设置时才回退到 ~/.cache/huggingface/hub。
+        hf_hub_dir = os.environ.get("HF_HUB_CACHE") or os.path.join(
+            os.path.expanduser("~"), ".cache", "huggingface", "hub"
+        )
         for root in [self.checkpoint_dir, hf_hub_dir]:
             pattern = os.path.join(root, "**", "snapshots", "**", checkpoint_name)
             matches = glob.glob(pattern, recursive=True)

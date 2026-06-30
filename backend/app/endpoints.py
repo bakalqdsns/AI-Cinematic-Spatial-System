@@ -51,6 +51,61 @@ from app.utils.spatial_utils import (
 from app.models.sam2_loader import refine_mask_edges, extract_polygon_from_mask
 from app.utils.inpaint_utils import generate_inpaint
 from app.utils.vlm_utils import vlm_detect
+from app.services.project_store import project_store
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Project persistence helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _save_project_artifact(
+    project_id: Optional[str],
+    step: str,
+    files: dict[str, bytes | dict],
+) -> list[str] | None:
+    """
+    If project_id is set, save files to the project's <step>/ directory.
+    Returns list of saved filenames, or None when project_id is not set.
+    Failures are logged but never propagate — persistence is best-effort.
+    """
+    if not project_id:
+        return None
+    try:
+        await project_store.save_step(project_id, step, files)
+        return list(files.keys())
+    except Exception as e:
+        _log.warning(f"[project-store] save_step failed: {e}")
+        return []
+
+
+def _b64_png_to_pil(b64: str):
+    """Decode base64 PNG (with or without data: prefix) to PIL Image."""
+    import base64 as _b64
+    from io import BytesIO as _BytesIO
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+    return Image.open(_BytesIO(_b64.b64decode(b64)))
+
+
+def _pil_to_png_bytes(pil_img) -> bytes:
+    """Convert PIL Image to PNG bytes."""
+    from io import BytesIO as _BytesIO
+    buf = _BytesIO()
+    if pil_img.mode not in ("RGB", "RGBA", "L"):
+        pil_img = pil_img.convert("RGBA")
+    pil_img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _sanitize_filename(name: str) -> str:
+    """
+    Sanitise an arbitrary string (objectId, layerKey, etc.) for use as a filename.
+    Only keeps letters, digits, dot, dash, underscore. Other chars become '_'.
+    Empty result is replaced by 'unnamed'.
+    """
+    import re as _re
+    s = _re.sub(r"[^A-Za-z0-9_.\-]", "_", name or "")
+    return s or "unnamed"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,15 +121,18 @@ class AnalyzeRequest(BaseModel):
     imageUrl: str
     shotId: str
     apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, results are persisted to .workspace/projects/<id>/")
 
 
 class DepthRequest(BaseModel):
     imageUrl: str
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, depth map is persisted")
 
 
 class SegmentRequest(BaseModel):
     imageUrl: str
     apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, masks are persisted")
 
 
 class LayersRequest(BaseModel):
@@ -82,11 +140,13 @@ class LayersRequest(BaseModel):
     objects: list[dict] = Field(..., description="List of SpatialObject dicts")
     imageWidth: int = Field(1024)
     imageHeight: int = Field(768)
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, layer images are persisted")
 
 
 class SceneGraphRequest(BaseModel):
     shotId: str
     objects: list[dict]
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, scene graph is persisted")
 
 
 class BillboardRequest(BaseModel):
@@ -94,6 +154,7 @@ class BillboardRequest(BaseModel):
     objectId: str
     boundingBox: dict = Field(..., description="{x, y, w, h} normalized 0-1")
     polygon: list[list[float]] = Field(default_factory=list, description="[[x,y],...] normalized 0-1, overrides boundingBox for precise cropping")
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, billboard PNG is persisted")
 
 
 class MultifaceRequest(BaseModel):
@@ -101,6 +162,7 @@ class MultifaceRequest(BaseModel):
     objectId: str
     boundingBox: dict = Field(..., description="{x, y, w, h} normalized 0-1")
     polygon: list[list[float]] = Field(default_factory=list, description="[[x,y],...] normalized 0-1, overrides boundingBox for precise cropping")
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, 6 face textures are persisted")
 
 
 class InpaintRequest(BaseModel):
@@ -108,6 +170,7 @@ class InpaintRequest(BaseModel):
     maskDataUrl: str = Field(..., description="Inverse mask (RGBA), white=edit area, black=keep area")
     prompt: str = Field(..., description="Inpainting prompt")
     apiKey: Optional[str] = Field(None, description="DashScope API key — falls back to AICSS_DASHSCOPE_API_KEY env var if not provided")
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, inpaint result is persisted")
 
 
 # ─── Paper Diorama 2.0 request models ─────────────────────────────────────────
@@ -118,6 +181,7 @@ class PaperStyleRequest(BaseModel):
     styleStrength: float = Field(0.7, ge=0.0, le=1.0, description="Bilateral filter strength")
     edgeLow: int = Field(50, ge=0, le=255, description="Canny edge low threshold")
     edgeHigh: int = Field(150, ge=0, le=255, description="Canny edge high threshold")
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, styled image is persisted")
 
 
 class PaperDioramaRequest(BaseModel):
@@ -128,6 +192,7 @@ class PaperDioramaRequest(BaseModel):
     outlineWidth: int = Field(3, ge=0, le=20, description="Paper-cut outline width in pixels")
     colorLevels: int = Field(12, ge=3, le=30, description="Colour quantisation levels")
     styleStrength: float = Field(0.7, ge=0.0, le=1.0, description="Style smoothing strength")
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, 5 paper textures are persisted")
 
 
 class PaperLayerRequest(BaseModel):
@@ -145,6 +210,8 @@ class PaperLayerRequest(BaseModel):
     outlineWidth: int = Field(3, ge=0, le=20)
     colorLevels: int = Field(12, ge=3, le=30)
     styleStrength: float = Field(0.7, ge=0.0, le=1.0)
+    projectId: Optional[str] = Field(None, description="Optional project ID — when set, 5 paper textures are persisted")
+    layerKey: Optional[str] = Field(None, description="Optional depth layer key (foreground/midground/background/sky) — used for organising saved files")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,7 +349,7 @@ async def analyze(request: AnalyzeRequest):
         # Step 5: Build scene graph
         scene_graph = build_scene_graph_from_objects(request.shotId, objects)
 
-        return {
+        result = {
             "analysisId": analysis_id,
             "depthMapUrl": depth_url,
             "objects": objects,
@@ -291,6 +358,37 @@ async def analyze(request: AnalyzeRequest):
             "vlmDetectedClasses": detected_classes,
             "vlmDetectedScene": detected_scene,
         }
+
+        # Persist all artifacts if projectId is supplied
+        if request.projectId:
+            saved_all: list[str] = []
+            # depth step
+            saved_all += await _save_project_artifact(
+                request.projectId, "depth", {"depth_map.png": _pil_to_png_bytes(depth_pil_resized)}
+            ) or []
+            # segment step (objects.json + per-object masks)
+            seg_files: dict[str, bytes | dict] = {
+                "objects.json": {"objects": objects, "width": w, "height": h}
+            }
+            for i, (mask, _) in enumerate(masks_and_scores):
+                obj_id = objects[i]["id"]
+                seg_files[f"mask_{obj_id}.png"] = _pil_to_png_bytes(
+                    Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+                )
+            saved_all += await _save_project_artifact(request.projectId, "segment", seg_files) or []
+            # scene step
+            graph_data = scene_graph.model_dump() if hasattr(scene_graph, "model_dump") else scene_graph
+            saved_all += await _save_project_artifact(
+                request.projectId, "scene", {"scene_graph.json": {"shotId": request.shotId, "graph": graph_data}}
+            ) or []
+            # layers step
+            layer_data = [l.model_dump() if hasattr(l, "model_dump") else l for l in layers]
+            saved_all += await _save_project_artifact(
+                request.projectId, "layers", {"layer_assignments.json": {"width": w, "height": h, "layers": layer_data}}
+            ) or []
+            result["savedArtifacts"] = saved_all
+
+        return result
 
     except Exception as e:
         print(f"[{analysis_id}] Error: {e}")
@@ -310,7 +408,18 @@ async def generate_depth(request: DepthRequest):
         depth_norm = model_manager.depth_model.predict(image)
         depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
-        return {"depthMapUrl": pil_to_base64(depth_pil_resized)}
+        result = {"depthMapUrl": pil_to_base64(depth_pil_resized)}
+
+        # Persist if projectId supplied
+        if request.projectId:
+            depth_bytes = _pil_to_png_bytes(depth_pil_resized)
+            saved = await _save_project_artifact(
+                request.projectId, "depth", {"depth_map.png": depth_bytes}
+            )
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -376,7 +485,22 @@ async def segment_objects(request: SegmentRequest):
                 "layer": layer_name,
             })
 
-        return {"objects": objects}
+        result = {"objects": objects}
+
+        # Persist if projectId supplied
+        if request.projectId:
+            files: dict[str, bytes | dict] = {
+                "objects.json": {"objects": objects, "width": w, "height": h}
+            }
+            for i, (mask, _) in enumerate(masks_and_scores):
+                obj_id = objects[i]["id"]
+                mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+                files[f"mask_{obj_id}.png"] = _pil_to_png_bytes(mask_img)
+            saved = await _save_project_artifact(request.projectId, "segment", files)
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -407,7 +531,22 @@ async def build_layers(request: LayersRequest):
             obj["layer"] = layer_name
 
         layers = build_spatial_layers_from_objects(request.objects, depth_m, request.imageWidth, request.imageHeight)
-        return {"layers": layers}
+        result = {"layers": layers}
+
+        # Persist if projectId supplied
+        if request.projectId:
+            files: dict[str, bytes | dict] = {
+                "layer_assignments.json": {
+                    "width": request.imageWidth,
+                    "height": request.imageHeight,
+                    "layers": [l.model_dump() if hasattr(l, "model_dump") else l for l in layers],
+                }
+            }
+            saved = await _save_project_artifact(request.projectId, "layers", files)
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -421,7 +560,17 @@ async def build_graph(request: SceneGraphRequest):
     """Build spatial relationship graph from objects."""
     try:
         graph = build_scene_graph_from_objects(request.shotId, request.objects)
-        return {"sceneGraph": graph}
+        result = {"sceneGraph": graph}
+
+        if request.projectId:
+            graph_data = graph.model_dump() if hasattr(graph, "model_dump") else graph
+            saved = await _save_project_artifact(
+                request.projectId, "scene", {"scene_graph.json": {"shotId": request.shotId, "graph": graph_data}}
+            )
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -484,7 +633,17 @@ async def generate_billboard(request: BillboardRequest):
             mask_cropped = mask_np[y1:y2, x1:x2]
 
         rgba = create_rgba_from_masked_image(cropped, mask_cropped)
-        return {"billboardUrl": pil_to_base64(rgba, fmt="PNG")}
+        result = {"billboardUrl": pil_to_base64(rgba, fmt="PNG")}
+
+        if request.projectId:
+            safe_id = _sanitize_filename(request.objectId)
+            saved = await _save_project_artifact(
+                request.projectId, "billboards", {f"billboard_{safe_id}.png": _pil_to_png_bytes(rgba)}
+            )
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
     except Exception as e:
         _log.exception(f"[billboard] ERROR objectId=%s: %s", request.objectId, e)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
@@ -541,8 +700,26 @@ async def generate_multiface(request: MultifaceRequest):
             "top": pil_to_base64(cropped.crop((0, 0, cropped.width, max(1, cropped.height // 4)))),
             "bottom": pil_to_base64(cropped.crop((0, max(0, cropped.height - cropped.height // 4), cropped.width, cropped.height))),
         }
+        result = {"faces": faces}
 
-        return {"faces": faces}
+        if request.projectId:
+            safe_id = _sanitize_filename(request.objectId)
+            files: dict[str, bytes | dict] = {}
+            face_pils = {
+                "front": cropped,
+                "back": flip_image(cropped, "horizontal"),
+                "left": rotate_image_90(cropped, -1),
+                "right": rotate_image_90(cropped, 1),
+                "top": cropped.crop((0, 0, cropped.width, max(1, cropped.height // 4))),
+                "bottom": cropped.crop((0, max(0, cropped.height - cropped.height // 4), cropped.width, cropped.height)),
+            }
+            for face_name, face_pil in face_pils.items():
+                files[f"{safe_id}_face_{face_name}.png"] = _pil_to_png_bytes(face_pil)
+            saved = await _save_project_artifact(request.projectId, "multiface", files)
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -586,10 +763,22 @@ async def inpaint_image(request: InpaintRequest):
             mask_image=mask_image,
             prompt=request.prompt,
             api_key=effective_key,
+            poll_timeout=settings.inpaint_timeout,
         )
 
         result_url = pil_to_base64(result_img)
-        return {"inpaintResultUrl": result_url}
+        result = {"inpaintResultUrl": result_url}
+
+        if request.projectId:
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+            saved = await _save_project_artifact(
+                request.projectId, "inpaint", {f"inpaint_{ts}.png": _pil_to_png_bytes(result_img)}
+            )
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
 
     except HTTPException:
         raise
@@ -621,7 +810,17 @@ async def paper_style_transfer(request: PaperStyleRequest):
             edge_canny_low=request.edgeLow,
             edge_canny_high=request.edgeHigh,
         )
-        return {"styledImageUrl": pil_to_base64(styled, fmt="PNG")}
+        result = {"styledImageUrl": pil_to_base64(styled, fmt="PNG")}
+
+        if request.projectId:
+            key = _sanitize_filename(getattr(request, "layerKey", None) or "default")
+            saved = await _save_project_artifact(
+                request.projectId, "paper", {f"paper_style_{key}.png": _pil_to_png_bytes(styled)}
+            )
+            if saved is not None:
+                result["savedArtifacts"] = saved
+
+        return result
     except Exception as e:
         _log.exception("[paper-style] Error")
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
@@ -673,6 +872,28 @@ async def paper_diorama_generate(request: PaperDioramaRequest):
             color_levels=request.colorLevels,
             style_strength=request.styleStrength,
         )
+
+        # Persist if projectId supplied — save the 5 texture PNGs
+        if request.projectId:
+            # objectId not in PaperDioramaRequest — derive from a hash of the mask
+            import hashlib as _hl
+            obj_id = _hl.md5(mask.tobytes()).hexdigest()[:10]
+            safe_id = _sanitize_filename(obj_id)
+            files: dict[str, bytes | dict] = {}
+            for kind, url in textures.items():
+                if not url.startswith("data:"):
+                    continue
+                try:
+                    b64 = url.split(",", 1)[1]
+                    files[f"{kind.replace('_url', '')}_{safe_id}.png"] = base64.b64decode(b64)
+                except Exception:
+                    continue
+            if files:
+                saved = await _save_project_artifact(request.projectId, "paper", files)
+                if saved is not None:
+                    textures = dict(textures)  # copy
+                    textures["savedArtifacts"] = saved
+
         return textures
     except HTTPException:
         raise
@@ -732,6 +953,25 @@ async def paper_layer_generate(request: PaperLayerRequest):
             color_levels=request.colorLevels,
             style_strength=request.styleStrength,
         )
+
+        # Persist if projectId supplied — 5 textures named by layerKey
+        if request.projectId:
+            key = _sanitize_filename(request.layerKey or "default")
+            files: dict[str, bytes | dict] = {}
+            for kind, url in textures.items():
+                if not isinstance(url, str) or not url.startswith("data:"):
+                    continue
+                try:
+                    b64 = url.split(",", 1)[1]
+                    files[f"{kind.replace('_url', '')}_{key}.png"] = base64.b64decode(b64)
+                except Exception:
+                    continue
+            if files:
+                saved = await _save_project_artifact(request.projectId, "paper", files)
+                if saved is not None:
+                    textures = dict(textures)
+                    textures["savedArtifacts"] = saved
+
         return textures
     except HTTPException:
         raise

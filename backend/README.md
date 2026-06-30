@@ -326,7 +326,90 @@ Performs masked image editing through DashScope.
 
 Notes:
 - `apiKey` is optional only if `AICSS_DASHSCOPE_API_KEY` is configured on the server.
-- this endpoint is implemented in the codebase but was previously undocumented.
+- the request is asynchronous — the server polls DashScope until `AICSS_INPAINT_TIMEOUT` seconds (default `120`) elapse.
+
+### `POST /api/aicss/paper-style`
+
+Paper-cut / illustration style transfer for a photograph. Applies bilateral filtering, colour quantisation, and Canny edge compositing. Used as the first stage of paper-diorama texture generation.
+
+Request body:
+
+```json
+{
+  "imageUrl": "data:image/png;base64,...",
+  "colorLevels": 12,
+  "styleStrength": 0.7,
+  "edgeLow": 50,
+  "edgeHigh": 150
+}
+```
+
+Response:
+
+```json
+{
+  "styledImageUrl": "data:image/png;base64,..."
+}
+```
+
+Notes:
+- `colorLevels` (3–30): lower values yield flatter paper-cut colours.
+- `styleStrength` (0–1): bilateral filter strength; higher = smoother flat areas.
+
+### `POST /api/aicss/paper-diorama`
+
+Generate a complete paper-diorama texture set for a single object cut out by `maskDataUrl`. Returns five images for downstream 3D rendering.
+
+Request body:
+
+```json
+{
+  "imageUrl": "data:image/png;base64,...",
+  "maskDataUrl": "data:image/png;base64,...",
+  "thicknessMin": 1.0,
+  "thicknessMax": 5.0,
+  "outlineWidth": 3,
+  "colorLevels": 12,
+  "styleStrength": 0.7
+}
+```
+
+Response (all five fields are base64 PNGs):
+
+```json
+{
+  "paper_style_url":   "data:image/png;base64,...",
+  "outlined_url":      "data:image/png;base64,...",
+  "thickness_url":     "data:image/png;base64,...",
+  "thickness_gray_url":"data:image/png;base64,...",
+  "normal_map_url":    "data:image/png;base64,..."
+}
+```
+
+Notes:
+- `maskDataUrl` is grayscale PNG, `255` = object, `0` = background.
+- `thicknessMin` / `thicknessMax` are millimetres — they only affect normalisation; the relative height field is the same.
+- paper-style uses RGBA so transparent pixels stay outside the paper region.
+
+### `POST /api/aicss/paper-layer`
+
+Same five-field texture set as `/paper-diorama`, but applied to a **full depth layer** (RGBA image where alpha = layer membership). Unlike `/paper-diorama`, no external mask is required — the alpha channel of `layerImageUrl` is the authoritative mask. An optional `layerMaskUrl` is intersected with the alpha when supplied.
+
+Request body:
+
+```json
+{
+  "layerImageUrl": "data:image/png;base64,...",
+  "layerMaskUrl": "data:image/png;base64,...",
+  "thicknessMin": 1.0,
+  "thicknessMax": 5.0,
+  "outlineWidth": 3,
+  "colorLevels": 12,
+  "styleStrength": 0.7
+}
+```
+
+Response: same five-field payload as `/paper-diorama`.
 
 ### `GET /health`
 
@@ -339,6 +422,126 @@ Returns:
   "models_loaded": true
 }
 ```
+
+---
+
+## Project Workspace (Long-term Storage + Breakpoint Continuation)
+
+The backend persists every project's intermediate ML products and textures to disk, organised by **project ID** under `backend/.workspace/projects/`. This gives you:
+
+- A persistent project file (folder) for each shot that survives backend restarts.
+- Step-level granularity — re-run any single step without redoing the others.
+- Breakpoint continuation — re-open a project, see which phases are done, and continue from there.
+- Human-readable manifest (`manifest.json`) that lists every saved artifact with SHA-256 + timestamps.
+
+### Directory Layout
+
+```
+backend/.workspace/
+└── projects/
+    └── 20260630_220000_shot_001/
+        ├── manifest.json           ← index + metadata (atomic rewrite)
+        ├── input/
+        │   └── original.png        ← original image
+        ├── depth/
+        │   └── depth_map.png       ← depth map
+        ├── masks/
+        │   ├── objects.json        ← all DetectedObject metadata
+        │   └── mask_<objectId>.png ← per-object binary mask
+        ├── layers/
+        │   └── layer_assignments.json
+        ├── scene/
+        │   └── scene_graph.json
+        ├── billboards/
+        │   └── billboard_<objectId>.png
+        ├── multiface/
+        │   └── <objectId>_face_<front|back|left|right|top|bottom>.png
+        ├── paper/
+        │   ├── paper_style_<key>.png
+        │   ├── paper_outlined_<key>.png
+        │   ├── paper_thickness_<key>.png
+        │   ├── paper_thickness_gray_<key>.png
+        │   └── paper_normal_<key>.png
+        ├── inpaint/
+        │   └── inpaint_<ts>.png
+        └── timeline/               (in manifest.json, not a separate folder)
+```
+
+### Manifest Schema
+
+```json
+{
+  "projectId": "20260630_220000_shot_001",
+  "shotId": "shot_001",
+  "createdAt": "2026-06-30T22:00:00Z",
+  "updatedAt": "2026-06-30T22:05:30Z",
+  "imageWidth": 1920,
+  "imageHeight": 1080,
+  "inputHash": "sha256:abc123...",
+  "artifacts": {
+    "depth":   { "files": [...], "savedAt": "..." },
+    "segment": { "files": [...], "savedAt": "..." },
+    "layers":  { "files": [...], "savedAt": "..." },
+    "paper":   { "files": [...], "savedAt": "..." }
+  },
+  "timeline": [
+    { "phase": "analyze", "startedAt": "...", "finishedAt": "...", "durationMs": 12345 }
+  ]
+}
+```
+
+### Project Management Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/aicss/projects` (multipart) | Create a project, upload original image (returns `projectId`) |
+| `POST` | `/api/aicss/projects/json` | Create a project with a JSON body (base64 data URL) |
+| `GET` | `/api/aicss/projects` | List all projects (summary) |
+| `GET` | `/api/aicss/projects/{pid}/manifest` | Read full manifest |
+| `GET` | `/api/aicss/projects/{pid}/artifacts/{step}/{filename}` | Read a single artifact (PNG or JSON) |
+| `POST` | `/api/aicss/projects/{pid}/checkpoint` | Record a phase-start / phase-end event in the timeline |
+| `DELETE` | `/api/aicss/projects/{pid}` | Delete a project (irreversible) |
+
+### Using `projectId` with existing endpoints
+
+Every ML endpoint accepts an optional `projectId` field. When supplied, the endpoint writes its output artifacts into the matching project's `<step>/` directory and updates `manifest.json`.
+
+| Endpoint | `projectId` persistence |
+|---|---|
+| `POST /api/aicss/analyze` | writes `depth/`, `masks/`, `layers/`, `scene/` |
+| `POST /api/aicss/depth` | writes `depth/depth_map.png` |
+| `POST /api/aicss/segment` | writes `masks/objects.json` + `masks/mask_<id>.png` × N |
+| `POST /api/aicss/layers` | writes `layers/layer_assignments.json` |
+| `POST /api/aicss/scene-graph` | writes `scene/scene_graph.json` |
+| `POST /api/aicss/billboard` | writes `billboards/billboard_<id>.png` |
+| `POST /api/aicss/multiface` | writes `multiface/<id>_face_<face>.png` × 6 |
+| `POST /api/aicss/inpaint` | writes `inpaint/inpaint_<ts>.png` |
+| `POST /api/aicss/paper-style` | writes `paper/paper_style_<key>.png` (use `layerKey` for naming) |
+| `POST /api/aicss/paper-diorama` | writes 5 paper textures under `paper/` |
+| `POST /api/aicss/paper-layer` | writes 5 paper textures under `paper/` (use `layerKey` for naming) |
+
+When `projectId` is **not** supplied, endpoints behave exactly as before — backward compatible.
+
+### Breakpoint-Continuation Example
+
+1. User starts a project: `POST /api/aicss/projects/json` with `shotId` and `imageBase64`. Backend returns `projectId = "20260630_220000_shot_001"`.
+2. Frontend passes that `projectId` to every subsequent `/analyze`, `/paper-layer`, etc. call.
+3. The backend progressively fills the project's folders.
+4. If the user closes the browser, on re-open the frontend calls `GET /projects/{pid}/manifest` to see which phases completed, then continues with the next phase.
+
+### Configuration
+
+| Env var | Default | Description |
+|---|---|---|
+| `AICSS_WORKSPACE_DIR` | `backend/.workspace/` | Project storage root. Subdirectory `projects/` is created automatically. |
+
+The workspace is excluded from git via `.gitignore` (`backend/.workspace/`).
+
+### Atomicity
+
+- `manifest.json` is rewritten via `*.tmp` → `os.replace()` (atomic on POSIX, atomic-ish on Windows).
+- Per-project `asyncio.Lock` serialises concurrent writes.
+- Stale `*.tmp` files are cleaned up on store startup.
 
 ---
 

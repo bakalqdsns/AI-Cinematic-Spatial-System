@@ -326,7 +326,90 @@ AICSS_DASHSCOPE_API_KEY=your_dashscope_key
 
 说明：
 - 只有在后端已经配置 `AICSS_DASHSCOPE_API_KEY` 时，`apiKey` 才可以省略。
-- 该端点已在代码中实现，现在也已在文档中补齐。
+- 该端点内部为异步实现：服务端会轮询 DashScope，直到超过 `AICSS_INPAINT_TIMEOUT` 秒（默认 `120`）后报错。
+
+### `POST /api/aicss/paper-style`
+
+将照片转换为纸雕 / 插画风格：双边滤波 + 颜色量化 + Canny 边缘合成。该端点是 paper-diorama 纹理生成流程的第一阶段。
+
+请求体：
+
+```json
+{
+  "imageUrl": "data:image/png;base64,...",
+  "colorLevels": 12,
+  "styleStrength": 0.7,
+  "edgeLow": 50,
+  "edgeHigh": 150
+}
+```
+
+响应：
+
+```json
+{
+  "styledImageUrl": "data:image/png;base64,..."
+}
+```
+
+参数说明：
+- `colorLevels`（3–30）：值越小颜色越平，越像剪纸。
+- `styleStrength`（0–1）：双边滤波强度，值越大平面区域越光滑。
+
+### `POST /api/aicss/paper-diorama`
+
+针对单个物体生成完整的纸雕贴图集合。`maskDataUrl` 描述物体范围，返回 5 张纹理供下游 3D 渲染使用。
+
+请求体：
+
+```json
+{
+  "imageUrl": "data:image/png;base64,...",
+  "maskDataUrl": "data:image/png;base64,...",
+  "thicknessMin": 1.0,
+  "thicknessMax": 5.0,
+  "outlineWidth": 3,
+  "colorLevels": 12,
+  "styleStrength": 0.7
+}
+```
+
+响应（5 个字段均为 base64 PNG）：
+
+```json
+{
+  "paper_style_url":   "data:image/png;base64,...",
+  "outlined_url":      "data:image/png;base64,...",
+  "thickness_url":     "data:image/png;base64,...",
+  "thickness_gray_url":"data:image/png;base64,...",
+  "normal_map_url":    "data:image/png;base64,..."
+}
+```
+
+说明：
+- `maskDataUrl` 为灰度 PNG，`255` = 物体，`0` = 背景。
+- `thicknessMin` / `thicknessMax` 单位毫米，仅影响归一化；相对高度场保持不变。
+- paper-style 输出 RGBA，纸模外部区域透明。
+
+### `POST /api/aicss/paper-layer`
+
+与 `/paper-diorama` 字段一致，但作用于**整层深度图**（RGBA 图像，alpha 即图层归属）。无需外部 mask——`layerImageUrl` 的 alpha 通道就是权威 mask。可选 `layerMaskUrl` 会在提供时与 alpha 取交集。
+
+请求体：
+
+```json
+{
+  "layerImageUrl": "data:image/png;base64,...",
+  "layerMaskUrl": "data:image/png;base64,...",
+  "thicknessMin": 1.0,
+  "thicknessMax": 5.0,
+  "outlineWidth": 3,
+  "colorLevels": 12,
+  "styleStrength": 0.7
+}
+```
+
+响应：与 `/paper-diorama` 相同的 5 字段。
 
 ### `GET /health`
 
@@ -339,6 +422,125 @@ AICSS_DASHSCOPE_API_KEY=your_dashscope_key
   "models_loaded": true
 }
 ```
+
+---
+
+## Project Workspace（长期存储 + 断点续做）
+
+后端会把每个项目的中间 ML 产物和贴图持久化到磁盘，以**项目 ID** 为单位组织在 `backend/.workspace/projects/` 下。它能带来：
+
+- 每个 shot 拥有独立的项目文件夹（持久化），后端重启不丢失。
+- step 级别细粒度——任意一个阶段可以单独重新跑，不必从头来。
+- 断点续做——重新打开项目，看 `manifest.json` 知道哪些阶段已完成，从断点继续。
+- 人类可读的 `manifest.json` 列出每个产物的 SHA-256 与时间戳。
+
+### 目录布局
+
+```
+backend/.workspace/
+└── projects/
+    └── 20260630_220000_shot_001/
+        ├── manifest.json           ← 索引与元数据（原子重写）
+        ├── input/
+        │   └── original.png        ← 原始图
+        ├── depth/
+        │   └── depth_map.png       ← 深度图
+        ├── masks/
+        │   ├── objects.json        ← 所有 DetectedObject 元数据
+        │   └── mask_<objectId>.png ← 每物体二值 mask
+        ├── layers/
+        │   └── layer_assignments.json
+        ├── scene/
+        │   └── scene_graph.json
+        ├── billboards/
+        │   └── billboard_<objectId>.png
+        ├── multiface/
+        │   └── <objectId>_face_<front|back|left|right|top|bottom>.png
+        ├── paper/
+        │   ├── paper_style_<key>.png
+        │   ├── paper_outlined_<key>.png
+        │   ├── paper_thickness_<key>.png
+        │   ├── paper_thickness_gray_<key>.png
+        │   └── paper_normal_<key>.png
+        └── inpaint/
+            └── inpaint_<ts>.png
+```
+
+### Manifest Schema
+
+```json
+{
+  "projectId": "20260630_220000_shot_001",
+  "shotId": "shot_001",
+  "createdAt": "2026-06-30T22:00:00Z",
+  "updatedAt": "2026-06-30T22:05:30Z",
+  "imageWidth": 1920,
+  "imageHeight": 1080,
+  "inputHash": "sha256:abc123...",
+  "artifacts": {
+    "depth":   { "files": [...], "savedAt": "..." },
+    "segment": { "files": [...], "savedAt": "..." },
+    "layers":  { "files": [...], "savedAt": "..." },
+    "paper":   { "files": [...], "savedAt": "..." }
+  },
+  "timeline": [
+    { "phase": "analyze", "startedAt": "...", "finishedAt": "...", "durationMs": 12345 }
+  ]
+}
+```
+
+### 项目管理端点
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `POST` | `/api/aicss/projects`（multipart） | 创建项目并上传原始图（返回 `projectId`） |
+| `POST` | `/api/aicss/projects/json` | 用 JSON body（base64 data URL）创建项目 |
+| `GET` | `/api/aicss/projects` | 列出所有项目（仅 summary） |
+| `GET` | `/api/aicss/projects/{pid}/manifest` | 读取完整 manifest |
+| `GET` | `/api/aicss/projects/{pid}/artifacts/{step}/{filename}` | 拉取单个产物（PNG 或 JSON） |
+| `POST` | `/api/aicss/projects/{pid}/checkpoint` | 记录一次 phase 起始 / 结束事件到 timeline |
+| `DELETE` | `/api/aicss/projects/{pid}` | 删除项目（不可恢复） |
+
+### 在既有端点中传入 `projectId`
+
+所有 ML 端点都支持可选的 `projectId` 字段。传入时，响应会同时把产物写入对应项目的 `<step>/` 子目录并刷新 `manifest.json`。
+
+| 端点 | 落盘内容 |
+|---|---|
+| `POST /api/aicss/analyze` | 一次性写完 `depth/`、`masks/`、`layers/`、`scene/` |
+| `POST /api/aicss/depth` | `depth/depth_map.png` |
+| `POST /api/aicss/segment` | `masks/objects.json` + `masks/mask_<id>.png` × N |
+| `POST /api/aicss/layers` | `layers/layer_assignments.json` |
+| `POST /api/aicss/scene-graph` | `scene/scene_graph.json` |
+| `POST /api/aicss/billboard` | `billboards/billboard_<id>.png` |
+| `POST /api/aicss/multiface` | `multiface/<id>_face_<face>.png` × 6 |
+| `POST /api/aicss/inpaint` | `inpaint/inpaint_<ts>.png` |
+| `POST /api/aicss/paper-style` | `paper/paper_style_<key>.png`（用 `layerKey` 命名） |
+| `POST /api/aicss/paper-diorama` | 5 张纸模贴图写入 `paper/` |
+| `POST /api/aicss/paper-layer` | 5 张纸模贴图写入 `paper/`（用 `layerKey` 命名） |
+
+**不传** `projectId` 时，端点行为与之前完全一致——向后兼容。
+
+### 断点续做示例
+
+1. 用户开始项目：`POST /api/aicss/projects/json`，传 `shotId` 和 `imageBase64`。后端返回 `projectId = "20260630_220000_shot_001"`。
+2. 前端把 `projectId` 透传给所有后续 `/analyze`、`/paper-layer` 等调用。
+3. 后端逐步把产物写入项目目录。
+4. 即便用户关闭浏览器，重新打开后前端可以 `GET /projects/{pid}/manifest` 看哪些阶段已完成，从下一个阶段继续。
+
+### 配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `AICSS_WORKSPACE_DIR` | `backend/.workspace/` | 项目存储根目录，自动创建 `projects/` 子目录。 |
+
+workspace 通过 `.gitignore` 排除（`backend/.workspace/`），不会进入版本控制。
+
+### 原子性保证
+
+- `manifest.json` 通过 `*.tmp` → `os.replace()` 写入（POSIX 完全原子，Windows 上接近原子）。
+- 每个项目内部用 `asyncio.Lock` 串行化写操作。
+- 启动时自动清理残留的 `*.tmp` 文件。
 
 ---
 

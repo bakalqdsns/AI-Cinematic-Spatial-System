@@ -17,6 +17,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import numpy as np
@@ -185,16 +186,7 @@ def _create_imageedit_task(
         },
     }
 
-    # ── DEBUG: 强制用极端 prompt 测试 mask 是否生效 ──
-    if DEBUG_INPAINT_MASK:
-        payload["input"]["prompt"] = (
-            "paper_diorama.paper_cutout.layered_scene.multiplane.parallax."
-            "storybook.illustrated_texture.handcrafted.collage.aquarelle."
-            "vintage_print.outlined_edges.flat_shapes.depth_layers"
-        )
-    # ── END DEBUG ──
-
-    print(f"[inpaint DEBUG] wanx2.1-imageedit payload: {json.dumps(payload, ensure_ascii=False)[:300]}")
+    print(f"[inpaint] wanx2.1-imageedit payload: {json.dumps(payload, ensure_ascii=False)[:300]}")
 
     resp = httpx.post(url, headers=headers, json=payload, timeout=60)
     if resp.status_code != 200:
@@ -216,8 +208,11 @@ def _create_imageedit_task(
     return task_id
 
 
-def _poll_task(task_id: str, api_key: str, max_wait: int = 300) -> str:
+def _poll_task(task_id: str, api_key: str, max_wait: Optional[int] = None) -> str:
     """轮询任务状态，返回结果图片的 URL。"""
+    if max_wait is None:
+        from ..config import settings as _settings
+        max_wait = _settings.inpaint_timeout
     url = f"{BASE_URL}/tasks/{task_id}"
     headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -265,6 +260,7 @@ def generate_inpaint(
     mask_image: Image.Image,
     prompt: str,
     api_key: str,
+    poll_timeout: Optional[int] = None,
 ) -> Image.Image:
     """
     使用 wanx2.1-imageedit 模型进行局部重绘。
@@ -275,6 +271,7 @@ def generate_inpaint(
                   - L:    255=待编辑, 0=保留
     prompt:      描述 mask 白色区域应填充的内容（如 "自然背景"）
     api_key:     DashScope API Key
+    poll_timeout: 轮询任务的最大等待秒数；为 None 时回退到 settings.inpaint_timeout
 
     返回：重绘后的 PIL Image
     """
@@ -344,12 +341,13 @@ def generate_inpaint(
     # 3. 创建任务
     task_id = _create_imageedit_task(image_b64, mask_b64, prompt, api_key)
 
-    # 4. 轮询结果
-    result_url = _poll_task(task_id, api_key)
+    # 4. 轮询结果（使用 AICSS_INPAINT_TIMEOUT 控制总等待时长）
+    result_url = _poll_task(task_id, api_key, max_wait=poll_timeout)
 
-    # 5. 下载结果
+    # 5. 下载结果（下载阶段使用相同的 timeout 限制，避免长任务超时后还被卡住）
+    download_timeout = poll_timeout if poll_timeout is not None else 120
     print(f"[inpaint DEBUG] downloading result_url={result_url}")
-    resp = httpx.get(result_url, timeout=120)
+    resp = httpx.get(result_url, timeout=download_timeout)
     print(f"[inpaint DEBUG] result resp: status={resp.status_code}, "
           f"content_type={resp.headers.get('Content-Type')}, "
           f"content_length={len(resp.content)}")
