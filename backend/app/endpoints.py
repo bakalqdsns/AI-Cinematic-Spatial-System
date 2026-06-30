@@ -159,8 +159,8 @@ router = APIRouter()
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _load_image(url: str) -> Image.Image:
-    """Load image from URL or base64."""
-    return load_image_from_url_or_base64(url)
+    """Load image from URL or base64, preserving RGBA for mask extraction."""
+    return load_image_from_url_or_base64(url, keep_alpha=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -694,17 +694,34 @@ async def paper_layer_generate(request: PaperLayerRequest):
     try:
         image = await _load_image(request.layerImageUrl)
 
+        # ── Mask extraction ────────────────────────────────────────────────────
+        # Depth-split layers are RGBA PNGs where alpha=255 means "this pixel
+        # belongs to this layer" and alpha=0 means "empty / other layer".
+        # We always extract the mask from the image's own alpha channel.
+        # request.layerMaskUrl is ignored for depth layers — the alpha channel
+        # is the authoritative mask and already matches the split boundaries.
+        image_rgba = image.convert("RGBA")
+        alpha = np.array(image_rgba.split()[-1])  # last channel = alpha
+
         if request.layerMaskUrl:
-            mask_pil = base64_to_pil(request.layerMaskUrl).convert("L")
-        else:
-            mask_pil = Image.new("L", image.size, 255)
+            # External mask is supported for object-level paper dioramas,
+            # but depth layers should always prefer their intrinsic alpha.
+            external = np.array(base64_to_pil(request.layerMaskUrl).convert("L"))
+            if external.shape == alpha.shape:
+                # Intersect: only pixels that are in BOTH the external mask
+                # AND the depth layer are treated as paper (AND gives cleaner
+                # boundaries for objects that were manually assigned).
+                alpha = np.minimum(alpha, external)
+            # If sizes differ, fall through — alpha is still used as primary.
 
-        if mask_pil.size != image.size:
-            mask_pil = mask_pil.resize(image.size, Image.LANCZOS)
-
-        mask = np.array(mask_pil)
+        mask = alpha
         if mask.dtype != np.uint8:
             mask = mask.astype(np.uint8)
+
+        # Ensure image and mask are the same size
+        if image.size != mask.shape[::-1]:
+            image = image.resize((mask.shape[1], mask.shape[0]), Image.LANCZOS)
+            image_rgba = image.convert("RGBA")
 
         from app.utils.paper_diorama import generate_paper_diorama_textures
         textures = generate_paper_diorama_textures(

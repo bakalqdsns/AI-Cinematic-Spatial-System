@@ -171,6 +171,10 @@ class SAM2Model:
         else:
             image_np = image
 
+        # Ensure RGB for SAM2 (RGBA from frontend would cause issues)
+        if image_np.ndim == 3 and image_np.shape[2] == 4:
+            image_np = image_np[:, :, :3]
+
         h, w = image_np.shape[:2]
         results = []
 

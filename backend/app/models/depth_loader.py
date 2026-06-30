@@ -64,6 +64,11 @@ class DepthModel:
 
         orig_w, orig_h = image.size
 
+        # Ensure RGB (RGBA base64 images from frontend would otherwise cause
+        # "Unable to infer channel dimension format" in transformers >= 4.51)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
         inputs = self._processor(images=image, return_tensors="pt")
         pixel_values = inputs["pixel_values"].to(self.device)
 

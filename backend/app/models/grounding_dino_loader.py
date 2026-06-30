@@ -86,6 +86,11 @@ class GroundingDinoModel:
         if isinstance(image, np.ndarray):
             image = Image.fromarray(image.astype(np.uint8))
 
+        # Ensure RGB (RGBA images from frontend cause
+        # "Unable to infer channel dimension format" in transformers >= 4.51)
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
         # Normalize prompt for Grounding DINO format
         text_prompt = prompt.strip()
         if not text_prompt.endswith("."):

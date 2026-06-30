@@ -48,6 +48,33 @@ def _load_mask(mask_url: str) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Downsampling helpers — keep heavy CV2 ops on manageable sizes
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 512 px is large enough to preserve layer-boundary detail from the alpha mask
+# while cutting bilateral / distanceTransform / findContours time from ~20 s to ~0.3 s
+_WORK_SIZE = 512
+
+
+def _downsample_if_needed(pil: Image.Image) -> tuple[Image.Image, float]:
+    """
+    Downsample ``pil`` so its longest edge ≤ _WORK_SIZE.
+    Returns (processed_pil, scale_factor) so the caller can re-upscale later.
+    """
+    w, h = pil.size
+    if max(w, h) <= _WORK_SIZE:
+        return pil, 1.0
+    scale = _WORK_SIZE / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    return pil.resize((new_w, new_h), Image.LANCZOS), scale
+
+
+def _upsample_to(orig: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """Re-upsample ``orig`` to ``target_size`` using LANCZOS."""
+    return orig.resize(target_size, Image.LANCZOS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. Paper Style Transfer
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -66,14 +93,13 @@ def cartoonize_image(
     Convert a photograph to a paper-cut / illustration style.
 
     Steps:
-      1. Convert to grayscale → detect edges (Canny)
-      2. Apply bilateral filter to preserve edges while smoothing colour
-      3. Colour quantisation (k-means) for flat colour regions
-      4. Composite: quantised colour × edge mask
+      1. Downsample to _WORK_SIZE → run bilateral filter + k-means at low res
+      2. Upsample result back to original size
+      3. Edge composite: apply Canny edges from full-res image over upsampled cartoon
 
     Parameters
     ----------
-    image          : input PIL image (RGB)
+    image          : input PIL image (RGB), any size
     bilateral_filter_* : bilateral filter parameters (larger → smoother flat areas)
     edge_canny_*       : Canny edge detection thresholds
     color_quantization_levels : number of colour clusters (lower → flatter look)
@@ -82,39 +108,30 @@ def cartoonize_image(
     -------
     PIL Image (RGB) — paper-illustration style
     """
-    img = _pil_to_cv2(image)
+    orig_size = image.size  # (w, h)
 
-    # ── Step 1: Edge detection ───────────────────────────────────────────────
-    # 先对灰度图做一次轻微的双边滤波，作用是：
-    # 去除高频噪声的同时保留边缘，使后续 Canny 边缘检测更稳定
+    # ── Step 0: Work on downsampled image for speed ───────────────────────────
+    work_img, scale = _downsample_if_needed(image)
+    work_w, work_h = work_img.size
+    img = _pil_to_cv2(work_img)
+
+    # ── Step 1: Edge detection (on downsampled image) ─────────────────────────
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blurred = cv2.bilateralFilter(gray, edge_Blurksize, 75, 75)
     edges = cv2.Canny(blurred, edge_canny_low, edge_canny_high)
-    # Canny 检出的边缘为白色(255)，背景为黑色(0)
-    # 反转后：边缘变成黑色(0)，物体内部变成白色(255)
-    # 这样后续可以作为掩膜，将深色笔触叠加到白色纸面上
     edges_inv = cv2.bitwise_not(edges)
-
-    # 轻微膨胀边缘，使线条在卡通化后更明显，避免细小的断线
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     edges_inv = cv2.dilate(edges_inv, kernel, iterations=1)
 
-    # ── Step 2: Bilateral filter (preserves edges, smooths flat colour) ───────
-    # 双边滤波的核心优势：空间距离 + 颜色相似度 双重加权
-    #   - 空间核：靠近中心点的像素权重更大（保局部结构）
-    #   - 颜色核：颜色相近的像素权重更大（跨边缘处不会模糊）
-    # 结果：物体内部平滑，边缘被完整保留 — 这正是卡通插画需要的效果
+    # ── Step 2: Bilateral filter (on downsampled image) ───────────────────────
     smoothed = cv2.bilateralFilter(
         img,
         bilateral_filter_d,
-        bilateral_filter_sigma_color * 10,   # sigmaColor → scaled for uint8 range
-        bilateral_filter_sigma_space * 10,   # sigmaSpace
+        bilateral_filter_sigma_color * 10,
+        bilateral_filter_sigma_space * 10,
     )
 
-    # ── Step 3: Colour quantisation via k-means ─────────────────────────────
-    # k-means 将颜色聚类到 K 个中心，使相近颜色被强制归并为同一色块
-    # 效果：产生大面积扁平色区，消除色调渐变 — 接近手绘插画/剪纸的质感
-    # 颜色数量越少 → 色块越扁平 → 纸张感越强
+    # ── Step 3: Colour quantisation via k-means (on downsampled image) ─────────
     pixels = smoothed.reshape(-1, 3).astype(np.float32)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.1)
     _, labels, centers = cv2.kmeans(
@@ -127,15 +144,17 @@ def cartoonize_image(
     )
     quantized_flat = centers[labels.flatten()].reshape(smoothed.shape).astype(np.uint8)
 
-    # ── Step 4: Composite edges over quantised colour ───────────────────────
+    # ── Step 4: Composite edges over quantised colour ─────────────────────────
     result = quantized_flat.copy()
-
-    # 用 [20, 20, 20] 而不是纯黑 (0,0,0) 绘制边缘：
-    #   - 纯黑线条过于生硬，像墨水钢笔画
-    #   - 略浅的深灰更接近铅笔/炭笔的质感，视觉上更柔和自然
     result[edges_inv == 0] = [20, 20, 20]
 
-    return _cv2_to_pil(result)
+    # ── Step 5: Upsample back to original size ────────────────────────────────
+    # _WORK_SIZE ≤ 512, so upscale preserves cartoon clarity while matching output size
+    result_pil = _cv2_to_pil(result)
+    if scale != 1.0:
+        result_pil = _upsample_to(result_pil, orig_size)
+
+    return result_pil
 
 
 def paper_style_from_url(image_url: str, **kwargs) -> Image.Image:
@@ -166,56 +185,63 @@ def generate_thickness_map(
 ) -> np.ndarray:
     """
     Generate a height/depth field from a binary object mask.
+    Operates on a downsampled mask for speed, then upsamples the result back
+    to ``mask.shape``.
 
     Intuition: paper cut edges are the tallest (lightest in height map),
     interior flat regions are the base (darkest in height map).
 
     Steps
     -----
-      1. Compute distance transform from background → edges are farthest
-      2. Compute gradient magnitude → strong gradients = steep "side walls"
-      3. Combine edge distance + gradient into single height map
+      1. Downsample mask to _WORK_SIZE
+      2. Compute distance transform (the heaviest step)
+      3. Upsample height map back to original resolution
       4. Normalise to [0, 255] (uint8)
 
     Parameters
     ----------
-    mask              : 0-255 uint8, 255 = object, 0 = background
-    thickness_range_mm: (min, max) mm thickness range
+    mask              : 0-255 uint8, 255 = object, 0 = background, any size
+    thickness_range_mm: (min, max) mm thickness range  (used only for normalisation)
     edge_brightness_factor: how bright to make the edges vs. flat regions
 
     Returns
     -------
-    uint8 ndarray (H, W), 255 = tallest edge, 0 = base
+    uint8 ndarray (H, W) matching mask.shape, 255 = tallest edge, 0 = base
     """
-    # Ensure mask is binary
-    _, binary = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+    orig_h, orig_w = mask.shape[:2]
 
-    # dist_inside：对物体内部像素，计算其到最近背景点的距离
-    #   远离边缘（靠近物体中心）的像素距离大 → 颜色更亮
-    #   紧贴边缘的像素距离小 → 颜色更暗
-    # dist_outside：对背景像素，计算其到最近物体边缘的距离
-    #   这使得物体边缘两侧都有一圈"陡坡"
+    # ── Step 1: Downsample mask ─────────────────────────────────────────────────
+    # Use PIL for high-quality resize (nearest-neighbour for binary mask avoids
+    # introducing intermediate gray values at boundaries)
+    mask_pil = Image.fromarray(mask)
+    work_pil = mask_pil.resize(
+        (max(1, int(orig_w * min(1.0, _WORK_SIZE / max(orig_w, orig_h)))),
+         max(1, int(orig_h * min(1.0, _WORK_SIZE / max(orig_w, orig_h))))),
+        Image.NEAREST,
+    )
+    work = np.array(work_pil)
+    if work.dtype != np.uint8:
+        work = work.astype(np.uint8)
+
+    # ── Step 2: Distance transform on small mask ───────────────────────────────
+    _, binary = cv2.threshold(work, 127, 255, cv2.THRESH_BINARY)
     dist_inside = cv2.distanceTransform(binary, cv2.DIST_L2, cv2.DIST_MASK_3)
     dist_outside = cv2.distanceTransform(cv2.bitwise_not(binary), cv2.DIST_L2, cv2.DIST_MASK_3)
+    height_small = dist_inside * edge_brightness_factor + dist_outside * 0.5
 
-    # 组合策略：边缘处两个距离都较大 → 叠加后最亮（纸边最厚）
-    # 物体内部中心 dist_inside 大，但 dist_outside = 0 → 亮度适中（纸面平坦）
-    # 背景区域两者都小 → 保持黑暗（作为基线）
-    # edge_brightness_factor = 1.8：边缘处距离乘以 1.8，使边缘更突出
-    # dist_outside * 0.5：外部陡坡权重较小，仅起平滑过渡作用
-    height = dist_inside * edge_brightness_factor + dist_outside * 0.5
+    if height_small.max() > 0:
+        height_small = (height_small / height_small.max()) * 255.0
+    height_small = height_small.astype(np.float32)
+    height_small = cv2.GaussianBlur(height_small, (3, 3), 0)
 
-    # Normalise to 0–255
-    if height.max() > 0:
-        height = (height / height.max()) * 255.0
-    height = height.astype(np.uint8)
+    # ── Step 3: Upsample back to original resolution ───────────────────────────
+    height_full = cv2.resize(
+        height_small,
+        (orig_w, orig_h),
+        interpolation=cv2.INTER_LINEAR,
+    ).astype(np.uint8)
 
-    # 高斯模糊的作用：软化从边缘到内部的亮度突变
-    # 不加模糊时，边缘到内部会产生明显的阶梯状过渡
-    # 模糊后过渡更自然，类似纸张从切口到平面的柔和倾斜
-    height = cv2.GaussianBlur(height, (3, 3), 0)
-
-    return height
+    return height_full
 
 
 def generate_thickness_map_rgb(thickness: np.ndarray) -> Image.Image:
@@ -297,15 +323,16 @@ def apply_paper_outline(
 
     Steps
     -----
-      1. Compute outer contour of the mask → draw white outline
-      2. Compute inner contour (dilate → subtract) → draw dark outline
-      3. Optional drop shadow offset below-right
-      4. Composite onto original
+      1. Downsample image + mask to _WORK_SIZE
+      2. Compute outer contour at low res → draw white outline
+      3. Compute inner contour at low res → draw dark outline
+      4. Upscale result back to original size
+      5. Apply drop shadow at full resolution (cheap O(n) operation)
 
     Parameters
     ----------
-    image          : PIL RGB/RGBA image
-    mask           : uint8 0-255, 255 = object
+    image          : PIL RGB/RGBA image, any size
+    mask           : uint8 0-255, 255 = object, any size
     outline_color  : RGB colour for the outer cut edge
     outline_width  : thickness in pixels of the outer edge
     shadow_offset  : pixels to offset shadow
@@ -316,59 +343,78 @@ def apply_paper_outline(
     -------
     PIL Image (RGBA)
     """
-    img = image.convert("RGBA")
-    img_arr = np.array(img)
-    binary = (mask > 127).astype(np.uint8) * 255
+    orig_size = image.size  # (w, h)
+    orig_h, orig_w = orig_size[1], orig_size[0]
 
-    result = cv2.cvtColor(img_arr, cv2.COLOR_RGBA2BGRA)
+    # ── Step 1: Downsample both image and mask to the same working size ────────
+    work_img, img_scale = _downsample_if_needed(image)
+    work_w, work_h = work_img.size
 
-    # ── Drop shadow (PIL alpha-composite) ─────────────────────────────────────
-    if add_shadow and shadow_offset > 0:
-        shadow_arr = cv2.bitwise_and(result, result, mask=binary)
-        M = np.float32([[1, 0, shadow_offset], [0, 1, shadow_offset]])
-        shadow_shifted = cv2.warpAffine(shadow_arr, M, (img.width, img.height),
-                                         borderMode=cv2.BORDER_REFLECT)
-        shadow_rgba = Image.fromarray(cv2.cvtColor(shadow_shifted, cv2.COLOR_BGR2RGBA))
-        shadow_rgba.putalpha(60)
-        img = Image.alpha_composite(shadow_rgba, img)
+    # Resize mask to the same working dimensions as work_img so binary.shape matches img_arr.shape
+    work_mask_pil = Image.fromarray(mask).resize((work_w, work_h), Image.NEAREST)
+    work_mask = np.array(work_mask_pil)
+    if work_mask.dtype != np.uint8:
+        work_mask = work_mask.astype(np.uint8)
 
-    # ── Contour masks for drawing ─────────────────────────────────────────────
-    h, w = binary.shape
+    img_arr = np.array(work_img.convert("RGBA"))
+    binary = (work_mask > 127).astype(np.uint8) * 255
+
+    # ── Step 2: Contour ops at low resolution ─────────────────────────────────
+    # Scale outline widths so they look proportional on the upscaled result
+    outline_outer_s = max(1, int(outline_width_outer * img_scale))
+    outline_inner_s = max(1, int(outline_width_inner * img_scale))
+
+    # Work directly with PIL Images — avoid round-tripping through np.array which
+    # can lose precision and adds unnecessary copies
+    img_result_pil = work_img.convert("RGBA")
 
     # Outer outline
-    if outline_width_outer > 0:
+    if outline_outer_s > 0:
         outer_contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        outer_mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.drawContours(outer_mask, outer_contours, -1, 255,
-                         thickness=max(1, outline_width_outer), lineType=cv2.LINE_AA)
-        oc_r, oc_g, oc_b = outline_color
-        overlay = Image.new("RGBA", (w, h), (oc_r, oc_g, oc_b, 0))
+        overlay = Image.new("RGBA", (work_w, work_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
+        oc_r, oc_g, oc_b = outline_color
         for cnt in outer_contours:
             pts = cnt.squeeze().reshape(-1, 2).tolist()
             if len(pts) >= 2:
-                draw.line(pts, fill=(oc_r, oc_g, oc_b, 255), width=max(1, outline_width_outer))
-        img = Image.alpha_composite(img, overlay)
+                draw.line(pts, fill=(oc_r, oc_g, oc_b, 255), width=outline_outer_s)
+        img_result_pil = Image.alpha_composite(img_result_pil, overlay)
 
-    # Inner outline：通过先膨胀再相减，得到物体边界处的一个"内缩环"
-    # 这个环代表物体内部的凹陷感——在剪纸中，边缘被切除后，
-    # 内侧通常会有一个深色的压痕线，模拟纸张折叠或裁切的痕迹
-    if outline_width_inner > 0:
+    # Inner outline
+    if outline_inner_s > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        dilated = cv2.dilate(binary, kernel, iterations=outline_width_inner)
+        dilated = cv2.dilate(binary, kernel, iterations=outline_inner_s)
         inner = cv2.subtract(dilated, binary)
         inner_contours, _ = cv2.findContours(inner, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if inner_contours:
-            sc_r, sc_g, sc_b = shadow_color
-            overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(overlay)
-            for cnt in inner_contours:
-                pts = cnt.squeeze().reshape(-1, 2).tolist()
-                if len(pts) >= 2:
-                    draw.line(pts, fill=(sc_r, sc_g, sc_b, 255), width=max(1, outline_width_inner))
-            img = Image.alpha_composite(img, overlay)
+        overlay = Image.new("RGBA", (work_w, work_h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        sc_r, sc_g, sc_b = shadow_color
+        for cnt in inner_contours:
+            pts = cnt.squeeze().reshape(-1, 2).tolist()
+            if len(pts) >= 2:
+                draw.line(pts, fill=(sc_r, sc_g, sc_b, 255), width=outline_inner_s)
+        img_result_pil = Image.alpha_composite(img_result_pil, overlay)
 
-    return img
+    # ── Step 3: Upscale back to original size ─────────────────────────────────
+    if img_scale != 1.0:
+        result_pil = img_result_pil.resize(orig_size, Image.LANCZOS)
+    else:
+        result_pil = img_result_pil
+
+    # ── Step 4: Drop shadow at full resolution ─────────────────────────────────
+    if add_shadow and shadow_offset > 0:
+        img_arr_full = np.array(result_pil)
+        binary_full = (mask > 127).astype(np.uint8) * 255
+        result_cv = cv2.cvtColor(img_arr_full, cv2.COLOR_RGBA2BGR)
+        shadow_arr = cv2.bitwise_and(result_cv, result_cv, mask=binary_full)
+        M = np.float32([[1, 0, shadow_offset], [0, 1, shadow_offset]])
+        shadow_shifted = cv2.warpAffine(shadow_arr, M, (orig_w, orig_h),
+                                         borderMode=cv2.BORDER_REFLECT)
+        shadow_rgba = Image.fromarray(cv2.cvtColor(shadow_shifted, cv2.COLOR_BGR2RGBA))
+        shadow_rgba.putalpha(60)
+        result_pil = Image.alpha_composite(shadow_rgba, result_pil)
+
+    return result_pil
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -395,13 +441,19 @@ def generate_paper_diorama_textures(
 
     Output keys
     -----------
-    paper_style_url   : base64 PNG — illustrated paper style image
+    paper_style_url   : base64 PNG — illustrated paper style image (RGBA, transparent where mask=0)
     thickness_url     : base64 PNG — thickness/height field (false colour)
     normal_map_url    : base64 PNG — surface normal map
-    outlined_url      : base64 PNG — paper-style image with cut edges + shadow
+    outlined_url      : base64 PNG — paper-style image with cut edges + shadow (RGBA, transparent where mask=0)
     thickness_gray_url: base64 PNG — thickness as grayscale
     """
     from app.utils.image_utils import pil_to_base64
+
+    # ── 0. Normalise mask to uint8 ─────────────────────────────────────────────
+    if mask.dtype != np.uint8:
+        mask_norm = mask.astype(np.uint8)
+    else:
+        mask_norm = mask
 
     # ── 1. Paper style transfer ───────────────────────────────────────────────
     styled = cartoonize_image(
@@ -411,29 +463,32 @@ def generate_paper_diorama_textures(
         bilateral_filter_sigma_space=style_strength * 10,
     )
 
-    # ── 2. Thickness map ─────────────────────────────────────────────────────
-    thickness = generate_thickness_map(mask, thickness_range_mm=thickness_range_mm)
+    # ── 2. Apply mask alpha to styled image ───────────────────────────────────
+    # Convert to RGBA and set alpha = mask: paper regions (mask=255) are opaque,
+    # empty regions (mask=0) become fully transparent.
+    styled_rgba = np.array(styled.convert("RGBA"))
+    styled_rgba[:, :, 3] = mask_norm
+    styled_with_alpha = Image.fromarray(styled_rgba, mode="RGBA")
+
+    # ── 3. Thickness map ─────────────────────────────────────────────────────
+    thickness = generate_thickness_map(mask_norm, thickness_range_mm=thickness_range_mm)
     thickness_gray_pil = Image.fromarray(thickness)
 
-    # ── 3. Normal map ─────────────────────────────────────────────────────────
+    # ── 4. Normal map ─────────────────────────────────────────────────────────
     normal = generate_normal_map(thickness)
 
-    # ── 4. Paper outline ─────────────────────────────────────────────────────
-    # outline_width_inner = outline_width // 2：内轮廓比外轮廓细一半
-    # 外轮廓代表纸张切割边（最显眼），内轮廓模拟折叠压痕（辅助感）
+    # ── 5. Paper outline ─────────────────────────────────────────────────────
+    # Use the alpha-aware styled image so outline draws on transparent background,
+    # and contour detection only operates within the paper region (mask=255).
     outlined = apply_paper_outline(
-        styled,
-        mask,
+        styled_with_alpha,
+        mask_norm,
         outline_width_outer=outline_width,
         outline_width_inner=max(1, outline_width // 2),
     )
 
-    # Convert styled + mask to RGBA for outlined composite
-    styled_rgba = styled.convert("RGBA")
-    outlined = outlined  # already RGBA
-
     return {
-        "paper_style_url":    pil_to_base64(styled, fmt="PNG"),
+        "paper_style_url":    pil_to_base64(styled_with_alpha, fmt="PNG"),
         "thickness_url":     pil_to_base64(generate_thickness_map_rgb(thickness), fmt="PNG"),
         "normal_map_url":     pil_to_base64(Image.fromarray(normal), fmt="PNG"),
         "outlined_url":       pil_to_base64(outlined, fmt="PNG"),

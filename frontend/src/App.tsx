@@ -206,6 +206,9 @@ function Toolbar() {
       setAutoGenPhase('done');
       setAutoGenProgress(100);
       setVlmHint(null);
+      // #region agent log
+      console.log('[AICSS-DEBUG] autoGen-complete', { layerAssetKeys: Object.keys(layerAssets), depthSplitKeys: Object.keys(depthSplit) });
+      // #endregion
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setAutoGenPhase('error');
