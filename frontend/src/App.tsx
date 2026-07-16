@@ -2,17 +2,20 @@
 // App — Main layout: top toolbar + split pane (2D editor | 3D viewer)
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useRef, useState, useEffect } from 'react';
-import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key, Sparkles } from 'lucide-react';
+import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key, Sparkles, Image as ImageIcon, Layers } from 'lucide-react';
 import type { DepthLayerKey } from './types';
 import type { DepthLayerDioramaAsset } from './types';
 import { ImageCanvas } from './components/ImageCanvas';
 import { LayerSelector } from './components/LayerSelector';
 import { Viewer3D } from './components/Viewer3D';
 import { SplitControls } from './components/SplitControls';
+import { SequencePanel } from './components/sequence/SequencePanel';
 import { useAppStore } from './store/useAppStore';
 import { analyzeImage } from './services/aicssService';
 import { splitDepthLayers } from './utils/depthSplit';
 import { generatePaperLayer } from './services/aicssService';
+
+type AppMode = 'single' | 'sequence';
 
 const TARGET_W = 1920;
 const TARGET_H = 1080;
@@ -77,7 +80,13 @@ function autoResizeTo1920x1080(file: File): Promise<{ dataUrl: string; base64: s
 }
 
 // ─── Toolbar ────────────────────────────────────────────────────────────────────
-function Toolbar() {
+function Toolbar({
+  appMode,
+  setAppMode,
+}: {
+  appMode: AppMode;
+  setAppMode: (mode: AppMode) => void;
+}) {
   const {
     originalImageUrl,
     analysisResult,
@@ -241,6 +250,32 @@ function Toolbar() {
         <span className="text-white font-bold text-lg tracking-tight">AICSS</span>
       </div>
 
+      {/* App Mode Switch */}
+      <div className="flex items-center gap-1 mr-2 bg-gray-800 rounded-lg p-1 border border-gray-700">
+        <button
+          onClick={() => setAppMode('single')}
+          className={`
+            flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
+            ${appMode === 'single' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}
+          `}
+          title="Single Image Mode"
+        >
+          <ImageIcon size={14} />
+          Single
+        </button>
+        <button
+          onClick={() => setAppMode('sequence')}
+          className={`
+            flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
+            ${appMode === 'sequence' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}
+          `}
+          title="Sequence Mode"
+        >
+          <Layers size={14} />
+          Sequence
+        </button>
+      </div>
+
       {/* Inpaint API Key — used by the local-inpaint endpoint (wanx2.1-imageedit).
           Scene/object detection now runs locally via Qwen3-VL, so this key
           is only needed when the user triggers the Inpaint workflow. */}
@@ -373,8 +408,8 @@ function Toolbar() {
   );
 }
 
-// ─── 2D Panel ──────────────────────────────────────────────────────────────────
-function Panel2D() {
+// ─── Single Image Editor ─────────────────────────────────────────────────────────
+function SingleImageEditor() {
   const analysisResult = useAppStore((s) => s.analysisResult);
   const croppedImageUrl = useAppStore((s) => s.croppedImageUrl);
   const originalImageUrl = useAppStore((s) => s.originalImageUrl);
@@ -456,6 +491,7 @@ function Panel2D() {
 export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [splitRatio, setSplitRatio] = useState(50);
+  const [appMode, setAppMode] = useState<AppMode>('single');
   const containerRef = useRef<HTMLDivElement>(null);
 
   const setImage = useAppStore((s) => s.setImage);
@@ -534,29 +570,38 @@ export default function App() {
         className="flex flex-col h-screen w-screen overflow-hidden bg-gray-950 text-white select-none"
         style={{ fontFamily: 'system-ui, -apple-system, sans-serif' }}
       >
-        <Toolbar />
+        <Toolbar appMode={appMode} setAppMode={setAppMode} />
 
         <div ref={containerRef} className="flex flex-1 overflow-hidden">
-          {/* 2D Panel */}
-          <div
-            className="overflow-hidden border-r border-gray-800 flex-shrink-0"
-            style={{ width: `${splitRatio}%` }}
-          >
-            <Panel2D />
-          </div>
+          {appMode === 'single' ? (
+            <>
+              {/* 2D Panel */}
+              <div
+                className="overflow-hidden border-r border-gray-800 flex-shrink-0"
+                style={{ width: `${splitRatio}%` }}
+              >
+                <SingleImageEditor />
+              </div>
 
-          {/* Resize handle */}
-          <div
-            className={`w-1 cursor-col-resize flex-shrink-0 transition-colors ${
-              isDragging ? 'bg-blue-500' : 'bg-gray-800 hover:bg-gray-600'
-            }`}
-            onMouseDown={handleMouseDown}
-          />
+              {/* Resize handle */}
+              <div
+                className={`w-1 cursor-col-resize flex-shrink-0 transition-colors ${
+                  isDragging ? 'bg-blue-500' : 'bg-gray-800 hover:bg-gray-600'
+                }`}
+                onMouseDown={handleMouseDown}
+              />
 
-          {/* 3D Panel */}
-          <div className="flex-1 overflow-hidden">
-            <Viewer3D />
-          </div>
+              {/* 3D Panel */}
+              <div className="flex-1 overflow-hidden">
+                <Viewer3D />
+              </div>
+            </>
+          ) : (
+            /* Sequence Panel - full width */
+            <div className="flex-1 overflow-hidden">
+              <SequencePanel />
+            </div>
+          )}
         </div>
       </div>
     </>

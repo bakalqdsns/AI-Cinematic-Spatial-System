@@ -179,3 +179,6 @@ export interface ObjectDioramaAsset {
   outlinedUrl?: string;
   paperStyleUrl?: string;
 }
+
+// ─── Sequence Analysis (v2) ────────────────────────────────────────────────────
+export * from './sequence';

@@ -34,6 +34,8 @@ from app.config import settings, DEVICE
 from app.models import model_manager
 from app.endpoints import router as endpoints_router
 from app.endpoints_projects import router as projects_router
+from app.endpoints_sequence import router as sequence_router
+from app.endpoints_shots import router as shots_router
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,6 +78,8 @@ app.add_middleware(
 # Mount endpoints router
 app.include_router(endpoints_router, prefix="/api/aicss", tags=["AICSS"])
 app.include_router(projects_router, prefix="/api/aicss", tags=["Projects"])
+app.include_router(sequence_router, prefix="/api/aicss", tags=["v2 - Sequence"])
+app.include_router(shots_router, prefix="/api/aicss", tags=["v2 - Shots"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
