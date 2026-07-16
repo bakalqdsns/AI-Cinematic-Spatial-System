@@ -1,0 +1,62 @@
+# ─── Default: let Git auto-detect, normalize on commit ─────────────────────────
+* text=auto
+
+# ─── Source files: keep LF for diff-friendly patches ───────────────────────────
+*.py          text eol=lf
+*.js          text eol=lf
+*.jsx         text eol=lf
+*.ts          text eol=lf
+*.tsx         text eol=lf
+*.json        text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.toml        text eol=lf
+*.cfg         text eol=lf
+*.ini         text eol=lf
+*.sh          text eol=lf
+*.bat         text eol=crlf
+*.ps1         text eol=crlf
+
+# ─── Docs ──────────────────────────────────────────────────────────────────────
+*.md          text eol=lf
+*.txt         text eol=lf
+
+# ─── Web / 3D assets: keep as binary so Git does not touch them ───────────────
+*.png         binary
+*.jpg         binary
+*.jpeg        binary
+*.gif         binary
+*.webp        binary
+*.ico         binary
+*.svg         text eol=lf
+*.glb         binary
+*.gltf        text eol=lf
+*.fbx         binary
+*.obj         text eol=lf
+*.mtl         text eol=lf
+*.blend       binary
+*.blend1      binary
+
+# ─── ML model files: never normalise, never diff ───────────────────────────────
+*.pt          binary
+*.pth         binary
+*.onnx        binary
+*.bin         binary
+*.safetensors binary
+*.gguf        binary
+*.tflite      binary
+
+# ─── Archives ──────────────────────────────────────────────────────────────────
+*.zip         binary
+*.tar         binary
+*.gz          binary
+*.7z          binary
+*.rar         binary
+*.whl         binary
+
+# ─── Build / lock files: keep diffs friendly but LF ────────────────────────────
+package-lock.json text eol=lf
+yarn.lock       text eol=lf
+pnpm-lock.yaml  text eol=lf
+Pipfile.lock    text eol=lf
+uv.lock         text eol=lf

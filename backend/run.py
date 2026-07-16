@@ -3,8 +3,9 @@
 Quick start script for AICSS backend.
 
 Usage:
-    python run.py          # auto-detects and uses .venv
-    python run.py --cpu   # force CPU mode
+    python run.py                # auto-detects and uses .venv
+    python run.py --cpu         # force CPU mode
+    python run.py --download-vlm # download Qwen3-VL-4B-Instruct weights from hf-mirror
 """
 import os
 import sys
@@ -30,6 +31,11 @@ parser = argparse.ArgumentParser(description="AICSS Backend Runner")
 parser.add_argument("--host", default=None)
 parser.add_argument("--port", type=int, default=None)
 parser.add_argument("--cpu", action="store_true", help="Force CPU mode")
+parser.add_argument(
+    "--download-vlm",
+    action="store_true",
+    help="Download Qwen3-VL-4B-Instruct weights from hf-mirror before starting the server",
+)
 args, _unknown = parser.parse_known_args()
 
 # ─── Re-launch with venv Python if needed ─────────────────────
@@ -53,6 +59,21 @@ if __name__ == "__main__":
     # Force UTF-8 mode on Windows (fixes GBK encoding issues with pip, transformers)
     os.environ.setdefault("PYTHONUTF8", "1")
 
+    if args.download_vlm:
+        # Download Qwen3-VL weights via the dedicated streaming helper
+        # (hf-mirror.com endpoint, resumable, chunked progress).
+        helper = os.path.join(_backend_dir, "download_qwen3vl.py")
+        if not os.path.exists(helper):
+            print(f"[run.py] ERROR: download helper missing: {helper}", file=sys.stderr)
+            sys.exit(1)
+        result = subprocess.run(
+            [_venv_python if is_venv_valid() else sys.executable, helper],
+            cwd=_backend_dir,
+        )
+        if result.returncode != 0:
+            print(f"[run.py] VLM download failed (exit={result.returncode})", file=sys.stderr)
+            sys.exit(result.returncode)
+
     import uvicorn
     from app.config import settings
 
@@ -64,6 +85,7 @@ if __name__ == "__main__":
     print(f"  Device  : {settings.device}")
     print(f"  Depth   : {settings.depth_model}")
     print(f"  SAM2    : {settings.sam2_model_size}")
+    print(f"  VLM     : {settings.vlm_model}")
 
     uvicorn.run(
         "app.main:app",

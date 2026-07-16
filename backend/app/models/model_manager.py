@@ -19,6 +19,7 @@ from app.config import settings, DEVICE
 from .depth_loader import DepthModel
 from .grounding_dino_loader import GroundingDinoModel
 from .sam2_loader import SAM2Model
+from .qwen3vl_loader import Qwen3VLModel
 
 
 class ModelManager:
@@ -26,6 +27,7 @@ class ModelManager:
         self._depth: Optional[DepthModel] = None
         self._grounding_dino: Optional[GroundingDinoModel] = None
         self._sam2: Optional[SAM2Model] = None
+        self._qwen3vl: Optional[Qwen3VLModel] = None
         self._loaded = False
 
     @property
@@ -45,6 +47,12 @@ class ModelManager:
         if self._sam2 is None:
             raise RuntimeError("SAM2 model not loaded. Call load_all() first.")
         return self._sam2
+
+    @property
+    def qwen3vl(self) -> Qwen3VLModel:
+        if self._qwen3vl is None:
+            raise RuntimeError("Qwen3-VL model not loaded. Call load_all() first.")
+        return self._qwen3vl
 
     def load_all(self):
         """Load all models. Call once on startup."""
@@ -71,6 +79,14 @@ class ModelManager:
         )
         self._sam2.load()
 
+        print("[ModelManager] Loading Qwen3-VL...")
+        self._qwen3vl = Qwen3VLModel(
+            model_name=settings.vlm_model,
+            device=DEVICE,
+            max_new_tokens=settings.vlm_max_new_tokens,
+        )
+        self._qwen3vl.load()
+
         self._loaded = True
         print("[ModelManager] All models ready.")
 
@@ -89,6 +105,7 @@ class ModelManager:
         self._depth = None
         self._grounding_dino = None
         self._sam2 = None
+        self._qwen3vl = None
         self._loaded = False
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

@@ -114,11 +114,11 @@ function Toolbar() {
     setAnalysisError(null);
     setVlmHint('正在识别场景内容...');
     try {
-      const result = await analyzeImage(imageUrl, 'shot_001', dashscopeApiKey);
+      const result = await analyzeImage(imageUrl, 'shot_001');
       if (result.vlmDetectedClasses?.length) {
         setVlmHint(`场景：${result.vlmDetectedScene || '未知'} | 识别到 ${result.vlmDetectedClasses.length} 个类别`);
       } else {
-        setVlmHint('未能识别任何物体，请检查 API Key 或图片质量');
+        setVlmHint('未能识别任何物体，请检查图片质量');
       }
       setAnalysisResult(result);
     } catch (err) {
@@ -132,7 +132,7 @@ function Toolbar() {
 
   // One-click auto-generate: analyze → depth split → paper layer generation
   const handleAutoGenerate = async () => {
-    if (!imageUrl || !dashscopeApiKey) return;
+    if (!imageUrl) return;
 
     setAutoGenPhase('analyzing');
     setAutoGenProgress(5);
@@ -140,7 +140,7 @@ function Toolbar() {
     setIsAnalyzing(true);
 
     try {
-      const result = await analyzeImage(imageUrl, 'shot_001', dashscopeApiKey);
+      const result = await analyzeImage(imageUrl, 'shot_001');
       setAnalysisResult(result);
       setAutoGenProgress(30);
 
@@ -241,14 +241,17 @@ function Toolbar() {
         <span className="text-white font-bold text-lg tracking-tight">AICSS</span>
       </div>
 
-      {/* DashScope API Key */}
+      {/* Inpaint API Key — used by the local-inpaint endpoint (wanx2.1-imageedit).
+          Scene/object detection now runs locally via Qwen3-VL, so this key
+          is only needed when the user triggers the Inpaint workflow. */}
       <div className="flex items-center gap-2 mr-2">
         <Key size={16} className="text-gray-400" />
         <input
           type="password"
           value={dashscopeApiKey}
           onChange={(e) => setDashscopeApiKey(e.target.value)}
-          placeholder="API Key"
+          placeholder="Inpaint Key"
+          title="DashScope API Key — only required for the Inpaint workflow"
           className="w-32 px-2 py-1.5 rounded bg-gray-800 border border-gray-600 text-gray-200 text-xs
             placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
           spellCheck={false}
@@ -282,11 +285,11 @@ function Toolbar() {
       {/* One-click Auto Generate */}
       <button
         onClick={handleAutoGenerate}
-        disabled={!imageUrl || !dashscopeApiKey || isAutoGenerating}
-        title={!dashscopeApiKey ? '请先输入 DashScope API Key' : '一键完成分析、分层与纸雕生成'}
+        disabled={!imageUrl || isAutoGenerating}
+        title={!imageUrl ? '请先导入图片' : '一键完成分析、分层与纸雕生成'}
         className={`
           flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
-          ${!imageUrl || !dashscopeApiKey || isAutoGenerating
+          ${!imageUrl || isAutoGenerating
             ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
             : 'bg-green-600 hover:bg-green-500 text-white active:scale-95'}
         `}

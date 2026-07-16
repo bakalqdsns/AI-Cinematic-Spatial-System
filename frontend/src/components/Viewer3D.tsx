@@ -1,19 +1,26 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// Viewer3D — Babylon.js Paper Diorama 3D Scene
-// Migrated from Three.js / React Three Fiber
-// Supports: Billboard mode (flat planes) | Paper Diorama mode (BoxGeometry with thickness)
-// ─────────────────────────────────────────────────────────────────────────────
-import { useRef, useEffect, useCallback, useState } from 'react';
-import * as BABYLON from '@babylonjs/core';
+// ?????????????????????????????????????????????????????????????????????????????
+// Viewer3D ? Three.js Paper Diorama 3D Scene
+// Supports: Billboard mode | Paper Diorama mode
+// Paper Diorama: BoxGeometry (3D paper thickness), normal maps, outline edges, parallax animation
+// ?????????????????????????????????????????????????????????????????????????????
+import { useRef, useMemo, useCallback, useEffect, useState } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
+import { OrbitControls } from '@react-three/drei';
+import * as THREE from 'three';
 import { useAppStore } from '../store/useAppStore';
 import { LAYER_COLORS } from '../types';
 import type { DepthLayerKey, DetectedObject } from '../types';
 import { ExportPanel } from './ExportPanel';
 
 // Scene dimensions (world units)
+// 20:15 = 4:3 ???????????????????
+// ???? FOV=50? ? position z=15????????
 const SCENE_WIDTH = 20;
 const SCENE_HEIGHT = 15;
 
+// Z??????=-20???????=-12???=-6???=-2
+// ??????????? z=15??-z?????-20 ~ -2 ????18??????
+// ?????20???15???????????????????
 const DEPTH_LAYER_Z: Record<DepthLayerKey, number> = {
   sky: -20,
   background: -12,
@@ -21,6 +28,9 @@ const DEPTH_LAYER_Z: Record<DepthLayerKey, number> = {
   foreground: -2,
 };
 
+// ??????????????? = ?? ? dioramaParams.thicknessMax
+// ??????????????20x15????????0.08~0.30????????
+// ???"??"??????????????????????
 const LAYER_THICKNESS: Record<DepthLayerKey, number> = {
   sky: 0.08,
   background: 0.12,
@@ -30,724 +40,622 @@ const LAYER_THICKNESS: Record<DepthLayerKey, number> = {
 
 const DEPTH_LAYER_ORDER: DepthLayerKey[] = ['foreground', 'midground', 'background', 'sky'];
 
-const DEFAULT_CAMERA_POS = new BABYLON.Vector3(0, 0, 15);
+// ??? Texture cache ?????????????????????????????????????????????????????????????
+// ?? Map ?? React state ????
+// React state ????? SceneContent ?????? SceneContent ????? useMemo/useCallback ????
+// textureCache ??????????????????? URL ??????????
+// ?? useEffect cleanup ?????? dispose() ?????
+const textureCache = new Map<string, THREE.Texture>();
 
-// ─── Shared color constants ────────────────────────────────────────────────────
-const PAPER_SIDE_COLOR = BABYLON.Color3.FromHexString('#f5f0e8');
-const PAPER_OBJ_SIDE_COLOR = BABYLON.Color3.FromHexString('#f0ebe0');
-
-// ─── Helper: build a Babylon StandardMaterial ──────────────────────────────────
-function makeMat(scene: BABYLON.Scene, name: string): BABYLON.StandardMaterial {
-  const mat = new BABYLON.StandardMaterial(name, scene);
-  mat.specularColor = BABYLON.Color3.Black();
-  return mat;
+function getOrLoadTexture(url: string, key: string): THREE.Texture {
+  if (textureCache.has(key)) return textureCache.get(key)!;
+  const loader = new THREE.TextureLoader();
+  const tex = loader.load(url);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  textureCache.set(key, tex);
+  return tex;
 }
 
-function makePaperFrontMat(
-  scene: BABYLON.Scene,
-  texUrl: string,
-  normalUrl?: string,
-  name = 'paperFront',
-): BABYLON.StandardMaterial {
-  const mat = makeMat(scene, name);
-  const tex = new BABYLON.Texture(texUrl, scene, true, true);
-  tex.gammaSpace = false;
-  tex.wrapU = BABYLON.Texture.CLAMP_ADDRESSMODE;
-  tex.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
-  mat.diffuseTexture = tex;
-  mat.backFaceCulling = true;
-  if (normalUrl) {
-    mat.bumpTexture = new BABYLON.Texture(normalUrl, scene, true, true);
-  }
-  return mat;
+function disposeCache() {
+  textureCache.forEach((tex) => tex.dispose());
+  textureCache.clear();
 }
 
-function makePaperSideMat(
-  scene: BABYLON.Scene,
-  texUrl?: string,
-  name = 'paperSide',
-): BABYLON.StandardMaterial {
-  const mat = makeMat(scene, name);
-  if (texUrl) {
-    const tex = new BABYLON.Texture(texUrl, scene, true, true);
-    tex.gammaSpace = false;
-    tex.wrapU = BABYLON.Texture.CLAMP_ADDRESSMODE;
-    tex.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
-    mat.diffuseTexture = tex;
-  } else {
-    mat.diffuseColor = PAPER_SIDE_COLOR;
-  }
-  mat.backFaceCulling = true;
-  return mat;
-}
-
-function makeColorMat(
-  scene: BABYLON.Scene,
-  hexColor: string,
-  alpha = 0.5,
-): BABYLON.StandardMaterial {
-  const mat = makeMat(scene, `colorMat_${hexColor}`);
-  mat.diffuseColor = BABYLON.Color3.FromHexString(hexColor);
-  mat.alpha = alpha;
-  mat.backFaceCulling = false;
-  return mat;
-}
-
-function makeBillboardMat(
-  scene: BABYLON.Scene,
-  texUrl?: string,
-  color?: string,
-  alpha = 1.0,
-): BABYLON.StandardMaterial {
-  const mat = makeMat(
-    scene,
-    `billboard_${texUrl?.slice(0, 20) ?? color ?? 'fallback'}`,
-  );
-  if (texUrl) {
-    const tex = new BABYLON.Texture(texUrl, scene, true, true);
-    tex.gammaSpace = false;
-    tex.wrapU = BABYLON.Texture.CLAMP_ADDRESSMODE;
-    tex.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
-    mat.diffuseTexture = tex;
-    mat.emissiveTexture = tex;
-    mat.useAlphaFromDiffuseTexture = true;
-  } else if (color) {
-    mat.diffuseColor = BABYLON.Color3.FromHexString(color);
-    mat.emissiveColor = BABYLON.Color3.FromHexString(color);
-  }
-  mat.alpha = alpha;
-  mat.backFaceCulling = false;
-  return mat;
-}
-
-function makeOutlineMat(
-  scene: BABYLON.Scene,
-  texUrl: string,
-  hexColor: string,
-  alpha = 0.3,
-): BABYLON.StandardMaterial {
-  const mat = makeMat(scene, `outline_${hexColor}`);
-  const tex = new BABYLON.Texture(texUrl, scene, true, true);
-  tex.gammaSpace = false;
-  tex.wrapU = BABYLON.Texture.CLAMP_ADDRESSMODE;
-  tex.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
-  mat.diffuseTexture = tex;
-  mat.useAlphaFromDiffuseTexture = true;
-  mat.alpha = alpha;
-  mat.diffuseColor = BABYLON.Color3.FromHexString(hexColor);
-  mat.backFaceCulling = false;
-  return mat;
-}
-
-// ─── Helper: compute 3D position from object bounding box ───────────────────────
-function objectPosition(obj: DetectedObject, offsetX = 0): BABYLON.Vector3 {
-  const cx = obj.boundingBox.x + obj.boundingBox.w / 2;
-  const cy = 1 - (obj.boundingBox.y + obj.boundingBox.h / 2);
-  const clampedDepth = Math.max(0, Math.min(obj.depth, 50));
-  const posZ = (clampedDepth / 50) * 10 - 5;
-  return new BABYLON.Vector3(
-    (cx - 0.5) * SCENE_WIDTH + offsetX,
-    (cy - 0.5) * SCENE_HEIGHT,
-    posZ,
+// ??? Directional light for paper diorama shading ???????????????????????????????
+function PaperDioramaLighting() {
+  return (
+    <>
+      <ambientLight intensity={0.8} />
+      <directionalLight
+        position={[5, 8, 10]}
+        intensity={1.2}
+        color="#fff8e1"
+      />
+      {/* Soft fill from below-left to enhance paper thickness look */}
+      <directionalLight
+        position={[-4, -3, 5]}
+        intensity={0.3}
+        color="#e3f2fd"
+      />
+    </>
   );
 }
 
-// ─── Scene ref type ────────────────────────────────────────────────────────────
-interface SceneObjects {
-  engine: BABYLON.Engine;
-  scene: BABYLON.Scene;
-  camera: BABYLON.ArcRotateCamera;
-  hemiLight: BABYLON.HemisphericLight;
-  dirLight: BABYLON.DirectionalLight;
-  fillLight: BABYLON.DirectionalLight;
-  shadowGenerator: BABYLON.ShadowGenerator;
-  paperLayerMeshes: BABYLON.Mesh[];
-  paperObjectMeshes: BABYLON.Mesh[];
-  billboardMeshes: BABYLON.Mesh[];
-  outlineMeshes: BABYLON.Mesh[];
-  bgPlane: BABYLON.Mesh | null;
-  gridMesh: BABYLON.Mesh;
-  baseCameraPos: BABYLON.Vector3;
-  parallaxEnabled: boolean;
-  parallaxIntensity: number;
+// ??? Billboard mesh (flat plane) ???????????????????????????????????????????????
+interface BillboardMeshProps {
+  obj: DetectedObject;
+  colorIndex: number;
+  texture?: THREE.Texture;
+  onSelect: (id: string) => void;
+}
+
+function BillboardMesh({ obj, colorIndex, texture, onSelect }: BillboardMeshProps) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const billboardOffsets = useAppStore((s) => s.billboardOffsets);
+  const offset = billboardOffsets[obj.id];
+
+  const color = LAYER_COLORS[colorIndex];
+
+  const posX = useMemo(() => {
+    const cx = obj.boundingBox.x + obj.boundingBox.w / 2;
+    return (cx - 0.5) * SCENE_WIDTH + (offset?.offsetX ?? 0);
+  }, [obj.boundingBox, offset]);
+
+  const posY = useMemo(() => {
+    const cy = 1 - (obj.boundingBox.y + obj.boundingBox.h / 2);
+    return (cy - 0.5) * SCENE_HEIGHT;
+  }, [obj.boundingBox]);
+
+  // obj.depth ?? 0-50?AI ??????????????? [-5, 5] ????
+  // ???depth/50*10 - 5 = ????? ? z ????
+  // ?????? depth ??????????????????? z ??
+  const posZ = useMemo(() => {
+    const clampedDepth = Math.max(0, Math.min(obj.depth, 50));
+    return (clampedDepth / 50) * 10 - 5;
+  }, [obj.depth]);
+
+  const sizeX = obj.boundingBox.w * SCENE_WIDTH;
+  const sizeY = obj.boundingBox.h * SCENE_HEIGHT;
+
+  const material = useMemo(() => {
+    if (texture) {
+      return new THREE.MeshBasicMaterial({
+        map: texture,
+        transparent: true,
+        side: THREE.DoubleSide,
+        opacity: 1,
+      });
+    }
+    return new THREE.MeshBasicMaterial({
+      color: new THREE.Color(color),
+      transparent: true,
+      opacity: 0.5,
+      side: THREE.DoubleSide,
+    });
+  }, [texture, color]);
+
+  useEffect(() => {
+    return () => { material.dispose(); };
+  }, [material]);
+
+  const handleClick = useCallback((e: THREE.Event) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (e as any).stopPropagation?.();
+    // ??????? OrbitControls??????????????
+    onSelect(obj.id);
+  }, [obj.id, onSelect]);
+
+  return (
+    <mesh ref={meshRef} position={[posX, posY, posZ]} onClick={handleClick}>
+      <planeGeometry args={[sizeX, sizeY]} />
+      <primitive object={material} attach="material" />
+    </mesh>
+  );
+}
+
+// ??? Paper Diorama layer mesh (BoxGeometry with thickness) ?????????????????????
+interface PaperLayerMeshProps {
+  layer: DepthLayerKey;
+  frontTexture: THREE.Texture;
+  thicknessGrayTexture?: THREE.Texture;
+  normalMapTexture?: THREE.Texture;
+  thickness: number;
+}
+
+function PaperLayerMesh({
+  layer,
+  frontTexture,
+  thicknessGrayTexture,
+  normalMapTexture,
+  thickness,
+}: PaperLayerMeshProps) {
+  const z = DEPTH_LAYER_Z[layer];
+
+  const frontMat = useMemo(() => {
+    const m = new THREE.MeshStandardMaterial({
+      map: frontTexture,
+      transparent: true,
+      side: THREE.FrontSide,
+      roughness: 0.9,
+      metalness: 0.0,
+    });
+    if (normalMapTexture) m.normalMap = normalMapTexture;
+    return m;
+  }, [frontTexture, normalMapTexture]);
+
+  const sideMat = useMemo(() => {
+    if (thicknessGrayTexture) {
+      const m = new THREE.MeshStandardMaterial({
+        map: thicknessGrayTexture,
+        transparent: true,
+        side: THREE.FrontSide,
+        roughness: 0.8,
+        metalness: 0.0,
+      });
+      if (normalMapTexture) m.normalMap = normalMapTexture;
+      return m;
+    }
+    return new THREE.MeshStandardMaterial({
+      color: new THREE.Color('#f5f0e8'),
+      transparent: true,
+      opacity: 0.95,
+      side: THREE.FrontSide,
+      roughness: 0.8,
+      metalness: 0.0,
+    });
+  }, [thicknessGrayTexture, normalMapTexture]);
+
+  useEffect(() => {
+    return () => {
+      frontMat.dispose();
+      sideMat.dispose();
+    };
+  }, [frontMat, sideMat]);
+
+  return (
+    <mesh position={[0, 0, z]} castShadow receiveShadow>
+      <boxGeometry args={[SCENE_WIDTH, SCENE_HEIGHT, thickness]} />
+      {/* BoxGeometry ???????? Three.js ??????
+            0 = +x ???
+            1 = -x ???
+            2 = +y ??
+            3 = -y ??
+            4 = +z ????????
+            5 = -z ??
+          frontMat ?? 4/5???????????????
+          sideMat ?? 0~3???????????????? */}
+      <primitive object={frontMat} attach="material-4" />
+      <primitive object={frontMat} attach="material-5" />
+      <primitive object={sideMat} attach="material-0" />
+      <primitive object={sideMat} attach="material-1" />
+      <primitive object={sideMat} attach="material-2" />
+      <primitive object={sideMat} attach="material-3" />
+    </mesh>
+  );
+}
+
+// ??? Paper Diorama object mesh (BoxGeometry with paper thickness) ???????????????
+// ? PaperLayerMesh ??????
+// - LayerMesh????????? BoxGeometry?????
+// - ObjectMesh????????????? BoxGeometry???????? 2D ???????
+//    boundingBox.w/h???? 0-1???? SCENE_WIDTH/HEIGHT ????
+// ???????????"??"?????????????
+interface PaperObjectMeshProps {
+  obj: DetectedObject;
+  colorIndex: number;
+  frontTexture: THREE.Texture;
+  thickness: number;
+  onSelect: (id: string) => void;
+}
+
+function PaperObjectMesh({
+  obj,
+  colorIndex,
+  frontTexture,
+  thickness,
+  onSelect,
+}: PaperObjectMeshProps) {
+  const billboardOffsets = useAppStore((s) => s.billboardOffsets);
+  const offset = billboardOffsets[obj.id];
+
+  const posX = useMemo(() => {
+    const cx = obj.boundingBox.x + obj.boundingBox.w / 2;
+    return (cx - 0.5) * SCENE_WIDTH + (offset?.offsetX ?? 0);
+  }, [obj.boundingBox, offset]);
+
+  const posY = useMemo(() => {
+    const cy = 1 - (obj.boundingBox.y + obj.boundingBox.h / 2);
+    return (cy - 0.5) * SCENE_HEIGHT;
+  }, [obj.boundingBox]);
+
+  const posZ = useMemo(() => {
+    // obj.depth ?? 0-50?AI ??????????????? [-5, 5] ????
+    // ???depth/50*10 - 5 = ????? ? z ????
+    // ?????? depth ??????????????????? z ??
+    const clampedDepth = Math.max(0, Math.min(obj.depth, 50));
+    return (clampedDepth / 50) * 10 - 5;
+  }, [obj.depth]);
+
+  const sizeX = obj.boundingBox.w * SCENE_WIDTH;
+  const sizeY = obj.boundingBox.h * SCENE_HEIGHT;
+  const color = LAYER_COLORS[colorIndex];
+
+  const frontMat = useMemo(() => {
+    if (frontTexture) {
+      return new THREE.MeshStandardMaterial({
+        map: frontTexture,
+        transparent: true,
+        side: THREE.FrontSide,
+        roughness: 0.9,
+        metalness: 0.0,
+      });
+    }
+    return new THREE.MeshStandardMaterial({
+      color: new THREE.Color(color),
+      transparent: true,
+      opacity: 0.7,
+      side: THREE.FrontSide,
+      roughness: 0.9,
+      metalness: 0.0,
+    });
+  }, [frontTexture, color]);
+
+  const sideMat = useMemo(() => new THREE.MeshStandardMaterial({
+    color: new THREE.Color('#f0ebe0'),
+    transparent: true,
+    opacity: 0.95,
+    side: THREE.FrontSide,
+    roughness: 0.85,
+    metalness: 0.0,
+  }), []);
+
+  useEffect(() => {
+    return () => {
+      frontMat.dispose();
+      sideMat.dispose();
+    };
+  }, [frontMat, sideMat]);
+
+  const handleClick = useCallback((e: THREE.Event) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (e as any).stopPropagation?.();
+    onSelect(obj.id);
+  }, [obj.id, onSelect]);
+
+  return (
+    <mesh
+      position={[posX, posY, posZ]}
+      onClick={handleClick}
+      castShadow
+      receiveShadow
+    >
+      <boxGeometry args={[sizeX, sizeY, thickness]} />
+      {/* BoxGeometry ?????4=+z ???5=-z ???0..3=???? */}
+      <primitive object={frontMat} attach="material-4" />
+      <primitive object={frontMat} attach="material-5" />
+      <primitive object={sideMat} attach="material-0" />
+      <primitive object={sideMat} attach="material-1" />
+      <primitive object={sideMat} attach="material-2" />
+      <primitive object={sideMat} attach="material-3" />
+    </mesh>
+  );
+}
+
+// ??? Outline edge effect ????????????????????????????????????????????????????????
+// Renders white edges on depth layer boundaries for paper-cut look
+interface OutlineEdgeProps {
+  layer: DepthLayerKey;
+  texture: THREE.Texture;
   outlineEnabled: boolean;
-  dioramaMode: 'billboard' | 'paper';
-  // Live pointer for parallax
-  pointerNDC: { x: number; y: number };
 }
 
-// ─── Main component ────────────────────────────────────────────────────────────
-export function Viewer3D() {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const sceneRef = useRef<SceneObjects | null>(null);
-  const [glCanvas, setGlCanvas] = useState<HTMLCanvasElement | null>(null);
+function OutlineEdge({ layer, texture, outlineEnabled }: OutlineEdgeProps) {
+  if (!outlineEnabled) return null;
 
+  const z = DEPTH_LAYER_Z[layer];
+  // z + 0.01?????????????????????? z-fighting??????
+  // ????????????????????????"?"???????
+  const color = layer === 'foreground' ? '#ffffff' : '#e0ddd8';
+
+  return (
+    <mesh position={[0, 0, z + 0.01]}>
+      <planeGeometry args={[SCENE_WIDTH, SCENE_HEIGHT]} />
+      <meshBasicMaterial
+        map={texture}
+        transparent
+        // alphaTest=0.05???? alpha ? > 0.05 ?????????????????????
+        // ???????"??"????????????????
+        alphaTest={0.05}
+        depthWrite={false}
+        color={new THREE.Color(color)}
+        opacity={0.3}
+      />
+    </mesh>
+  );
+}
+
+// ??? Background plane ???????????????????????????????????????????????????????????
+function BackgroundPlane() {
   const analysisResult = useAppStore((s) => s.analysisResult);
-  const selectedObjectId = useAppStore((s) => s.selectedObjectId);
-  const setSelectedObjectId = useAppStore((s) => s.setSelectedObjectId);
-  const editMode = useAppStore((s) => s.editMode);
-  const dioramaMode = useAppStore((s) => s.dioramaMode);
+  const depthUrl = analysisResult?.depthMapUrl;
+
+  const texture = useMemo(() => {
+    if (!depthUrl) return null;
+    return getOrLoadTexture(depthUrl, 'depth-bg');
+  }, [depthUrl]);
+
+  if (!texture) return null;
+
+  return (
+    <mesh position={[0, 0, DEPTH_LAYER_Z.sky - 0.5]}>
+      <planeGeometry args={[SCENE_WIDTH, SCENE_HEIGHT]} />
+      <meshBasicMaterial map={texture} transparent opacity={0.25} side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
+// ??? Scene content ??????????????????????????????????????????????????????????????
+interface SceneContentProps {
+  onSelectObject: (id: string) => void;
+}
+
+function SceneContent({ onSelectObject }: SceneContentProps) {
+  const analysisResult = useAppStore((s) => s.analysisResult);
   const assignments = useAppStore((s) => s.assignments);
   const billboardAssets = useAppStore((s) => s.billboardAssets);
   const depthLayerBillboardAssets = useAppStore((s) => s.depthLayerBillboardAssets);
   const depthLayerDioramaAssets = useAppStore((s) => s.depthLayerDioramaAssets);
   const objectDioramaAssets = useAppStore((s) => s.objectDioramaAssets);
+  const dioramaMode = useAppStore((s) => s.dioramaMode);
   const outlineEnabled = useAppStore((s) => s.outlineEnabled);
-  const parallaxEnabled = useAppStore((s) => s.parallaxEnabled);
-  const parallaxIntensity = useAppStore((s) => s.parallaxIntensity);
   const dioramaParams = useAppStore((s) => s.dioramaParams);
 
   const objects = analysisResult?.objects ?? [];
-  const assignedObjects = objects.filter((o) => assignments[o.id] !== undefined);
 
-  // ─── Build/update scene when state changes ─────────────────────────────────
-  const buildScene = useCallback(() => {
-    const s = sceneRef.current;
-    if (!s) return;
+  const assignedObjects = useMemo(
+    () => objects.filter((o) => assignments[o.id] !== undefined),
+    [objects, assignments],
+  );
 
-    // #region agent log
-    console.log('[AICSS-DEBUG] buildScene called', {
-      dioramaMode: s.dioramaMode,
-      depthLayerKeys: Object.keys(depthLayerDioramaAssets),
-      billboardKeys: Object.keys(billboardAssets),
-      objectAssetKeys: Object.keys(objectDioramaAssets),
-      assignedCount: assignedObjects.length,
-      hasDepthMap: !!analysisResult?.depthMapUrl,
-    });
-    // #endregion
+  const isPaperMode = dioramaMode === 'paper';
 
-    const isPaper = s.dioramaMode === 'paper';
+  useEffect(() => {
+    return () => {
+      disposeCache();
+    };
+  }, []);
 
-    // ── Paper layer meshes ─────────────────────────────────────────────────
-    if (isPaper) {
-      const layerMeshes: BABYLON.Mesh[] = [];
+  return (
+    <>
+      <BackgroundPlane />
+      {isPaperMode ? <PaperDioramaLighting /> : <ambientLight intensity={1} />}
 
-      DEPTH_LAYER_ORDER.forEach((layer) => {
+      {/* ?? Paper Diorama Mode ?????????????????????????????????????????????? */}
+      {/* ??????????
+          1. outlinedUrl???????????+??+?????????????
+          2. paperStyleUrl???????????????
+          3. rgbaUrl???????????????
+          4. billboardAsset.rgbaUrl?billboard ???????
+          ?????????????????? outlinedUrl ?????????????"????"??? */}
+      {isPaperMode && DEPTH_LAYER_ORDER.map((layer) => {
         const dioramaAsset = depthLayerDioramaAssets[layer];
         const billboardAsset = depthLayerBillboardAssets[layer];
-        const frontUrl =
-          dioramaAsset?.outlinedUrl
+
+        // Prefer outlinedUrl (paper style + cut edges) for front face
+        const frontUrl = dioramaAsset?.outlinedUrl
           || dioramaAsset?.paperStyleUrl
           || dioramaAsset?.rgbaUrl
           || billboardAsset?.rgbaUrl;
 
-        if (!frontUrl) {
-          // #region agent log
-          console.log('[AICSS-DEBUG] layer-skip-no-url', { layer, hasDiorama: !!dioramaAsset, dioramaKeys: dioramaAsset ? Object.keys(dioramaAsset) : [], hasBillboard: !!billboardAsset });
-          // #endregion
-          return;
-        }
-        // #region agent log
-        console.log('[AICSS-DEBUG] layer-creating-mesh', { layer, frontUrlPrefix: frontUrl?.slice(0, 60) });
-        // #endregion
+        if (!frontUrl) return null;
 
-        const thicknessWorld =
-          LAYER_THICKNESS[layer] * (dioramaParams.thicknessMax / 5.0);
-        const z = DEPTH_LAYER_Z[layer];
+        const tex = getOrLoadTexture(frontUrl, `paper-layer-${layer}`);
+        const thicknessWorld = LAYER_THICKNESS[layer] * (dioramaParams.thicknessMax / 5.0);
 
-        const oldMesh = s.paperLayerMeshes.find(
-          (m) => m.name === `paperLayer_${layer}`,
+        const normalTex = dioramaAsset?.normalMapUrl
+          ? getOrLoadTexture(dioramaAsset.normalMapUrl, `normal-layer-${layer}`)
+          : undefined;
+        const thicknessGrayTex = dioramaAsset?.thicknessGrayUrl
+          ? getOrLoadTexture(dioramaAsset.thicknessGrayUrl, `thickness-layer-${layer}`)
+          : undefined;
+
+        return (
+          <PaperLayerMesh
+            key={layer}
+            layer={layer}
+            frontTexture={tex}
+            normalMapTexture={normalTex}
+            thicknessGrayTexture={thicknessGrayTex}
+            thickness={thicknessWorld}
+          />
         );
-        if (oldMesh) oldMesh.dispose();
+      })}
 
-        const mesh = BABYLON.MeshBuilder.CreateBox(
-          `paperLayer_${layer}`,
-          { width: SCENE_WIDTH, height: SCENE_HEIGHT, depth: thicknessWorld },
-          s.scene,
-        );
-        mesh.position.set(0, 0, z);
-
-        const frontMat = makePaperFrontMat(
-          s.scene,
-          frontUrl,
-          dioramaAsset?.normalMapUrl,
-          `paperFront_${layer}`,
-        );
-        const sideMat = makePaperSideMat(
-          s.scene,
-          dioramaAsset?.thicknessGrayUrl,
-          `paperSide_${layer}`,
-        );
-
-        // BoxBuilder face order: 0=back, 1=front, 2=right, 3=left, 4=top, 5=bottom
-        mesh.material = null;
-        const multiMat = new BABYLON.MultiMaterial(`multi_${layer}`, s.scene);
-        multiMat.subMaterials.push(frontMat); // back
-        multiMat.subMaterials.push(frontMat); // front
-        multiMat.subMaterials.push(sideMat);  // right
-        multiMat.subMaterials.push(sideMat);  // left
-        multiMat.subMaterials.push(sideMat);  // top
-        multiMat.subMaterials.push(sideMat);  // bottom
-        mesh.material = multiMat;
-
-        mesh.subMeshes.forEach((sm) => sm.dispose());
-        const verticesCount = mesh.getTotalVertices();
-        [0, 1, 2, 3, 4, 5].forEach((i) => {
-          new BABYLON.SubMesh(i, 0, verticesCount, i * 2, 2, mesh);
-        });
-
-        mesh.receiveShadows = true;
-        s.shadowGenerator.addShadowCaster(mesh);
-        layerMeshes.push(mesh);
-
-        // Outline edge plane
-        if (s.outlineEnabled) {
-          const oldOutline = s.outlineMeshes.find(
-            (m) => m.name === `outline_${layer}`,
-          );
-          if (oldOutline) oldOutline.dispose();
-
-          const outlineColor = layer === 'foreground' ? '#ffffff' : '#e0ddd8';
-          const outlineMat = makeOutlineMat(s.scene, frontUrl, outlineColor, 0.3);
-          const outlinePlane = BABYLON.MeshBuilder.CreatePlane(
-            `outline_${layer}`,
-            { width: SCENE_WIDTH, height: SCENE_HEIGHT },
-            s.scene,
-          );
-          outlinePlane.position.set(0, 0, z + 0.01);
-          outlinePlane.material = outlineMat;
-          outlinePlane.isPickable = false;
-          s.outlineMeshes.push(outlinePlane);
-        }
-      });
-
-      s.paperLayerMeshes = layerMeshes;
-      // #region agent log
-      console.log('[AICSS-DEBUG] buildScene-complete', {
-        paperLayerMeshCount: layerMeshes.length,
-        totalSceneMeshes: s.scene.meshes.length,
-        sceneMeshNames: s.scene.meshes.map((m: BABYLON.Mesh) => m.name),
-      });
-      // #endregion
-    }
-
-    // ── Paper object meshes ─────────────────────────────────────────────────
-    if (isPaper) {
-      s.paperObjectMeshes.forEach((m) => m.dispose());
-      s.paperObjectMeshes = [];
-
-      assignedObjects.forEach((obj) => {
+      {/* Paper Diorama individual object meshes */}
+      {/* Paper ????? assignedObject ????? BoxGeometry??????
+          ? PaperLayerMesh ????"????"???BoxGeometry ??????? 3D ??? */}
+      {isPaperMode && assignedObjects.map((obj) => {
         const colorIndex = assignments[obj.id];
         const dioramaAsset = objectDioramaAssets[obj.id];
-        const bbAsset = billboardAssets[obj.id];
-        const textureUrl =
-          dioramaAsset?.paperStyleUrl
+        const billboardAsset = billboardAssets[obj.id];
+
+        const textureUrl = dioramaAsset?.paperStyleUrl
           || dioramaAsset?.outlinedUrl
           || dioramaAsset?.rgbaUrl
-          || bbAsset?.rgbaUrl;
+          || billboardAsset?.rgbaUrl;
 
-        const sizeX = obj.boundingBox.w * SCENE_WIDTH;
-        const sizeY = obj.boundingBox.h * SCENE_HEIGHT;
-        const thicknessWorld =
-          LAYER_THICKNESS.foreground * (dioramaParams.thicknessMax / 5.0);
-        const pos = objectPosition(obj);
+        if (!textureUrl) {
+          const color = LAYER_COLORS[colorIndex];
+          const tex = getOrLoadTexture(
+            `data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==`,
+            `fallback-${obj.id}`,
+          );
+          const thicknessWorld = LAYER_THICKNESS.foreground * (dioramaParams.thicknessMax / 5.0);
+          return (
+            <PaperObjectMesh
+              key={obj.id}
+              obj={obj}
+              colorIndex={colorIndex}
+              frontTexture={tex}
+              thickness={thicknessWorld}
+              onSelect={onSelectObject}
+            />
+          );
+        }
 
-        const mesh = BABYLON.MeshBuilder.CreateBox(
-          `paperObj_${obj.id}`,
-          { width: sizeX, height: sizeY, depth: thicknessWorld },
-          s.scene,
+        const tex = getOrLoadTexture(textureUrl, `paper-obj-${obj.id}`);
+        const thicknessWorld = LAYER_THICKNESS.foreground * (dioramaParams.thicknessMax / 5.0);
+
+        return (
+          <PaperObjectMesh
+            key={obj.id}
+            obj={obj}
+            colorIndex={colorIndex}
+            frontTexture={tex}
+            thickness={thicknessWorld}
+            onSelect={onSelectObject}
+          />
         );
-        mesh.position.copyFrom(pos);
+      })}
 
-        const frontMat = textureUrl
-          ? makePaperFrontMat(s.scene, textureUrl, undefined, `objFront_${obj.id}`)
-          : makeColorMat(s.scene, LAYER_COLORS[colorIndex], 0.7);
-        const sideMat = makeMat(s.scene, `objSide_${obj.id}`);
-        sideMat.diffuseColor = PAPER_OBJ_SIDE_COLOR;
-        sideMat.backFaceCulling = true;
-
-        mesh.material = null;
-        const multiMat = new BABYLON.MultiMaterial(`objMulti_${obj.id}`, s.scene);
-        [0, 1, 2, 3, 4, 5].forEach((i) => {
-          multiMat.subMaterials.push(i < 2 ? frontMat : sideMat);
-        });
-        mesh.material = multiMat;
-        mesh.subMeshes.forEach((sm) => sm.dispose());
-        const verticesCount = mesh.getTotalVertices();
-        [0, 1, 2, 3, 4, 5].forEach((i) => {
-          new BABYLON.SubMesh(i, 0, verticesCount, i * 2, 2, mesh);
-        });
-
-        mesh.receiveShadows = true;
-        s.shadowGenerator.addShadowCaster(mesh);
-
-        mesh.actionManager = new BABYLON.ActionManager(s.scene);
-        mesh.actionManager.registerAction(
-          new BABYLON.ExecuteCodeAction(
-            BABYLON.ActionManager.OnPickTrigger,
-            () => {
-              setSelectedObjectId(
-                selectedObjectId === obj.id ? null : obj.id,
-              );
-            },
-          ),
-        );
-
-        s.paperObjectMeshes.push(mesh);
-      });
-    }
-
-    // ── Billboard mode ─────────────────────────────────────────────────────
-    if (!isPaper) {
-      const bbMeshes: BABYLON.Mesh[] = [];
-
-      DEPTH_LAYER_ORDER.forEach((layer) => {
+      {/* ?? Billboard Mode ?????????????????????????????????????????????????? */}
+      {/* ? Paper ????????
+          - ?????? PlaneGeometry?????? BoxGeometry?? 3D ??
+          - ???MeshBasicMaterial??????? opacity ?????
+          - ???????????????????? */}
+      {!isPaperMode && DEPTH_LAYER_ORDER.map((layer) => {
         const asset = depthLayerBillboardAssets[layer];
-        if (!asset?.rgbaUrl) return;
+        if (!asset?.rgbaUrl) return null;
 
-        const oldMesh = s.billboardMeshes.find(
-          (m) => m.name === `bbLayer_${layer}`,
+        const tex = getOrLoadTexture(asset.rgbaUrl, `depth-layer-${layer}`);
+
+        return (
+          <mesh key={layer} position={[0, 0, DEPTH_LAYER_Z[layer]]}>
+            <planeGeometry args={[SCENE_WIDTH, SCENE_HEIGHT]} />
+            <meshBasicMaterial
+              map={tex}
+              transparent
+              side={THREE.DoubleSide}
+              opacity={0.92}
+              depthWrite={false}
+            />
+          </mesh>
         );
-        if (oldMesh) oldMesh.dispose();
+      })}
 
-        const mat = makeBillboardMat(s.scene, asset.rgbaUrl, undefined, 0.92);
-        const plane = BABYLON.MeshBuilder.CreatePlane(
-          `bbLayer_${layer}`,
-          { width: SCENE_WIDTH, height: SCENE_HEIGHT },
-          s.scene,
-        );
-        plane.position.set(0, 0, DEPTH_LAYER_Z[layer]);
-        plane.material = mat;
-        plane.isPickable = false;
-        bbMeshes.push(plane);
-      });
-
-      assignedObjects.forEach((obj) => {
+      {/* Billboard individual objects */}
+      {/* Billboard ????????? PlaneGeometry?????? BoxGeometry?
+          z ?????obj.depth ?? 0-50??????????? [-5, 5] ?????
+          ??????"???"????????????? z ?????? */}
+      {!isPaperMode && assignedObjects.map((obj) => {
         const colorIndex = assignments[obj.id];
         const asset = billboardAssets[obj.id];
-        const sizeX = obj.boundingBox.w * SCENE_WIDTH;
-        const sizeY = obj.boundingBox.h * SCENE_HEIGHT;
-        const pos = objectPosition(obj);
 
-        const oldMesh = s.billboardMeshes.find(
-          (m) => m.name === `bbObj_${obj.id}`,
+        let tex: THREE.Texture | undefined;
+        if (asset?.rgbaUrl) {
+          tex = getOrLoadTexture(asset.rgbaUrl, `billboard-${obj.id}`);
+        }
+
+        return (
+          <BillboardMesh
+            key={obj.id}
+            obj={obj}
+            colorIndex={colorIndex}
+            texture={tex}
+            onSelect={onSelectObject}
+          />
         );
-        if (oldMesh) oldMesh.dispose();
+      })}
 
-        const mat = asset?.rgbaUrl
-          ? makeBillboardMat(s.scene, asset.rgbaUrl, undefined, 1.0)
-          : makeColorMat(s.scene, LAYER_COLORS[colorIndex], 0.5);
+      {/* Outline edges overlay for paper mode */}
+      {isPaperMode && outlineEnabled && DEPTH_LAYER_ORDER.map((layer) => {
+        const dioramaAsset = depthLayerDioramaAssets[layer];
+        const billboardAsset = depthLayerBillboardAssets[layer];
+        const textureUrl = dioramaAsset?.outlinedUrl
+          || dioramaAsset?.paperStyleUrl
+          || dioramaAsset?.rgbaUrl
+          || billboardAsset?.rgbaUrl;
+        if (!textureUrl) return null;
 
-        const plane = BABYLON.MeshBuilder.CreatePlane(
-          `bbObj_${obj.id}`,
-          { width: sizeX, height: sizeY },
-          s.scene,
-        );
-        plane.position.copyFrom(pos);
-        plane.material = mat;
+        const tex = getOrLoadTexture(textureUrl, `outline-${layer}`);
+        return <OutlineEdge key={`outline-${layer}`} layer={layer} texture={tex} outlineEnabled />;
+      })}
 
-        plane.actionManager = new BABYLON.ActionManager(s.scene);
-        plane.actionManager.registerAction(
-          new BABYLON.ExecuteCodeAction(
-            BABYLON.ActionManager.OnPickTrigger,
-            () => {
-              setSelectedObjectId(
-                selectedObjectId === obj.id ? null : obj.id,
-              );
-            },
-          ),
-        );
+      {/* Grid */}
+      <gridHelper
+        args={[SCENE_WIDTH, 20, '#333333', '#222222']}
+        position={[0, -SCENE_HEIGHT / 2, 0]}
+      />
+    </>
+  );
+}
 
-        bbMeshes.push(plane);
-      });
+// ??? Expose WebGL canvas DOM element via ref ?????????????????????????????????????
+interface GlDomElementProps {
+  onDomReady: (el: HTMLCanvasElement) => void;
+}
 
-      s.billboardMeshes.forEach((m) => m.dispose());
-      s.billboardMeshes = bbMeshes;
-    }
-  }, [
-    depthLayerDioramaAssets,
-    depthLayerBillboardAssets,
-    objectDioramaAssets,
-    billboardAssets,
-    assignments,
-    assignedObjects,
-    dioramaParams,
-    selectedObjectId,
-    setSelectedObjectId,
-  ]);
+function GlDomElement({ onDomReady }: GlDomElementProps) {
+  const { gl } = useThree();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { onDomReady(gl.domElement); }, []);
+  return null;
+}
 
-  // ─── Init Babylon engine on mount ─────────────────────────────────────────
-  useEffect(() => {
-    if (!containerRef.current) return;
-    // #region agent log
-    console.log('[AICSS-DEBUG] useEffect-mount-start');
-    // #endregion
+// ??? Camera controller ?????????????????????????????????????????????????????????
+function CameraController() {
+  return (
+    <OrbitControls
+      makeDefault
+      enableDamping
+      dampingFactor={0.05}
+      minDistance={3}
+      maxDistance={60}
+    />
+  );
+}
 
-    const canvas = document.createElement('canvas');
-    canvas.style.width = '100%';
-    canvas.style.height = '100%';
-    canvas.style.display = 'block';
-    containerRef.current.appendChild(canvas);
-    canvasRef.current = canvas;
-    setGlCanvas(canvas);
+// ??? Main export ????????????????????????????????????????????????????????????????
+export function Viewer3D() {
+  const analysisResult = useAppStore((s) => s.analysisResult);
+  const selectedObjectId = useAppStore((s) => s.selectedObjectId);
+  const setSelectedObjectId = useAppStore((s) => s.setSelectedObjectId);
+  const editMode = useAppStore((s) => s.editMode);
+  const dioramaMode = useAppStore((s) => s.dioramaMode);
 
-    const engine = new BABYLON.Engine(canvas, true, {
-      antialias: true,
-      preserveDrawingBuffer: true,
-      stencil: true,
-    });
-    // #region agent log
-    console.log('[AICSS-DEBUG] engine-created', { engineOk: !!engine, webglVersion: engine.webGLVersion, sceneCount: engine.scenes.length });
-    // #endregion
+  // Hold the WebGL canvas DOM element (obtained via useThree inside the Canvas)
+  const [glCanvas, setGlCanvas] = useState<HTMLCanvasElement | null>(null);
 
-    const scene = new BABYLON.Scene(engine);
-    scene.clearColor = new BABYLON.Color4(0.039, 0.039, 0.059, 1);
+  const handleSelect = useCallback(
+    (id: string) => {
+      // ??????????????????id === null????????????????
+      setSelectedObjectId(selectedObjectId === id ? null : id);
+    },
+    [selectedObjectId, setSelectedObjectId],
+  );
 
-    const camera = new BABYLON.ArcRotateCamera(
-      'mainCam',
-      -Math.PI / 2,
-      Math.PI / 3,
-      15,
-      BABYLON.Vector3.Zero(),
-      scene,
-    );
-    camera.attachControl(canvas, true);
-    camera.lowerRadiusLimit = 3;
-    camera.upperRadiusLimit = 60;
-    camera.lowerBetaLimit = 0.1;
-    camera.upperBetaLimit = Math.PI - 0.1;
-    camera.inertia = 0.9;
-    camera.panningInertia = 0.9;
-    camera.wheelPrecision = 20;
-
-    const hemiLight = new BABYLON.HemisphericLight(
-      'hemi',
-      new BABYLON.Vector3(0, 1, 0),
-      scene,
-    );
-    hemiLight.intensity = 0.8;
-
-    const dirLight = new BABYLON.DirectionalLight(
-      'dir',
-      new BABYLON.Vector3(-1, -2, -1),
-      scene,
-    );
-    dirLight.position.set(5, 8, 10);
-    dirLight.intensity = 1.2;
-    dirLight.diffuse = BABYLON.Color3.FromHexString('#fff8e1');
-
-    const fillLight = new BABYLON.DirectionalLight(
-      'fill',
-      new BABYLON.Vector3(1, 0.75, -1),
-      scene,
-    );
-    fillLight.position.set(-4, -3, 5);
-    fillLight.intensity = 0.3;
-    fillLight.diffuse = BABYLON.Color3.FromHexString('#e3f2fd');
-
-    const shadowGenerator = new BABYLON.ShadowGenerator(1024, dirLight);
-    shadowGenerator.useBlurExponentialShadowMap = true;
-    shadowGenerator.blurKernel = 32;
-
-    let bgPlane: BABYLON.Mesh | null = null;
-    const depthUrl = analysisResult?.depthMapUrl;
-    if (depthUrl) {
-      const bgMat = makeMat(scene, 'bgPlane');
-      const tex = new BABYLON.Texture(depthUrl, scene, true, true);
-      tex.gammaSpace = false;
-      bgMat.diffuseTexture = tex;
-      bgMat.emissiveTexture = tex;
-      bgMat.alpha = 0.25;
-      bgMat.backFaceCulling = false;
-      bgPlane = BABYLON.MeshBuilder.CreatePlane(
-        'bgPlane',
-        { width: SCENE_WIDTH, height: SCENE_HEIGHT },
-        scene,
-      );
-      bgPlane.position.set(0, 0, DEPTH_LAYER_Z.sky - 0.5);
-      bgPlane.material = bgMat;
-      bgPlane.isPickable = false;
-    }
-
-    const gridMesh = BABYLON.MeshBuilder.CreateGround(
-      'grid',
-      { width: SCENE_WIDTH, height: SCENE_HEIGHT },
-      scene,
-    );
-    const gridMat = makeMat(scene, 'gridMat');
-    gridMat.wireframe = true;
-    gridMat.alpha = 0.3;
-    gridMat.diffuseColor = BABYLON.Color3.FromHexString('#333333');
-    gridMesh.position.set(0, -SCENE_HEIGHT / 2, 0);
-    gridMesh.material = gridMat;
-    gridMesh.isPickable = false;
-
-    // Live pointer position for parallax
-    const pointerNDC = { x: 0, y: 0 };
-
-    sceneRef.current = {
-      engine,
-      scene,
-      camera,
-      hemiLight,
-      dirLight,
-      fillLight,
-      shadowGenerator,
-      paperLayerMeshes: [],
-      paperObjectMeshes: [],
-      billboardMeshes: [],
-      outlineMeshes: [],
-      bgPlane,
-      gridMesh,
-      baseCameraPos: DEFAULT_CAMERA_POS.clone(),
-      parallaxEnabled: false,
-      parallaxIntensity: 0.5,
-      outlineEnabled: true,
-      dioramaMode: 'billboard',
-      pointerNDC,
-    };
-
-    // Parallax before-render
-    scene.onBeforeRenderObservable.add(() => {
-      const s = sceneRef.current;
-      if (!s) return;
-
-      if (s.parallaxEnabled && s.dioramaMode === 'paper') {
-        const nx = s.pointerNDC.x - 0.5;
-        const ny = s.pointerNDC.y - 0.5;
-        camera.position.x = s.baseCameraPos.x + nx * s.parallaxIntensity * 2;
-        camera.position.y = s.baseCameraPos.y + ny * s.parallaxIntensity * 1.5;
-      } else {
-        camera.position.x = BABYLON.Scalar.Lerp(
-          camera.position.x,
-          s.baseCameraPos.x,
-          0.05,
-        );
-        camera.position.y = BABYLON.Scalar.Lerp(
-          camera.position.y,
-          s.baseCameraPos.y,
-          0.05,
-        );
-      }
-    });
-
-    // Pointer move → update NDC coords
-    canvas.addEventListener('pointermove', (e: PointerEvent) => {
-      const s = sceneRef.current;
-      if (!s) return;
-      s.pointerNDC.x = e.clientX / (canvas.clientWidth || 1);
-      s.pointerNDC.y = e.clientY / (canvas.clientHeight || 1);
-    });
-
-    engine.runRenderLoop(() => {
-      scene.render();
-      // #region agent log
-      console.log('[AICSS-DEBUG] render-loop', { sceneReady: !!scene, meshCount: scene.meshes.length, canvasSize: canvas.width + ',' + canvas.height, dioramaMode: sceneRef.current?.dioramaMode });
-      // #endregion
-    });
-
-    const handleResize = () => engine.resize();
-    window.addEventListener('resize', handleResize);
-
-    buildScene();
-    // #region agent log
-    console.log('[AICSS-DEBUG] init-complete', { sceneMeshCount: scene.meshes.length, sceneRefSet: !!sceneRef.current });
-    // #endregion
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      scene.dispose();
-      engine.dispose();
-      if (
-        containerRef.current
-        && canvas.parentNode === containerRef.current
-      ) {
-        containerRef.current.removeChild(canvas);
-      }
-      sceneRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Diorama mode → rebuild
-  useEffect(() => {
-    const s = sceneRef.current;
-    if (!s) return;
-    s.dioramaMode = dioramaMode;
-
-    if (dioramaMode === 'paper') {
-      s.hemiLight.intensity = 0.8;
-      s.dirLight.intensity = 1.2;
-      s.fillLight.intensity = 0.3;
-    } else {
-      s.hemiLight.intensity = 1.0;
-      s.dirLight.intensity = 0;
-      s.fillLight.intensity = 0;
-    }
-
-    buildScene();
-  }, [dioramaMode, buildScene]);
-
-  // Assets / assignments → rebuild
-  useEffect(() => {
-    const s = sceneRef.current;
-    if (!s) return;
-    if (s.dioramaMode !== 'paper') return;
-    buildScene();
-  }, [
-    buildScene,
-    depthLayerDioramaAssets,
-    depthLayerBillboardAssets,
-    objectDioramaAssets,
-    billboardAssets,
-    assignments,
-    assignedObjects,
-    dioramaParams,
-  ]);
-
-  // Parallax settings
-  useEffect(() => {
-    const s = sceneRef.current;
-    if (!s) return;
-    s.parallaxEnabled = parallaxEnabled;
-    s.parallaxIntensity = parallaxIntensity;
-  }, [parallaxEnabled, parallaxIntensity]);
-
-  // Outline toggle
-  useEffect(() => {
-    const s = sceneRef.current;
-    if (!s) return;
-    s.outlineEnabled = outlineEnabled;
-    s.outlineMeshes.forEach((m) => m.setEnabled(outlineEnabled));
-  }, [outlineEnabled]);
-
-  // Depth map change
-  useEffect(() => {
-    const s = sceneRef.current;
-    if (!s) return;
-    const depthUrl = analysisResult?.depthMapUrl;
-    if (s.bgPlane) {
-      s.bgPlane.dispose();
-      s.bgPlane = null;
-    }
-    if (depthUrl) {
-      const bgMat = makeMat(s.scene, 'bgPlane');
-      const tex = new BABYLON.Texture(depthUrl, s.scene, true, true);
-      tex.gammaSpace = false;
-      bgMat.diffuseTexture = tex;
-      bgMat.emissiveTexture = tex;
-      bgMat.alpha = 0.25;
-      bgMat.backFaceCulling = false;
-      const bg = BABYLON.MeshBuilder.CreatePlane(
-        'bgPlane',
-        { width: SCENE_WIDTH, height: SCENE_HEIGHT },
-        s.scene,
-      );
-      bg.position.set(0, 0, DEPTH_LAYER_Z.sky - 0.5);
-      bg.material = bgMat;
-      bg.isPickable = false;
-      s.bgPlane = bg;
-    }
-  }, [analysisResult?.depthMapUrl]);
-
-  const hasAssignments =
-    objects.length > 0 && Object.keys(assignments).length > 0;
+  const hasAssignments = analysisResult?.objects
+    ? Object.keys(useAppStore.getState().assignments).length > 0
+    : false;
 
   return (
     <div className="relative w-full h-full bg-gray-950">
-      <div ref={containerRef} className="w-full h-full" />
+      <Canvas
+        // antialias=true????????
+        // alpha=false??? WebGL ???????????? CSS (#0a0a0f) ???????????
+        gl={{ antialias: true, alpha: false }}
+        shadows
+        style={{ background: '#0a0a0f' }}
+      >
+        <color attach="background" args={['#0a0a0f']} />
+        <GlDomElement onDomReady={setGlCanvas} />
+        <SceneContent onSelectObject={handleSelect} />
+        <CameraController />
+      </Canvas>
 
+      {/* Mode badge */}
       <div className="absolute top-3 right-3 flex items-center gap-2">
         <span
           className={`
@@ -755,7 +663,7 @@ export function Viewer3D() {
             ${dioramaMode === 'paper' ? 'bg-amber-600 text-white' : 'bg-blue-600 text-white'}
           `}
         >
-          {dioramaMode === 'paper' ? '纸雕模式' : '层片模式'}
+          {dioramaMode === 'paper' ? '????' : '????'}
         </span>
         <span
           className={`
@@ -767,19 +675,14 @@ export function Viewer3D() {
         </span>
       </div>
 
-      {dioramaMode === 'paper' && (
-        <div className="absolute top-3 left-3 text-[10px] text-amber-500/60 bg-black/40 rounded px-2 py-1">
-          移动鼠标触发视差动画
-        </div>
-      )}
-
+      {/* Selected object info */}
       {selectedObjectId && analysisResult && (
         <div className="absolute bottom-3 left-3 bg-black/70 text-white text-xs px-3 py-2 rounded-lg">
-          Selected:
-          {selectedObjectId}
+          Selected: {selectedObjectId}
         </div>
       )}
 
+      {/* Empty state */}
       {!hasAssignments && analysisResult && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <p className="text-gray-600 text-sm">
@@ -788,6 +691,7 @@ export function Viewer3D() {
         </div>
       )}
 
+      {/* Export Panel */}
       <ExportPanel canvasRef={{ current: glCanvas }} />
     </div>
   );

@@ -96,7 +96,10 @@ interface AppState {
   inpaintLoading: boolean;
   inpaintError: string | null;
 
-  // DashScope API key (user-entered, stored in localStorage)
+  // DashScope API key — used by the inpaint endpoint (wanx2.1-imageedit).
+  // Scene/object detection no longer needs this since VLM runs locally.
+  // Field name kept as `dashscopeApiKey` for backwards compatibility with
+  // existing localStorage data and downstream consumers.
   dashscopeApiKey: string;
 
   // History for undo/redo

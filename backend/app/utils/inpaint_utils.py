@@ -145,8 +145,8 @@ def _encode_mask(mask_img: Image.Image, target_size: tuple[int, int]) -> tuple[s
     if alpha.size != target_size:
         alpha = alpha.resize(target_size, Image.NEAREST)
 
-    # canvas: 白色笔触 alpha=0（物体），背景 alpha=255
-    # invert 后：物体→255(白=编辑)，背景→0(黑=保留)
+    # 入参 mask: 白色笔触 alpha=255（物体=白=待编辑），背景 alpha=0（待保留）
+    # 反相后送入 API：物体→255(白=编辑)，背景→0(黑=保留)
     gray = Image.fromarray(255 - np.array(alpha), mode="L")
 
     # 灰度值直接对应 API mask_image_url 语义：
@@ -162,31 +162,47 @@ def _encode_mask(mask_img: Image.Image, target_size: tuple[int, int]) -> tuple[s
 
 def _create_imageedit_task(
     image_base64: str,
-    mask_base64: str,
+    mask_base64: str | None,
     prompt: str,
     api_key: str,
+    function: str = "description_edit_with_mask",
 ) -> str:
-    """创建 wanx2.1-imageedit 局部重绘任务，返回 task_id。"""
+    """
+    创建 wanx2.1-imageedit 任务，返回 task_id。
+
+    function: 选择具体图像编辑能力：
+      - "description_edit_with_mask": 局部"描述驱动修补"，偏保守，会尽量保持原图结构。
+      - "stylization_local":           局部风格迁移，会显著替换 mask 区域为新风格，幅度明显大于前者。
+      - 其余可选："stylization_all" / "description_edit" / "remove_watermark" /
+        "expand" / "super_resolution" / "colorization" / "doodle" /
+        "control_cartoon_feature"
+      - mask_base64 在与 mask 无关的 function 下传 None 即可。
+    """
     url = f"{BASE_URL}/services/aigc/image2image/image-synthesis"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "X-DashScope-Async": "enable",
     }
+    input_payload: dict = {
+        "function": function,
+        "base_image_url": image_base64,
+        "prompt": prompt,
+    }
+    if mask_base64 is not None:
+        input_payload["mask_image_url"] = mask_base64
+
     payload = {
         "model": "wanx2.1-imageedit",
-        "input": {
-            "function": "description_edit_with_mask",
-            "base_image_url": image_base64,
-            "mask_image_url": mask_base64,
-            "prompt": prompt,
-        },
+        "input": input_payload,
         "parameters": {
             "n": 1,
         },
     }
 
-    print(f"[inpaint] wanx2.1-imageedit payload: {json.dumps(payload, ensure_ascii=False)[:300]}")
+    print(f"[inpaint] wanx2.1-imageedit payload: function={function}, "
+          f"mask={'yes' if mask_base64 is not None else 'no'}, "
+          f"prompt={prompt[:120]!r}")
 
     resp = httpx.post(url, headers=headers, json=payload, timeout=60)
     if resp.status_code != 200:
@@ -261,17 +277,21 @@ def generate_inpaint(
     prompt: str,
     api_key: str,
     poll_timeout: Optional[int] = None,
+    function: str = "description_edit_with_mask",
 ) -> Image.Image:
     """
     使用 wanx2.1-imageedit 模型进行局部重绘。
 
     base_image:  原始 RGB 图像（PIL Image）
     mask_image:  前端传来的 mask
-                  - RGBA: alpha=255（背景=白=待编辑），alpha=0（物体=黑=保留）
+                  - RGBA: alpha=255（物体=白=待编辑），alpha=0（背景=黑=保留）
                   - L:    255=待编辑, 0=保留
+                  编码时会反相，使送入 API 的 mask 语义为：
+                    白=编辑区、黑=保留区
     prompt:      描述 mask 白色区域应填充的内容（如 "自然背景"）
     api_key:     DashScope API Key
     poll_timeout: 轮询任务的最大等待秒数；为 None 时回退到 settings.inpaint_timeout
+    function:    DashScope wanx2.1-imageedit 的 function 字段；详见 _create_imageedit_task。
 
     返回：重绘后的 PIL Image
     """
@@ -283,6 +303,7 @@ def generate_inpaint(
 
     print(f"[inpaint DEBUG] base_image: {base_image.size}, mode={base_image.mode}")
     print(f"[inpaint DEBUG] mask_image: {mask_image.size}, mode={mask_image.mode}")
+    print(f"[inpaint DEBUG] function={function}, prompt_len={len(prompt)}")
 
     # 分析原始 mask
     if mask_image.mode == "RGBA":
@@ -298,6 +319,13 @@ def generate_inpaint(
             f"Mask is empty or nearly empty ({white_ratio*100:.2f}% non-zero pixels). "
             "Please select an area to inpaint before submitting."
         )
+
+    if white_ratio < 0.05:
+        # 小 mask：周围 context 占绝对主导，模型会"照抄四周"，结果几乎看不出变化。
+        # 这里只打印日志——真正给前端的反馈由 endpoint 层通过 warnings 字段告知。
+        print(f"[inpaint WARNING] mask is very small ({white_ratio*100:.2f}% of pixels). "
+              "Diffusion models tend to inpaint as a copy/extension of surroundings "
+              "when the mask is tiny. Expect a result close to the original.")
 
     # -----------------------------------------------------------
     # 关键：image 和 mask 必须使用相同的缩放比例 ratio
@@ -339,7 +367,13 @@ def generate_inpaint(
         print(f"[inpaint DEBUG] debug save failed: {e}")
 
     # 3. 创建任务
-    task_id = _create_imageedit_task(image_b64, mask_b64, prompt, api_key)
+    task_id = _create_imageedit_task(
+        image_b64,
+        mask_b64,
+        prompt,
+        api_key,
+        function=function,
+    )
 
     # 4. 轮询结果（使用 AICSS_INPAINT_TIMEOUT 控制总等待时长）
     result_url = _poll_task(task_id, api_key, max_wait=poll_timeout)
@@ -397,3 +431,135 @@ def generate_inpaint(
         print(f"[inpaint DEBUG] result raw bytes (hex): {resp.content[:200].hex()}")
 
     return result_img
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt & mode guidance
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 经验上偏"修补延续"的弱 prompt 关键词。这些词会引导模型"延续上下文"而不是
+# "重绘"，导致修复结果与原图差异极小。
+WEAK_PROMPT_KEYWORDS_ZH = {
+    "补全", "补", "修复", "还原", "自然背景", "背景", "填补",
+    "继续", "延伸", "保持原", "原样", "原画面", "原构图",
+}
+WEAK_PROMPT_KEYWORDS_EN = {
+    "inpaint", "fill", "fix", "restore", "natural background",
+    "background", "continue", "extend", "keep original", "same as before",
+    "repair",
+}
+
+
+def detect_weak_prompt(prompt: str) -> dict | None:
+    """
+    检测 prompt 是否属于"弱 prompt"——即根据经验几乎只引导模型做延续式修补。
+
+    返回 None 表示 prompt 足够具体；否则返回一个 dict，前端可以原样展示：
+      {"code": "weak_prompt", "reason": "...", "matched": [...], "suggested": "..."}
+
+    注意：本函数只诊断、不修改 user prompt。是否自动强化由 endpoint 控制。
+    """
+    if not prompt:
+        return {
+            "code": "empty_prompt",
+            "reason": "Prompt is empty; model will fall back to context copy/extension.",
+            "matched": [],
+            "suggested": (
+                "Describe the *desired new content* explicitly, e.g. "
+                "'replace with a watercolor sunset over the lake, cinematic, soft light'. "
+                "Avoid generic words like 'background' or 'fix'."
+            ),
+        }
+
+    normalized = prompt.strip().lower()
+    tokens = set()
+    for kw in WEAK_PROMPT_KEYWORDS_ZH:
+        if kw in prompt:
+            tokens.add(kw)
+    for kw in WEAK_PROMPT_KEYWORDS_EN:
+        if kw in normalized:
+            tokens.add(kw)
+
+    # 去空格/标点的纯长度判断：<6 字符且只匹配到弱词 → 弱
+    if tokens and len(prompt.strip()) < 12:
+        return {
+            "code": "weak_prompt",
+            "reason": (
+                f"Prompt is very short and contains 'extend-the-context' keywords "
+                f"({sorted(tokens)!r}). Diffusion inpainting will most likely just copy "
+                "the surrounding texture into the masked area, producing a result "
+                "almost identical to the original."
+            ),
+            "matched": sorted(tokens),
+            "suggested": (
+                "Write what you want to *appear* in the masked area, not how to fill it. "
+                "Example: 'a clear night sky with stars and a glowing moon, cinematic, "
+                "soft volumetric light'."
+            ),
+        }
+
+    return None
+
+
+STYLE_PRESETS_FOR_RESTYLE = {
+    # 阿里 wanx2.1-imageedit/stylization_local 文档列出的官方风格。
+    # 中文与英文名称都接受，统一映射到中文调用。
+    "photographic":        "写实主义",
+    "realistic":           "写实主义",
+    "anime":               "日系动漫",
+    "japanese anime":      "日系动漫",
+    "oil painting":        "油画",
+    "watercolor":          "水彩",
+    "sketch":              "素描",
+    "3d cartoon":          "3D 卡通",
+    "cartoon":             "3D 卡通",
+    "chinese painting":    "国画",
+    "flat illustration":   "扁平插画",
+    "illustration":        "扁平插画",
+    "cyberpunk":           "赛博朋克",
+    "comic":               "漫画",
+}
+
+
+def resolve_stylization_prompt(prompt: str, style: str | None) -> str:
+    """
+    为 mode='restyle' 构造 prompt。
+
+    关键点：stylization_local 是"风格迁移"模型，对 prompt 的响应风格与
+    description_edit_with_mask 不同——它需要一个明确的目标风格与构图，
+    否则很容易在 mask 范围内"原地画一个东西"，看起来像贴上去的。
+    这里统一在用户 prompt 外面补一层明确的指令，提升重绘幅度。
+    """
+    style_token = None
+    if style:
+        key = style.strip().lower()
+        style_token = STYLE_PRESETS_FOR_RESTYLE.get(key, style)
+
+    parts = []
+    if style_token:
+        parts.append(f"以{style_token}风格")
+    parts.append("完全重绘 mask 区域内容")
+    parts.append(
+        "不要保留原图构图、纹理或物体形状，"
+        "不要复刻 mask 周围的内容，"
+        "避免与原图相同的色彩与结构。"
+    )
+    if prompt.strip():
+        parts.append(f"主体内容：{prompt.strip()}")
+
+    directive = "，".join(parts) + "。"
+    print(f"[inpaint] restyle directive: {directive!r}")
+    return directive
+
+
+def compute_mask_white_ratio(mask_image: Image.Image) -> float:
+    """
+    统计 mask 中"待编辑区域"占比。
+    与 generate_inpaint 内的算法保持一致：RGBA 取 alpha，L 模式直接使用。
+    """
+    if mask_image.mode == "RGBA":
+        alpha = mask_image.split()[3]
+    else:
+        alpha = mask_image.convert("L")
+    arr = np.array(alpha)
+    return float((arr > 0).mean())

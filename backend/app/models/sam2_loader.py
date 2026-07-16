@@ -65,7 +65,10 @@ class SAM2Model:
     def __init__(self, model_size: str = "vit_h", device: str = "cuda",
                  checkpoint_dir: Optional[str] = None):
         self.model_size = model_size
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        _effective = device if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(_effective)
+        if _effective != device:
+            print(f"[SAM2] CUDA unavailable — fell back to CPU (requested: {device})")
         # Default: <project-root>/backend/.cache/sam2  (matches config.py sam2_checkpoint_dir)
         # Override with SAM2_CHECKPOINT_DIR env var if needed.
         default_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".cache", "sam2")

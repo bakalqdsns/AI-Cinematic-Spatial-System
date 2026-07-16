@@ -21,11 +21,10 @@ const client = axios.create({
   timeout: 120_000,
 });
 
-export async function analyzeImage(imageUrl: string, shotId: string = 'shot_001', apiKey: string): Promise<AicssResult> {
+export async function analyzeImage(imageUrl: string, shotId: string = 'shot_001'): Promise<AicssResult> {
   const resp = await client.post<AicssResult>('/api/aicss/analyze', {
     imageUrl,
     shotId,
-    apiKey,
   });
   return resp.data;
 }

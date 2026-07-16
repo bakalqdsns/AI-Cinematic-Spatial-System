@@ -2,7 +2,7 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 torch>=2.5.0
 torchvision>=0.20.0
-transformers>=4.49.0
+transformers>=4.57.0
 huggingface-hub>=0.27.0
 ultralytics>=8.0.0
 pillow>=11.0.0
@@ -10,6 +10,7 @@ opencv-python>=4.10.0
 numpy>=1.26.0
 pydantic>=2.10.0
 python-multipart>=0.0.20
+# dashscope is still used by the /inpaint endpoint (wanx2.1-imageedit)
 dashscope>=1.20.0
 httpx>=0.28.0
 pydantic-settings>=2.7.0

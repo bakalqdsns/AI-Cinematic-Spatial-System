@@ -3,6 +3,7 @@ Configuration for AICSS backend.
 All environment variables and model paths are managed here.
 """
 import os
+import torch
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
@@ -16,6 +17,18 @@ CACHE_DIR.mkdir(exist_ok=True)
 os.environ.setdefault("HF_HOME", str(CACHE_DIR / "huggingface"))
 os.environ.setdefault("HF_HUB_CACHE", str(CACHE_DIR / "huggingface" / "hub"))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_DIR / "huggingface" / "transformers"))
+
+# ── CUDA diagnostics ──────────────────────────────────────────────────────────
+_cuda_available = torch.cuda.is_available()
+_torch_cuda_ver = getattr(torch.version, "cuda", None)
+if _cuda_available:
+    _gpu_name = torch.cuda.get_device_name(0)
+    _gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+    print(f"[AICSS] CUDA detected — gpu={_gpu_name}, mem={_gpu_mem:.1f}GB, "
+          f"torch.cuda={_torch_cuda_ver}")
+else:
+    print(f"[AICSS] CUDA NOT available — torch.cuda.is_available()=False, "
+          f"torch.version.cuda={_torch_cuda_ver}. Models will run on CPU.")
 
 class Settings(BaseSettings):
     # Server
@@ -38,6 +51,12 @@ class Settings(BaseSettings):
     sam2_checkpoint_dir: Path = CACHE_DIR / "sam2"
     grounding_dino_checkpoint_dir: Path = CACHE_DIR / "grounding-dino"
     depth_checkpoint_dir: Path = CACHE_DIR / "depth"
+
+    # Qwen3-VL local model (replaces DashScope remote VLM)
+    # Qwen3-VL-4B-Instruct runs locally; no API key needed.
+    vlm_model: str = "Qwen/Qwen3-VL-4B-Instruct"
+    vlm_checkpoint_dir: Path = CACHE_DIR / "qwen3vl"
+    vlm_max_new_tokens: int = 256
 
     # Depth bucket configuration (meters)
     depth_buckets: list[tuple[float, float, str]] = [
@@ -84,3 +103,4 @@ DEVICE = settings.device
 print(f"[AICSS Config] Device: {DEVICE}")
 print(f"[AICSS Config] Depth model: {settings.depth_model}")
 print(f"[AICSS Config] SAM2 size: {settings.sam2_model_size}")
+print(f"[AICSS Config] VLM model: {settings.vlm_model}")

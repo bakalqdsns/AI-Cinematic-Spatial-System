@@ -27,7 +27,10 @@ class DepthModel:
         device: str = "cuda",
     ):
         self.model_name = model_name
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        _effective = device if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(_effective)
+        if _effective != device:
+            print(f"[DepthModel] CUDA unavailable — fell back to CPU (requested: {device})")
         self._processor = None
         self._model = None
 

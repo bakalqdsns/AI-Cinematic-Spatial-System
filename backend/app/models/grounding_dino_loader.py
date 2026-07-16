@@ -42,7 +42,10 @@ class GroundingDinoModel:
         device: str = "cuda",
     ):
         self.model_name = model_name
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        _effective = device if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(_effective)
+        if _effective != device:
+            print(f"[GroundingDINO] CUDA unavailable — fell back to CPU (requested: {device})")
         self._processor = None
         self._model = None
 
@@ -115,11 +118,18 @@ class GroundingDinoModel:
 
         w, h = image.size
         detections = []
-        for score, label, box in zip(
-            results["scores"],
-            results["labels"],
-            results["boxes"],
-        ):
+        # scores/boxes are GPU tensors — move to CPU before Python iteration.
+        # labels may be strings (old transformers) or tensor-of-ints (new >=4.51) — normalize to strings.
+        scores = results["scores"].cpu()
+        boxes = results["boxes"].cpu()
+        raw_labels = results["labels"]
+        if hasattr(raw_labels, "cpu"):
+            raw_labels = raw_labels.cpu()
+        if hasattr(raw_labels, "tolist"):
+            raw_labels = raw_labels.tolist()
+        labels = raw_labels
+
+        for score, label, box in zip(scores, labels, boxes):
             # box is [x1, y1, x2, y2] in pixel coords
             x1, y1, x2, y2 = box
             # Clip to image bounds
@@ -128,11 +138,12 @@ class GroundingDinoModel:
             if x2 <= x1 or y2 <= y1:
                 continue
 
+            label_str = label.lower().strip() if isinstance(label, str) else str(label).lower().strip()
             detections.append(Detection(
                 box=np.array([x1, y1, x2, y2]),
-                label=label.lower().strip(),
+                label=label_str,
                 score=float(score),
-                object_id=f"obj_{label.lower().strip()}_{len(detections)}",
+                object_id=f"obj_{label_str}_{len(detections)}",
             ))
 
         return detections

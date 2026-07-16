@@ -49,7 +49,12 @@ from app.utils.spatial_utils import (
     build_scene_graph_from_objects,
 )
 from app.models.sam2_loader import refine_mask_edges, extract_polygon_from_mask
-from app.utils.inpaint_utils import generate_inpaint
+from app.utils.inpaint_utils import (
+    generate_inpaint,
+    detect_weak_prompt,
+    resolve_stylization_prompt,
+    compute_mask_white_ratio,
+)
 from app.utils.vlm_utils import vlm_detect
 from app.services.project_store import project_store
 
@@ -120,7 +125,6 @@ class ImageUrlRequest(BaseModel):
 class AnalyzeRequest(BaseModel):
     imageUrl: str
     shotId: str
-    apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
     projectId: Optional[str] = Field(None, description="Optional project ID — when set, results are persisted to .workspace/projects/<id>/")
 
 
@@ -131,7 +135,6 @@ class DepthRequest(BaseModel):
 
 class SegmentRequest(BaseModel):
     imageUrl: str
-    apiKey: str = Field(..., description="DashScope API key — required for VLM detection")
     projectId: Optional[str] = Field(None, description="Optional project ID — when set, masks are persisted")
 
 
@@ -167,10 +170,29 @@ class MultifaceRequest(BaseModel):
 
 class InpaintRequest(BaseModel):
     imageUrl: str = Field(..., description="Cropped image, base64 or URL")
-    maskDataUrl: str = Field(..., description="Inverse mask (RGBA), white=edit area, black=keep area")
-    prompt: str = Field(..., description="Inpainting prompt")
+    maskDataUrl: str = Field(..., description="Inverse mask (RGBA), white=selected objects (to edit), black=background (to keep)")
+    prompt: str = Field(..., description="Inpainting prompt describing what fills the white (selected-object) regions")
     apiKey: Optional[str] = Field(None, description="DashScope API key — falls back to AICSS_DASHSCOPE_API_KEY env var if not provided")
     projectId: Optional[str] = Field(None, description="Optional project ID — when set, inpaint result is persisted")
+    mode: Optional[str] = Field(
+        "repair",
+        description=(
+            "Edit mode: 'repair' (default) uses wanx2.1-imageedit/description_edit_with_mask — "
+            "a conservative inpainter that tends to extend the original scene. "
+            "'restyle' uses stylization_local — a stronger re-renderer that "
+            "replaces the masked area with the prompted style/composition. "
+            "'restyle' is what you want when the result of 'repair' looks too similar to the original."
+        ),
+    )
+    style: Optional[str] = Field(
+        None,
+        description=(
+            "Only used when mode='restyle'. Style preset applied to the masked area. "
+            "Examples: 'photographic', 'anime', 'oil painting', 'watercolor', 'sketch', "
+            "'3d cartoon', 'chinese painting', 'flat illustration'. "
+            "If omitted, the model's default style is used and prompt alone drives the result."
+        ),
+    )
 
 
 # ─── Paper Diorama 2.0 request models ─────────────────────────────────────────
@@ -266,12 +288,12 @@ async def analyze(request: AnalyzeRequest):
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
         depth_url = pil_to_base64(depth_pil_resized)
 
-        # Step 2b: VLM 检测 — 始终运行，需要 API Key。
+        # Step 2b: VLM detection (local Qwen3-VL, no API key required).
         # 与深度估计并行启动（asyncio.create_task），避免串行执行带来的额外延迟。
         # VLM 返回的类别列表直接拼成 "." 分隔字符串，作为 Grounding DINO 的检测提示词。
-        print(f"[{analysis_id}] Running VLM detection with apiKey={request.apiKey[:12]}...")
+        print(f"[{analysis_id}] Running VLM detection (local Qwen3-VL)...")
         import asyncio
-        vlm_task = asyncio.create_task(vlm_detect(image, request.apiKey))
+        vlm_task = asyncio.create_task(vlm_detect(image))
         # 将控制权交还给事件循环，使深度估计能够同时执行
         detected_classes, detected_scene = await vlm_task
         # Grounding DINO 使用 "." 作为类别之间的分隔符，因此用 "." 拼接
@@ -442,11 +464,11 @@ async def segment_objects(request: SegmentRequest):
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
 
-        # Always use VLM to detect classes
-        print(f"[segment] Running VLM detection with apiKey={request.apiKey[:12]}...")
+        # Always use VLM to detect classes (local Qwen3-VL, no API key required).
+        print("[segment] Running VLM detection (local Qwen3-VL)...")
         import asyncio
         detected_classes, detected_scene = await asyncio.create_task(
-            vlm_detect(image, request.apiKey)
+            vlm_detect(image)
         )
         prompt = ".".join(detected_classes)
         print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
@@ -731,12 +753,12 @@ async def generate_multiface(request: MultifaceRequest):
 @router.post("/inpaint")
 async def inpaint_image(request: InpaintRequest):
     """
-    Inpaint the non-selected areas using DashScope wanx2.1-imageedit model.
+    Inpaint selected-object areas using DashScope wanx2.1-imageedit model.
 
     maskDataUrl should be an RGBA PNG where:
-      - White (alpha=255): background — will be edited and inpainted
-      - Black (alpha=0):   selected objects — will be retained
-    prompt: describes what to fill in the white (edited) regions
+      - White (alpha=255): selected objects — will be edited and inpainted by the prompt
+      - Black (alpha=0):   background — will be retained
+    prompt: describes what to fill in the white (selected-object) regions
     """
     effective_key = request.apiKey or settings.dashscope_api_key
     # 优先级：请求体 apiKey > 环境变量 AICSS_DASHSCOPE_API_KEY
@@ -758,16 +780,68 @@ async def inpaint_image(request: InpaintRequest):
                        "Mask must have the same dimensions as the base image.",
             )
 
+        # ── mode 路由 ─────────────────────────────────────────────────────────
+        # repair:  description_edit_with_mask（保守、延续原图）
+        # restyle: stylization_local（明显重绘、局部风格迁移）
+        mode = (request.mode or "repair").lower()
+        if mode not in {"repair", "restyle"}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown inpaint mode: {request.mode!r}. Use 'repair' or 'restyle'.",
+            )
+
+        warnings: list[dict] = []
+
+        # ── prompt 强度诊断 ───────────────────────────────────────────────────
+        weak = detect_weak_prompt(request.prompt)
+        if weak is not None:
+            warnings.append(weak)
+
+        # ── mask 比例诊断 ─────────────────────────────────────────────────────
+        white_ratio = compute_mask_white_ratio(mask_image)
+        if white_ratio < 0.05:
+            warnings.append({
+                "code": "small_mask",
+                "reason": (
+                    f"Mask covers only {white_ratio*100:.2f}% of the image. "
+                    "With a small mask, diffusion models tend to copy/extend the "
+                    "surrounding texture into the masked area — the result will "
+                    "look almost identical to the original."
+                ),
+                "suggested": (
+                    "Expand the mask to at least 30% of the image, or switch "
+                    "mode to 'restyle' for stronger re-rendering."
+                ),
+                "data": {"white_ratio": white_ratio},
+            })
+
+        # ── 构造最终下发的 prompt 与 function ──────────────────────────────────
+        if mode == "restyle":
+            function = "stylization_local"
+            effective_prompt = resolve_stylization_prompt(request.prompt, request.style)
+        else:
+            function = "description_edit_with_mask"
+            effective_prompt = request.prompt
+
         result_img = generate_inpaint(
             base_image=base_image,
             mask_image=mask_image,
-            prompt=request.prompt,
+            prompt=effective_prompt,
             api_key=effective_key,
             poll_timeout=settings.inpaint_timeout,
+            function=function,
         )
 
         result_url = pil_to_base64(result_img)
-        result = {"inpaintResultUrl": result_url}
+        result = {
+            "inpaintResultUrl": result_url,
+            "mode": mode,
+            "function": function,
+            "maskWhiteRatio": white_ratio,
+            "effectivePrompt": effective_prompt,
+        }
+        if warnings:
+            result["warnings"] = warnings
 
         if request.projectId:
             from datetime import datetime as _dt
