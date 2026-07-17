@@ -34,6 +34,11 @@ v2 扩展目录：
               <frame_index>.json       ← 单帧结果
               <frame_index>_depth.png  ← 深度图
           artifacts/                   ← 镜头级产物
+  characters/                         ← 角色资产（三视图/变体）
+      <character_id>_<asset_type>.png
+      <character_id>_variation_<id>.png
+  motions/                            ← 动作序列
+      <character_id>_<sequence_id>.json
 """
 
 from __future__ import annotations
@@ -46,7 +51,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from app.config import settings
 
@@ -92,6 +97,8 @@ class ProjectManifest:
     input_hash: str
     artifacts: dict[str, PhaseEntry] = field(default_factory=dict)
     timeline: list[TimelineEvent] = field(default_factory=list)
+    script_data: Optional[dict] = field(default=None)
+    shot_list: Optional[list] = field(default_factory=None)
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +118,8 @@ class ProjectManifest:
                 for k, v in self.artifacts.items()
             },
             "timeline": [asdict(t) for t in self.timeline],
+            "scriptData": self.script_data,
+            "shotList": self.shot_list,
         }
 
     @classmethod
@@ -133,6 +142,8 @@ class ProjectManifest:
             input_hash=d["inputHash"],
             artifacts=artifacts,
             timeline=timeline,
+            script_data=d.get("scriptData"),
+            shot_list=d.get("shotList"),
         )
 
 
@@ -682,6 +693,12 @@ class ProjectStore:
     def _shot_artifact_dir(self, project_id: str, shot_id: str) -> Path:
         return self._shot_dir(project_id, shot_id) / "artifacts"
 
+    def _characters_dir(self, project_id: str) -> Path:
+        return self._project_dir(project_id) / "characters"
+
+    def _motions_dir(self, project_id: str) -> Path:
+        return self._project_dir(project_id) / "motions"
+
     async def create_shot(
         self,
         project_id: str,
@@ -884,6 +901,117 @@ class ProjectStore:
                 shutil.rmtree(shot_dir)
                 return True
             return False
+
+    # ── script / shot-list persistence ─────────────────────────────────────────
+
+    async def save_script_data(self, project_id: str, script_data: dict) -> dict:
+        """保存剧本解析结果到 manifest。"""
+        lock = self._get_lock(project_id)
+        async with lock:
+            manifest = self._read_manifest(project_id)
+            manifest.script_data = script_data
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+            return {"success": True, "scriptData": script_data}
+
+    async def save_shot_list(self, project_id: str, shot_list: list) -> dict:
+        """保存镜头列表到 manifest。"""
+        lock = self._get_lock(project_id)
+        async with lock:
+            manifest = self._read_manifest(project_id)
+            manifest.shot_list = shot_list
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+            return {"success": True, "shotList": shot_list}
+
+    async def save_character_asset(
+        self,
+        project_id: str,
+        character_id: str,
+        asset_type: str,
+        file_data: bytes,
+        extension: str = "png",
+    ) -> dict:
+        """保存角色资产（正面图/三视图/变体）到磁盘。"""
+        lock = self._get_lock(project_id)
+        async with lock:
+            characters_dir = self._characters_dir(project_id)
+            characters_dir.mkdir(parents=True, exist_ok=True)
+            rel_path = characters_dir / f"{character_id}_{asset_type}.{extension}"
+            abs_path = self._root / rel_path
+            abs_path.write_bytes(file_data)
+
+            manifest = self._read_manifest(project_id)
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+
+            return {"success": True, "url": str(rel_path)}
+
+    async def add_character_variation(
+        self,
+        project_id: str,
+        character_id: str,
+        variation_id: str,
+        file_data: bytes,
+        extension: str = "png",
+    ) -> dict:
+        """追加角色变体到现有角色资产目录。"""
+        lock = self._get_lock(project_id)
+        async with lock:
+            characters_dir = self._characters_dir(project_id)
+            characters_dir.mkdir(parents=True, exist_ok=True)
+            rel_path = characters_dir / f"{character_id}_variation_{variation_id}.{extension}"
+            abs_path = self._root / rel_path
+            abs_path.write_bytes(file_data)
+
+            manifest = self._read_manifest(project_id)
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+
+            return {"success": True, "url": str(rel_path)}
+
+    async def save_motion_sequence(
+        self,
+        project_id: str,
+        character_id: str,
+        sequence_id: str,
+        motion_data: dict,
+    ) -> dict:
+        """保存角色动作序列到 JSON 文件。"""
+        lock = self._get_lock(project_id)
+        async with lock:
+            motions_dir = self._motions_dir(project_id)
+            motions_dir.mkdir(parents=True, exist_ok=True)
+            seq_path = motions_dir / f"{character_id}_{sequence_id}.json"
+            seq_path.write_text(json.dumps(motion_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            manifest = self._read_manifest(project_id)
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+
+            return {"success": True, "path": str(seq_path.relative_to(self._root))}
+
+    async def list_character_assets(self, project_id: str, character_id: str) -> list[dict]:
+        """列出某角色的所有资产文件路径。"""
+        characters_dir = self._characters_dir(project_id)
+        if not characters_dir.is_dir():
+            return []
+        return [
+            {"name": p.name, "url": str(p.relative_to(self._root))}
+            for p in characters_dir.iterdir()
+            if character_id in p.name
+        ]
+
+    async def list_motion_sequences(self, project_id: str, character_id: str) -> list[dict]:
+        """列出某角色的所有动作序列 JSON。"""
+        motions_dir = self._motions_dir(project_id)
+        if not motions_dir.is_dir():
+            return []
+        return [
+            {"name": p.name, "path": str(p.relative_to(self._root))}
+            for p in motions_dir.iterdir()
+            if character_id in p.name
+        ]
 
     # ── internal sync helpers (called from within lock) ─────────────────────────
 

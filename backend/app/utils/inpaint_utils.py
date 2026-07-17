@@ -13,6 +13,7 @@ mask 语义：白=待编辑区域（生成内容），黑=保留区域
 import base64
 import io
 import json
+import logging
 import os
 import tempfile
 import time
@@ -563,3 +564,118 @@ def compute_mask_white_ratio(mask_image: Image.Image) -> float:
         alpha = mask_image.convert("L")
     arr = np.array(alpha)
     return float((arr > 0).mean())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Image & Video Generation wrappers (DashScope)
+# ─────────────────────────────────────────────────────────────────────────────
+
+logger = logging.getLogger(__name__)
+
+
+async def generate_image(
+    prompt: str,
+    model: str = "wanx-v1",
+    size: str = "1024*1024",
+    n: int = 1,
+) -> Optional[dict]:
+    """
+    Generate image via DashScope text-to-image API.
+    Returns dict with 'url' or 'base64' key.
+    """
+    try:
+        from dashscope import ImageSynthesis
+
+        response = ImageSynthesis.call(
+            model=model,
+            prompt=prompt,
+            size=size,
+            n=n,
+        )
+
+        if response.status_code == 200:
+            result = response.output
+            if hasattr(result, "images") and result.images:
+                return {"url": result.images[0].url, "model": model}
+            elif hasattr(result, "image_url"):
+                return {"url": result.image_url, "model": model}
+        else:
+            logger.warning(f"Image generation failed: {response.message}")
+    except Exception as e:
+        logger.warning(f"Image generation error: {e}")
+    return None
+
+
+async def generate_video(
+    prompt: str,
+    model: str = "wan2.7-i2v",
+    first_frame_b64: Optional[str] = None,
+    last_frame_b64: Optional[str] = None,
+    duration: float = 5.0,
+) -> Optional[dict]:
+    """
+    Generate video via DashScope Wan 2.7-i2v.
+    Returns dict with 'task_id', 'status', 'video_url' (when completed).
+    """
+    try:
+        import dashscope
+        from dashscope.api.entities.dashscope import FilmConcurrentRequest
+
+        request = FilmConcurrentRequest(
+            model=model,
+            prompt=prompt,
+        )
+
+        if first_frame_b64:
+            request.add_clip_first_frame(
+                image=first_frame_b64,
+                duration=duration,
+            )
+
+        if last_frame_b64:
+            request.add_clip_last_frame(
+                image=last_frame_b64,
+                duration=1.0,
+            )
+
+        task_response = dashscope.Film.call(request=request)
+
+        if task_response.status == 200:
+            return {
+                "task_id": task_response.output.task_id,
+                "status": "pending",
+                "model": model,
+            }
+        else:
+            logger.warning(f"Video generation task failed: {task_response.message}")
+    except Exception as e:
+        logger.warning(f"Video generation error: {e}")
+    return None
+
+
+async def poll_video_task(task_id: str, max_wait: int = 300) -> Optional[dict]:
+    """
+    Poll DashScope video task until completion.
+    Returns dict with 'status', 'video_url' or 'error'.
+    """
+    try:
+        import dashscope
+        import time
+
+        elapsed = 0
+        while elapsed < max_wait:
+            status_resp = dashscope.Film.fetch(task_id=task_id)
+            task_status = status_resp.output.task_status
+
+            if task_status == "succeed":
+                video_url = status_resp.output.video.video_url
+                return {"status": "succeed", "video_url": video_url}
+            elif task_status in ("failed", "error"):
+                return {"status": task_status, "error": str(status_resp.output)}
+
+            time.sleep(10)
+            elapsed += 10
+
+        return {"status": "timeout", "error": f"Task did not complete within {max_wait}s"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

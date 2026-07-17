@@ -2,7 +2,7 @@
 // App — Main layout: top toolbar + split pane (2D editor | 3D viewer)
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useRef, useState, useEffect } from 'react';
-import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key, Sparkles, Image as ImageIcon, Layers } from 'lucide-react';
+import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key, Sparkles, Image as ImageIcon, Layers, BookText } from 'lucide-react';
 import type { DepthLayerKey } from './types';
 import type { DepthLayerDioramaAsset } from './types';
 import { ImageCanvas } from './components/ImageCanvas';
@@ -10,12 +10,13 @@ import { LayerSelector } from './components/LayerSelector';
 import { Viewer3D } from './components/Viewer3D';
 import { SplitControls } from './components/SplitControls';
 import { SequencePanel } from './components/sequence/SequencePanel';
+import { ScriptEditor } from './components/ScriptEditor';
 import { useAppStore } from './store/useAppStore';
 import { analyzeImage } from './services/aicssService';
 import { splitDepthLayers } from './utils/depthSplit';
 import { generatePaperLayer } from './services/aicssService';
 
-type AppMode = 'single' | 'sequence';
+type AppMode = 'single' | 'sequence' | 'script';
 
 const TARGET_W = 1920;
 const TARGET_H = 1080;
@@ -273,6 +274,17 @@ function Toolbar({
         >
           <Layers size={14} />
           Sequence
+        </button>
+        <button
+          onClick={() => setAppMode('script')}
+          className={`
+            flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors
+            ${appMode === 'script' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}
+          `}
+          title="Script Mode"
+        >
+          <BookText size={14} />
+          Script
         </button>
       </div>
 
@@ -596,10 +608,15 @@ export default function App() {
                 <Viewer3D />
               </div>
             </>
-          ) : (
+          ) : appMode === 'sequence' ? (
             /* Sequence Panel - full width */
             <div className="flex-1 overflow-hidden">
               <SequencePanel />
+            </div>
+          ) : (
+            /* Script Panel - full width */
+            <div className="flex-1 overflow-hidden">
+              <ScriptEditor />
             </div>
           )}
         </div>
