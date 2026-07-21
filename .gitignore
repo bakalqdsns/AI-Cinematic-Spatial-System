@@ -13,6 +13,7 @@ build/
 
 # Virtual environments
 backend/.venv/
+backend/venv/
 backend/.env/
 .venv/
 
@@ -90,5 +91,4 @@ Desktop.ini
 # Cursor IDE
 .cursor/
 terminals/
-kemeng-ai-anime-creation/
-CineGen-ShortDrama/
+
