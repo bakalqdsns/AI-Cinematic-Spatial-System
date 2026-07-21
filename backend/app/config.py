@@ -87,6 +87,27 @@ class Settings(BaseSettings):
     # LaMa inpainting model (local, replaces DashScope API)
     lama_checkpoint_dir: Path = CACHE_DIR / "lama"
 
+    # ── Local LLM (llama.cpp Qwen3.5-9B-GGUF) ─────────────────────────────────
+    # Start with: llama-server -hf lmstudio-community/Qwen3.5-9B-GGUF:Q4_K_M
+    #             -c 8192 --host 0.0.0.0 --port 8080
+    llm_base_url: str = "http://localhost:8080/v1"
+    llm_model: str = "qwen3.5-9b"
+    llm_timeout: float = 180.0
+
+    # ── Local Image Generation (Stable Diffusion XL / Z-Image) ─────────────────
+    # Model candidates (tried in order; first available is used):
+    #   Tongyi-MAI/Z-Image  — Z-Image (primary, when available)
+    #   stabilityai/stable-diffusion-xl-base-1.0  — SDXL (fallback)
+    image_model_id: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    image_dtype: str = "bfloat16"  # "float16" | "bfloat16" | "float32"
+
+    # ── Video Generation Provider ────────────────────────────────────────────────
+    # Options:
+    #   "dashscope"  — wan2.7-i2v via DashScope API (cloud, high quality)
+    #   "local_wan"  — wan2.1-i2v local inference (28GB+ VRAM, requires Modelscope)
+    #   "svd"        — Stable Video Diffusion (8GB VRAM, degraded quality)
+    video_provider: str = "dashscope"
+
     # Model loading strategy
     # True=按需懒加载（默认，推荐，可节省 16-22GB 常驻显存）
     # False=启动时全量加载（兼容旧行为，服务器内存足够时使用）

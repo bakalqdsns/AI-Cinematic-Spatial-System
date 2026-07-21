@@ -32,6 +32,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # Absolute imports — work because backend root is now on sys.path
 from app.config import settings, DEVICE
 from app.models import model_manager
+from app.services.local_llm import configure_llm
+from app.services.image_generator import configure_image_generator
 from app.endpoints import router as endpoints_router
 from app.endpoints_projects import router as projects_router
 from app.endpoints_sequence import router as sequence_router
@@ -46,6 +48,13 @@ from app.endpoints_mesh import router as mesh_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize local LLM and image generator clients with settings
+    configure_llm(base_url=settings.llm_base_url, model=settings.llm_model)
+    configure_image_generator(model_id=settings.image_model_id, dtype_name=settings.image_dtype)
+    print(f"[AICSS] LLM client: {settings.llm_base_url} ({settings.llm_model})")
+    print(f"[AICSS] Image generator: {settings.image_model_id} (dtype={settings.image_dtype})")
+    print(f"[AICSS] Video provider: {settings.video_provider}")
+
     if settings.lazy_load:
         print("[AICSS] Lazy model loading enabled — models load on first use.")
     else:
@@ -97,12 +106,22 @@ app.include_router(mesh_router, prefix="/api/aicss", tags=["v2 - 3D Mesh Export"
 
 @app.get("/health")
 async def health():
+    from app.services.local_llm import get_llm_client
+    llm_ok = False
+    try:
+        llm_ok = await get_llm_client().is_alive()
+    except Exception:
+        pass
     return {
         "status": "ok",
         "device": DEVICE,
         "lazy_load": settings.lazy_load,
         "all_loaded": model_manager.is_loaded(),
         "models": model_manager.model_status(),
+        "llm_server": settings.llm_base_url,
+        "llm_alive": llm_ok,
+        "image_model": settings.image_model_id,
+        "video_provider": settings.video_provider,
     }
 
 

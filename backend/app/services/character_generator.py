@@ -1,20 +1,21 @@
 """
 Character Generator Service
 Generates character reference images and three-view turnarounds.
+
+Uses local models:
+  - LLM: llama.cpp Qwen3.5-9B-GGUF (via local_llm)
+  - Image: Stable Diffusion XL / Z-Image (via image_generator)
 """
-import base64
-import io
 import logging
-import uuid
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Optional
+
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
 from .script_parser import Character, ScriptLanguage
 
-# View types for three-view turnaround
 THREE_VIEWS = ["front", "side", "back"]
 
 GENERATE_VISUAL_PROMPT_CHINESE = """你是一个专业的视觉提示词生成师。请为以下角色生成英文视觉描述提示词。
@@ -49,7 +50,7 @@ class CharacterAsset:
     character_id: str
     visual_prompt: str
     reference_image: Optional[str] = None  # base64
-    three_view_images: dict[str, Optional[str]] = field(default_factory=dict)  # front/side/back -> base64
+    three_view_images: dict[str, Optional[str]] = field(default_factory=dict)
     variations: list["CharacterVariation"] = field(default_factory=list)
 
 
@@ -61,13 +62,15 @@ class CharacterVariation:
     image: Optional[str] = None  # base64
 
 
+# ── LLM: visual prompt generation ─────────────────────────────────────────────
+
 async def generate_visual_prompt(
     character: Character,
     genre: str = "cinematic",
     language: ScriptLanguage = ScriptLanguage.CHINESE,
 ) -> str:
     """
-    Generate English visual art prompt for a character using LLM.
+    Generate English visual art prompt for a character using local LLM.
     """
     prompts = {
         ScriptLanguage.CHINESE: GENERATE_VISUAL_PROMPT_CHINESE,
@@ -85,46 +88,43 @@ async def generate_visual_prompt(
 请生成视觉描述提示词："""
 
     try:
-        import dashscope
-        from dashscope import Generation
-        response = Generation.call(
-            model="qwen3-8b",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            result_format="message",
-            max_tokens=256,
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(
+            [{"role": "system", "content": system_prompt},
+             {"role": "user", "content": user_text}],
             temperature=0.3,
+            max_tokens=256,
         )
-        if response.status_code == 200:
-            return response.output.choices[0].message.content.strip()
+        if content:
+            return content.strip()
     except Exception as e:
-        logger.warning(f"Visual prompt generation failed: {e}")
+        logger.warning("[character_generator] LLM visual prompt failed: %s", e)
 
     # Fallback
     return f"{character.name}, {character.gender}, {character.age} years old, {character.personality} personality, cinematic style"
 
 
+# ── Image: reference generation ────────────────────────────────────────────────
+
 async def generate_character_reference(
     character: Character,
     visual_prompt: Optional[str] = None,
-    provider: str = "dashscope",
+    provider: str = "local",
 ) -> Optional[str]:
     """
-    Generate character reference image using text-to-image.
+    Generate character reference image using local image generator.
     Returns base64-encoded PNG image.
-    Uses DashScope wanx-v1 or wanx-v1-imageedit API.
     """
     prompt = visual_prompt or character.visual_prompt
     if not prompt:
         prompt = await generate_visual_prompt(character)
 
-    if provider == "dashscope":
-        return await _generate_via_dashscope(prompt, "character_reference")
+    if provider == "local":
+        return await _generate_via_local(prompt)
     else:
-        logger.warning(f"Unknown image provider: {provider}")
-        return None
+        logger.warning("[character_generator] Unknown image provider %r — using local", provider)
+        return await _generate_via_local(prompt)
 
 
 async def generate_character_three_view(
@@ -145,13 +145,13 @@ async def generate_character_three_view(
         "back": f"{base_prompt}, back view, from behind, standing pose, full body",
     }
 
-    results = {}
+    results: dict[str, Optional[str]] = {}
     for view, view_prompt in view_prompts.items():
         try:
-            image_b64 = await _generate_via_dashscope(view_prompt, f"three_view_{view}")
+            image_b64 = await _generate_via_local(view_prompt)
             results[view] = image_b64
         except Exception as e:
-            logger.warning(f"Failed to generate {view} view: {e}")
+            logger.warning("[character_generator] Failed to generate %s view: %s", view, e)
             results[view] = None
 
     return results
@@ -168,80 +168,39 @@ async def generate_character_variation(
     Returns base64 image.
     """
     if reference_image_b64:
-        return await _generate_via_dashscope_with_reference(
-            variation_prompt, reference_image_b64
-        )
+        return await _generate_via_local_with_reference(variation_prompt, reference_image_b64)
     else:
-        return await _generate_via_dashscope(variation_prompt, "variation")
+        return await _generate_via_local(variation_prompt)
 
 
-async def _generate_via_dashscope(prompt: str, seed_name: str) -> Optional[str]:
-    """Generate image via DashScope wanx-v1 text-to-image API."""
+# ── Internal image generation helpers ───────────────────────────────────────────
+
+async def _generate_via_local(prompt: str) -> Optional[str]:
+    """Generate image via local Diffusers pipeline (SDXL / Z-Image)."""
     try:
-        import dashscope
-        from dashscope import ImageSynthesis
-
-        response = ImageSynthesis.call(
-            model="wanx-v1",
-            prompt=prompt,
-            size="1024*1024",
-            n=1,
-        )
-
-        if response.status_code == 200:
-            result = response.output
-            if result and hasattr(result, "images") and result.images:
-                url = result.images[0].url
-                # Download and return as base64
-                return await _url_to_base64(url)
-            elif result and hasattr(result, "image_url"):
-                return await _url_to_base64(result.image_url)
-        else:
-            logger.warning(f"DashScope image gen failed: {response.message}")
+        from .image_generator import get_image_generator
+        generator = get_image_generator()
+        image = generator.generate(prompt)
+        if image is not None:
+            return generator.pil_to_base64(image)
     except Exception as e:
-        logger.warning(f"DashScope image generation error: {e}")
+        logger.warning("[character_generator] _generate_via_local failed: %s", e)
     return None
 
 
-async def _generate_via_dashscope_with_reference(
+async def _generate_via_local_with_reference(
     prompt: str,
     reference_image_b64: str,
 ) -> Optional[str]:
-    """Generate image via DashScope with style reference image."""
+    """Generate image with style reference using local img2img pipeline."""
     try:
-        import dashscope
-        from dashscope import ImageSynthesis
-
-        response = ImageSynthesis.call(
-            model="wanx-v1-imageedit",
-            prompt=prompt,
-            reference_image=reference_image_b64,
-            size="1024*1024",
-            n=1,
-        )
-
-        if response.status_code == 200:
-            result = response.output
-            if result and hasattr(result, "images") and result.images:
-                url = result.images[0].url
-                return await _url_to_base64(url)
-        else:
-            logger.warning(f"DashScope reference image gen failed: {response.message}")
+        from .image_generator import get_image_generator
+        generator = get_image_generator()
+        image = generator.generate_with_image(prompt, reference_image_b64, strength=0.65)
+        if image is not None:
+            return generator.pil_to_base64(image)
     except Exception as e:
-        logger.warning(f"DashScope reference generation error: {e}")
-    return None
-
-
-async def _url_to_base64(url: str) -> Optional[str]:
-    """Download image from URL and return as base64."""
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                return base64.b64encode(resp.content).decode("utf-8")
-    except Exception as e:
-        logger.warning(f"Failed to download image: {e}")
+        logger.warning("[character_generator] _generate_via_local_with_reference failed: %s", e)
     return None
 
 

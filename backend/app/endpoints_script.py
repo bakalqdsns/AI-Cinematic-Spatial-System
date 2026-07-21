@@ -16,7 +16,6 @@ Provides:
 
 Reference: docs/API_PROTOCOL_v2.md Section 8 (Script & Motion workflow)
 """
-import base64
 import logging
 import uuid
 from typing import Optional
@@ -24,11 +23,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.config import settings
 from app.services.script_parser import (
     ScriptData,
     Character,
-    Scene,
     ScriptLanguage,
     normalize_script,
     parse_script,
@@ -37,9 +34,6 @@ from app.services.script_parser import (
 )
 from app.services.shot_generator import (
     Shot,
-    CameraMovement,
-    ShotSize,
-    VisualPrompts,
     generate_shots,
     generate_scene_transitions,
     generate_character_action_sequences,
@@ -78,7 +72,6 @@ class ParseScriptRequest(BaseModel):
     raw_text: str = Field(..., description="Raw script text")
     language: str = Field(default="chinese", description="chinese, english, japanese")
     project_id: Optional[str] = Field(default=None, description="Optional project ID for persistence")
-    dashscope_api_key: Optional[str] = Field(default=None, description="DashScope API key for LLM parsing")
 
 
 class ParseScriptResponse(BaseModel):
@@ -173,6 +166,10 @@ class GenerateMotionRequest(BaseModel):
     start_image: Optional[str] = Field(default=None, description="Base64 start frame")
     end_image: Optional[str] = Field(default=None, description="Base64 end frame")
     duration_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
+    video_provider: str = Field(
+        default="dashscope",
+        description="Video provider: dashscope | local_wan | svd",
+    )
     project_id: Optional[str] = None
 
 
@@ -239,11 +236,11 @@ async def api_normalize_and_parse(request: ParseScriptRequest):
     """
     lang = _lang_from_str(request.language)
 
-    # Pass 1: Normalize
-    normalized = await normalize_script(request.raw_text, lang, request.dashscope_api_key)
+    # Pass 1: Normalize (uses local llama.cpp server)
+    normalized = await normalize_script(request.raw_text, lang)
 
-    # Pass 2: Parse
-    script_data = await parse_script(normalized, lang, request.dashscope_api_key)
+    # Pass 2: Parse (uses local llama.cpp server)
+    script_data = await parse_script(normalized, lang)
 
     project_id = request.project_id
     serialized = serialize_script_data(script_data)
@@ -425,7 +422,11 @@ async def api_generate_visual_prompt(request: VisualPromptRequest):
         age=request.age,
         personality=request.personality,
     )
-    prompt = await generate_visual_prompt(char, request.genre, _lang_from_str(request.language))
+    prompt = await generate_visual_prompt(
+        char,
+        genre=request.genre,
+        language=_lang_from_str(request.language),
+    )
     return {"visual_prompt": prompt}
 
 
@@ -557,6 +558,7 @@ async def api_generate_motion(request: GenerateMotionRequest):
         start_image_b64=request.start_image,
         end_image_b64=request.end_image,
         duration_seconds=request.duration_seconds,
+        video_provider=request.video_provider,
     )
 
     # Collect segmented frame paths

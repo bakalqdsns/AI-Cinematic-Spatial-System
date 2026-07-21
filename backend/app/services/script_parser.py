@@ -6,7 +6,7 @@ Two-pass pipeline:
   Pass 1 — normalize:  raw text  → standard screenplay format
   Pass 2 — parse:       normalized text → structured ScriptData dataclasses
 
-Uses DashScope QWEN3 API when available, falls back to heuristics.
+Uses local llama.cpp server (Qwen3.5-9B-GGUF) when available, falls back to heuristics.
 """
 
 from __future__ import annotations
@@ -309,41 +309,26 @@ async def normalize_script(
     """
     Pass 1 — Normalize raw script text into standard screenplay format.
 
-    Uses DashScope QWEN3 API when api_key is provided; falls back to minimal
-    formatting if the call fails or no key is given.
+    Uses local llama.cpp server (Qwen3.5-9B-GGUF) when available; falls back to
+    minimal formatting if the call fails.
     """
     system_prompt, user_template = _build_normalize_prompt(language)
     user_text = user_template.format(text=raw_text)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
 
     try:
-        import dashscope
-        from dashscope import Generation
-
-        if dashscope_api_key:
-            dashscope.api_key = dashscope_api_key
-        elif not dashscope.api_key:
-            raise ValueError("No DashScope API key provided")
-
-        response = Generation.call(
-            model="qwen3-8b",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            result_format="message",
-            max_tokens=4096,
-            temperature=0.3,
-        )
-        if response.status_code == 200:
-            content = response.output.choices[0].message.content.strip()
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(messages, temperature=0.3, max_tokens=4096)
+        if content:
             logger.info("[script_parser] normalize succeeded (%d chars)", len(content))
             return content
-        logger.warning(
-            "[script_parser] DashScope normalize failed: %s — falling back",
-            getattr(response, "message", str(response)),
-        )
+        logger.warning("[script_parser] Local LLM returned empty — falling back")
     except Exception as e:
-        logger.warning("[script_parser] DashScope call failed: %s — falling back", e)
+        logger.warning("[script_parser] Local LLM call failed: %s — falling back", e)
 
     # Fallback: return as-is with minimal cleanup
     lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
@@ -358,33 +343,21 @@ async def parse_script(
     """
     Pass 2 — Extract structured ScriptData from normalized screenplay text.
 
-    Uses DashScope QWEN3 API expecting JSON output when api_key is provided;
-    falls back to heuristic extraction if the call fails or no key is given.
+    Uses local llama.cpp server (Qwen3.5-9B-GGUF) expecting JSON output; falls
+    back to heuristic extraction if the call fails.
     """
     system_prompt, user_template = _build_parse_prompt(language)
     user_text = user_template.format(normalized_script=normalized_text)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
 
     try:
-        import dashscope
-        from dashscope import Generation
-
-        if dashscope_api_key:
-            dashscope.api_key = dashscope_api_key
-        elif not dashscope.api_key:
-            raise ValueError("No DashScope API key provided")
-
-        response = Generation.call(
-            model="qwen3-8b",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            result_format="message",
-            max_tokens=4096,
-            temperature=0.3,
-        )
-        if response.status_code == 200:
-            content = response.output.choices[0].message.content.strip()
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(messages, temperature=0.3, max_tokens=4096)
+        if content:
             # Strip markdown code fences
             content = re.sub(r"^```(?:json)?\s*", "", content)
             content = re.sub(r"\s*```$", "", content)
@@ -399,10 +372,7 @@ async def parse_script(
                 len(result.story_paragraphs),
             )
             return result
-        logger.warning(
-            "[script_parser] DashScope parse failed: %s — falling back",
-            getattr(response, "message", str(response)),
-        )
+        logger.warning("[script_parser] Local LLM returned empty — falling back")
     except Exception as e:
         logger.warning("[script_parser] parse exception: %s — falling back", e)
 
@@ -583,6 +553,8 @@ async def process_script(
 ) -> tuple[str, ScriptData]:
     """
     Run the full two-pass pipeline: normalize then parse.
+
+    Uses local llama.cpp server; falls back to heuristics if unavailable.
 
     Returns:
         A tuple of (normalized_text, ScriptData)

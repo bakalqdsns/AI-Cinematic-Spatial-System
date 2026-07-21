@@ -5,7 +5,8 @@ LLM-powered shot storyboard generation from parsed ScriptData.
 Generates per-scene shot lists with camera movement, shot size, English
 visual prompts, keyframe prompts, and character assignments.
 
-Uses DashScope QWEN3 API when available; falls back to heuristic generation.
+Uses local llama.cpp server (Qwen3.5-9B-GGUF) when available; falls back to
+heuristic generation.
 """
 
 from __future__ import annotations
@@ -317,22 +318,16 @@ async def generate_shots(
     system_prompt = prompts[lang]
     user_prompt = _build_shot_prompt(script_data, lang)
 
-    try:
-        import dashscope
-        from dashscope import Generation
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
-        response = Generation.call(
-            model="qwen3-8b",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            result_format="message",
-            max_tokens=8192,
-            temperature=0.4,
-        )
-        if response.status_code == 200:
-            content = response.output.choices[0].message.content.strip()
+    try:
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(messages, temperature=0.4, max_tokens=8192)
+        if content:
             # Strip markdown code fences
             content = re.sub(r"^```(?:json)?\s*", "", content)
             content = re.sub(r"\s*```$", "", content)
@@ -345,10 +340,7 @@ async def generate_shots(
                 len(script_data.scenes),
             )
             return shots
-        logger.warning(
-            "[shot_generator] DashScope shot gen failed: %s — falling back",
-            getattr(response, "message", str(response)),
-        )
+        logger.warning("[shot_generator] Local LLM returned empty — falling back")
     except Exception as e:
         logger.warning("[shot_generator] shot gen exception: %s — falling back", e)
 
