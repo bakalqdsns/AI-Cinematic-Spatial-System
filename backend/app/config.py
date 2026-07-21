@@ -78,11 +78,19 @@ class Settings(BaseSettings):
     # Segmentation prompt — dot-separated class names to detect
     segmentation_prompt: str = "person.car.building.tree.lamp.door.window.chair.table.road.sky.mountain.water.grass.flower"
 
-    # DashScope Wanx2.1 Image Edit
+    # DashScope Wanx2.1 Image Edit (deprecated - now using local LaMa)
     dashscope_api_key: str = ""
     dashscope_model: str = "wanx2.1-imageedit"
     dashscope_function: str = "description_edit_with_mask"
     inpaint_timeout: int = 120
+
+    # LaMa inpainting model (local, replaces DashScope API)
+    lama_checkpoint_dir: Path = CACHE_DIR / "lama"
+
+    # Model loading strategy
+    # True=按需懒加载（默认，推荐，可节省 16-22GB 常驻显存）
+    # False=启动时全量加载（兼容旧行为，服务器内存足够时使用）
+    lazy_load: bool = True
 
     # Project Workspace
     workspace_dir: Path = BASE_DIR / ".workspace"

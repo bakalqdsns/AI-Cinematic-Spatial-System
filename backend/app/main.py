@@ -37,23 +37,29 @@ from app.endpoints_projects import router as projects_router
 from app.endpoints_sequence import router as sequence_router
 from app.endpoints_shots import router as shots_router
 from app.endpoints_script import router as script_router
+from app.endpoints_mesh import router as mesh_router
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lifespan — load models on startup
+# Lifespan — models load on demand when AICSS_LAZY_LOAD=true
 # ─────────────────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("[AICSS] Loading models on startup...")
-    try:
-        model_manager.load_all()
-        print("[AICSS] All models loaded successfully.")
-    except Exception as e:
-        print(f"[AICSS] WARNING: Model loading failed: {e}")
-        print("[AICSS] Server will start but inference endpoints may fail.")
+    if settings.lazy_load:
+        print("[AICSS] Lazy model loading enabled — models load on first use.")
+    else:
+        print("[AICSS] Loading all models on startup...")
+        try:
+            model_manager.load_all()
+            print("[AICSS] All models loaded successfully.")
+        except Exception as e:
+            print(f"[AICSS] WARNING: Model loading failed: {e}")
+            print("[AICSS] Server will start but inference endpoints may fail.")
     yield
-    print("[AICSS] Shutting down...")
+    print("[AICSS] Shutting down — unloading all models...")
+    model_manager.unload_all()
+    print("[AICSS] Shutdown complete.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +88,7 @@ app.include_router(projects_router, prefix="/api/aicss", tags=["Projects"])
 app.include_router(sequence_router, prefix="/api/aicss", tags=["v2 - Sequence"])
 app.include_router(shots_router, prefix="/api/aicss", tags=["v2 - Shots"])
 app.include_router(script_router, prefix="/api/aicss", tags=["v2 - Script & Motion"])
+app.include_router(mesh_router, prefix="/api/aicss", tags=["v2 - 3D Mesh Export"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +100,9 @@ async def health():
     return {
         "status": "ok",
         "device": DEVICE,
-        "models_loaded": model_manager.is_loaded(),
+        "lazy_load": settings.lazy_load,
+        "all_loaded": model_manager.is_loaded(),
+        "models": model_manager.model_status(),
     }
 
 

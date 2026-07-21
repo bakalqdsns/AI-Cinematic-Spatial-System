@@ -96,6 +96,10 @@ interface AppState {
   inpaintLoading: boolean;
   inpaintError: string | null;
 
+  // 3D Mesh Export
+  meshExportProgress: number;
+  meshExportError: string | null;
+
   // DashScope API key — used by the inpaint endpoint (wanx2.1-imageedit).
   // Scene/object detection no longer needs this since VLM runs locally.
   // Field name kept as `dashscopeApiKey` for backwards compatibility with
@@ -170,6 +174,10 @@ interface AppState {
   setInpaintLoading: (v: boolean) => void;
   setInpaintError: (msg: string | null) => void;
 
+  // 3D Mesh Export
+  setMeshExportProgress: (progress: number) => void;
+  setMeshExportError: (error: string | null) => void;
+
   // DashScope API key
   setDashscopeApiKey: (key: string) => void;
 
@@ -224,6 +232,8 @@ const initialState = {
   inpaintPreviewUrl: null as string | null,
   inpaintLoading: false,
   inpaintError: null as string | null,
+  meshExportProgress: 0,
+  meshExportError: null as string | null,
   dashscopeApiKey: '',
   past: [] as HistoryEntry[],
   future: [] as HistoryEntry[],
@@ -423,6 +433,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   setInpaintLoading: (v) => set({ inpaintLoading: v }),
 
   setInpaintError: (msg) => set({ inpaintError: msg }),
+
+  setMeshExportProgress: (progress) => set({ meshExportProgress: progress }),
+  setMeshExportError: (error) => set({ meshExportError: error }),
 
   setDashscopeApiKey: (key) => set({ dashscopeApiKey: key }),
 

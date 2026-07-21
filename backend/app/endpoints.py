@@ -52,7 +52,6 @@ from app.models.sam2_loader import refine_mask_edges, extract_polygon_from_mask
 from app.utils.inpaint_utils import (
     generate_inpaint,
     detect_weak_prompt,
-    resolve_stylization_prompt,
     compute_mask_white_ratio,
 )
 from app.utils.vlm_utils import vlm_detect
@@ -169,30 +168,10 @@ class MultifaceRequest(BaseModel):
 
 
 class InpaintRequest(BaseModel):
-    imageUrl: str = Field(..., description="Cropped image, base64 or URL")
-    maskDataUrl: str = Field(..., description="Inverse mask (RGBA), white=selected objects (to edit), black=background (to keep)")
-    prompt: str = Field(..., description="Inpainting prompt describing what fills the white (selected-object) regions")
-    apiKey: Optional[str] = Field(None, description="DashScope API key — falls back to AICSS_DASHSCOPE_API_KEY env var if not provided")
+    imageUrl: str = Field(..., description="Image to inpaint, base64 or URL")
+    maskDataUrl: str = Field(..., description="Mask (RGBA), white (alpha=255)=area to inpaint, black (alpha=0)=keep")
+    prompt: str = Field(..., description="Inpainting prompt (for compatibility; LaMa performs blind inpainting)")
     projectId: Optional[str] = Field(None, description="Optional project ID — when set, inpaint result is persisted")
-    mode: Optional[str] = Field(
-        "repair",
-        description=(
-            "Edit mode: 'repair' (default) uses wanx2.1-imageedit/description_edit_with_mask — "
-            "a conservative inpainter that tends to extend the original scene. "
-            "'restyle' uses stylization_local — a stronger re-renderer that "
-            "replaces the masked area with the prompted style/composition. "
-            "'restyle' is what you want when the result of 'repair' looks too similar to the original."
-        ),
-    )
-    style: Optional[str] = Field(
-        None,
-        description=(
-            "Only used when mode='restyle'. Style preset applied to the masked area. "
-            "Examples: 'photographic', 'anime', 'oil painting', 'watercolor', 'sketch', "
-            "'3d cartoon', 'chinese painting', 'flat illustration'. "
-            "If omitted, the model's default style is used and prompt alone drives the result."
-        ),
-    )
 
 
 # ─── Paper Diorama 2.0 request models ─────────────────────────────────────────
@@ -276,7 +255,7 @@ async def analyze(request: AnalyzeRequest):
         image = await _load_image(request.imageUrl)
         w, h = image.size
 
-        # Step 2: Depth estimation (start immediately)
+        # ── Step 2: DepthAnything V2 ────────────────────────────────────────────
         print(f"[{analysis_id}] Running depth estimation...")
         depth_norm = model_manager.depth_model.predict(image)
         # scale=50.0 将深度图像素值线性映射到米：pixel_value (0-255) → depth_m = pixel * 50.0 / 255.0
@@ -288,20 +267,22 @@ async def analyze(request: AnalyzeRequest):
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
         depth_url = pil_to_base64(depth_pil_resized)
 
-        # Step 2b: VLM detection (local Qwen3-VL, no API key required).
-        # 与深度估计并行启动（asyncio.create_task），避免串行执行带来的额外延迟。
-        # VLM 返回的类别列表直接拼成 "." 分隔字符串，作为 Grounding DINO 的检测提示词。
+        # Unload DepthAnything immediately — only depth_m numpy array needed from here on
+        model_manager.unload_depth()
+
+        # ── Step 2b: Qwen3-VL ─────────────────────────────────────────────────
         print(f"[{analysis_id}] Running VLM detection (local Qwen3-VL)...")
         import asyncio
         vlm_task = asyncio.create_task(vlm_detect(image))
-        # 将控制权交还给事件循环，使深度估计能够同时执行
         detected_classes, detected_scene = await vlm_task
-        # Grounding DINO 使用 "." 作为类别之间的分隔符，因此用 "." 拼接
         effective_prompt = ".".join(detected_classes)
         print(f"[{analysis_id}] VLM scene='{detected_scene}' classes={detected_classes}")
 
-        # Step 3: Object detection + segmentation
-        print(f"[{analysis_id}] Running Grounding DINO + SAM2 with prompt: {effective_prompt[:60]}...")
+        # Unload Qwen3-VL immediately — only detected_classes list needed from here on
+        model_manager.unload_qwen3vl()
+
+        # ── Step 3: Grounding DINO ────────────────────────────────────────────
+        print(f"[{analysis_id}] Running Grounding DINO with prompt: {effective_prompt[:60]}...")
         detections = model_manager.grounding_dino.detect(image, prompt=effective_prompt, threshold=0.3)
 
         if not detections:
@@ -316,24 +297,28 @@ async def analyze(request: AnalyzeRequest):
                 "vlmDetectedScene": detected_scene,
             }
 
-        # Get boxes and scores for SAM2
+        # Extract boxes/scores — numpy arrays, no model needed afterwards
         boxes = np.array([d.box for d in detections])
         scores = np.array([d.score for d in detections])
         labels = [d.label for d in detections]
 
-        # SAM2 segmentation
+        # Unload Grounding DINO immediately
+        model_manager.unload_grounding_dino()
+
+        # ── Step 4: SAM2 ──────────────────────────────────────────────────────
+        print(f"[{analysis_id}] Running SAM2 segmentation...")
         masks_and_scores = model_manager.sam2.predict_masks_from_boxes(
             np.array(image), boxes, scores
         )
 
-        # SAM2 分割完成后，对每个预测 mask 进行边缘细化：
-        # 用 Canny 边缘检测原图，将 mask 轮廓上的像素吸附到距离最近的 Canny 边缘。
-        # 这样可以消除 SAM2 软边界导致的锯齿和毛边，使 paper-cut 纹理效果更干净锐利。
+        # Unload SAM2 immediately
+        model_manager.unload_sam2()
+
+        # ── Step 4b onwards: CPU post-processing (no model) ─────────────────────
         print(f"[{analysis_id}] Refining mask edges...")
         image_np = np.array(image)
         masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
 
-        # Build SpatialObject list
         objects = []
         for i, (mask, score) in enumerate(masks_and_scores):
             det = detections[i]
@@ -365,10 +350,10 @@ async def analyze(request: AnalyzeRequest):
                 "layer": layer_name,
             })
 
-        # Step 4: Build spatial layers
+        # Step 5: Build spatial layers
         layers = build_spatial_layers_from_objects(objects, depth_m, w, h)
 
-        # Step 5: Build scene graph
+        # Step 6: Build scene graph (pure CPU, no model)
         scene_graph = build_scene_graph_from_objects(request.shotId, objects)
 
         result = {
@@ -428,6 +413,7 @@ async def generate_depth(request: DepthRequest):
         image = await _load_image(request.imageUrl)
         w, h = image.size
         depth_norm = model_manager.depth_model.predict(image)
+        model_manager.unload_depth()   # depth_norm numpy is all we need
         depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
         result = {"depthMapUrl": pil_to_base64(depth_pil_resized)}
@@ -458,13 +444,12 @@ async def segment_objects(request: SegmentRequest):
         w, h = image.size
         image_np = np.array(image)
 
-        # depth_model 用于估计每个检测到的物体实例的深度值（用于分配到深度层）。
-        # 虽然标注为"segment only"，但深度是 assign_to_depth_layer 的必要输入，无法省略。
-        # 如果不需要深度信息，请直接使用 segment endpoint 而不传 apiKey。
+        # ── DepthAnything V2 ──────────────────────────────────────────────────
         depth_norm = model_manager.depth_model.predict(image)
         depth_m = depth_to_meters(depth_norm, scale=50.0)
+        model_manager.unload_depth()   # depth_m numpy array is all we need
 
-        # Always use VLM to detect classes (local Qwen3-VL, no API key required).
+        # ── Qwen3-VL ──────────────────────────────────────────────────────────
         print("[segment] Running VLM detection (local Qwen3-VL)...")
         import asyncio
         detected_classes, detected_scene = await asyncio.create_task(
@@ -472,7 +457,9 @@ async def segment_objects(request: SegmentRequest):
         )
         prompt = ".".join(detected_classes)
         print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
+        model_manager.unload_qwen3vl()   # prompt string is all we need
 
+        # ── Grounding DINO ───────────────────────────────────────────────────
         detections = model_manager.grounding_dino.detect(image, prompt=prompt, threshold=0.3)
 
         if not detections:
@@ -480,8 +467,13 @@ async def segment_objects(request: SegmentRequest):
 
         boxes = np.array([d.box for d in detections])
         scores = np.array([d.score for d in detections])
+        model_manager.unload_grounding_dino()   # boxes/scores numpy arrays are all we need
 
+        # ── SAM2 ─────────────────────────────────────────────────────────────
         masks_and_scores = model_manager.sam2.predict_masks_from_boxes(image_np, boxes, scores)
+        model_manager.unload_sam2()   # masks numpy arrays are all we need
+
+        # ── CPU post-processing ───────────────────────────────────────────────
         masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
 
         objects = []
@@ -753,22 +745,12 @@ async def generate_multiface(request: MultifaceRequest):
 @router.post("/inpaint")
 async def inpaint_image(request: InpaintRequest):
     """
-    Inpaint selected-object areas using DashScope wanx2.1-imageedit model.
+    Inpaint masked areas using local LaMa model (replaces DashScope wanx2.1-imageedit).
 
     maskDataUrl should be an RGBA PNG where:
-      - White (alpha=255): selected objects — will be edited and inpainted by the prompt
-      - Black (alpha=0):   background — will be retained
-    prompt: describes what to fill in the white (selected-object) regions
+      - White (alpha=255): areas to inpaint
+      - Black (alpha=0):   areas to keep unchanged
     """
-    effective_key = request.apiKey or settings.dashscope_api_key
-    # 优先级：请求体 apiKey > 环境变量 AICSS_DASHSCOPE_API_KEY
-    # 若两者均未提供，返回 503 而非 500，方便前端区分"未配置"与"服务器错误"
-    if not effective_key:
-        raise HTTPException(
-            status_code=503,
-            detail="DashScope API key not configured. Pass apiKey in request body or set AICSS_DASHSCOPE_API_KEY env var.",
-        )
-
     try:
         base_image = load_image_from_url_or_base64(request.imageUrl)
         mask_image = load_image_from_url_or_base64(request.maskDataUrl, keep_alpha=True)
@@ -778,16 +760,6 @@ async def inpaint_image(request: InpaintRequest):
                 status_code=400,
                 detail=f"Size mismatch: base_image={base_image.size}, mask={mask_image.size}. "
                        "Mask must have the same dimensions as the base image.",
-            )
-
-        # ── mode 路由 ─────────────────────────────────────────────────────────
-        # repair:  description_edit_with_mask（保守、延续原图）
-        # restyle: stylization_local（明显重绘、局部风格迁移）
-        mode = (request.mode or "repair").lower()
-        if mode not in {"repair", "restyle"}:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown inpaint mode: {request.mode!r}. Use 'repair' or 'restyle'.",
             )
 
         warnings: list[dict] = []
@@ -804,41 +776,26 @@ async def inpaint_image(request: InpaintRequest):
                 "code": "small_mask",
                 "reason": (
                     f"Mask covers only {white_ratio*100:.2f}% of the image. "
-                    "With a small mask, diffusion models tend to copy/extend the "
-                    "surrounding texture into the masked area — the result will "
-                    "look almost identical to the original."
+                    "With a small mask, the model may produce results similar to the original."
                 ),
-                "suggested": (
-                    "Expand the mask to at least 30% of the image, or switch "
-                    "mode to 'restyle' for stronger re-rendering."
-                ),
+                "suggested": "Expand the mask to at least 30% of the image for better results.",
                 "data": {"white_ratio": white_ratio},
             })
-
-        # ── 构造最终下发的 prompt 与 function ──────────────────────────────────
-        if mode == "restyle":
-            function = "stylization_local"
-            effective_prompt = resolve_stylization_prompt(request.prompt, request.style)
-        else:
-            function = "description_edit_with_mask"
-            effective_prompt = request.prompt
 
         result_img = generate_inpaint(
             base_image=base_image,
             mask_image=mask_image,
-            prompt=effective_prompt,
-            api_key=effective_key,
-            poll_timeout=settings.inpaint_timeout,
-            function=function,
+            prompt=request.prompt,
         )
+
+        # Unload LaMa immediately after inference — result_img is all we need
+        model_manager.unload_lama()
 
         result_url = pil_to_base64(result_img)
         result = {
             "inpaintResultUrl": result_url,
-            "mode": mode,
-            "function": function,
+            "model": "LaMa (local)",
             "maskWhiteRatio": white_ratio,
-            "effectivePrompt": effective_prompt,
         }
         if warnings:
             result["warnings"] = warnings
