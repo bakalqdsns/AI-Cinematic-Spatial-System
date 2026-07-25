@@ -17,6 +17,8 @@ try:
 except ImportError:
     raise ImportError("Please install transformers: pip install transformers")
 
+from app.config import settings
+
 
 @dataclass
 class Detection:
@@ -50,17 +52,19 @@ class GroundingDinoModel:
         self._model = None
 
     def load(self):
-        """Load model from local cache only (offline-first)."""
+        """Load model from local cache (offline-first)."""
         print(f"[GroundingDINO] Loading {self.model_name} on {self.device} (local only)...")
         self._processor = AutoProcessor.from_pretrained(
             self.model_name,
             trust_remote_code=True,
             local_files_only=True,
+            use_auth_token=settings.hf_token or None,
         )
         self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
             self.model_name,
             trust_remote_code=True,
             local_files_only=True,
+            use_auth_token=settings.hf_token or None,
         )
         self._model.to(self.device)
         self._model.eval()

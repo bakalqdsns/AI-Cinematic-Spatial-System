@@ -15,21 +15,21 @@ httpx>=0.28.0
 simple-lama-inpainting>=0.1.0
 requests>=2.32.0
 
-# ── Local LLM (llama.cpp) ──────────────────────────────────────────────────────
+# Local LLM (llama.cpp)
 # Recommended: compile with CUDA for GPU acceleration
 #   CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --force-reinstall --no-cache-dir
 llama-cpp-python>=0.2.0
 
-# ── Local Image Generation (Stable Diffusion XL / Z-Image) ─────────────────────
+# Local Image Generation (Stable Diffusion XL / Z-Image)
 # Diffusers loads Z-Image / SDXL automatically from HuggingFace Hub.
 # Requires: ~6-8GB VRAM (fp16) or ~10GB (bfloat16).
 diffusers>=0.30.0
 accelerate>=0.25.0
 safetensors>=0.4.0
 
-# ── Optional ──
+# Optional
 pytest>=8.0.0
 
-# ── GPU / CUDA ────────────────────────────────────────────────────────────────
+# GPU / CUDA
 # For CUDA 12.x on Windows/Linux, replace torch/torchvision above with:
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121

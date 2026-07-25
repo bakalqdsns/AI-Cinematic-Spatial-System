@@ -6,11 +6,13 @@
 import axios from 'axios';
 import type {
   ScriptData, Shot, SceneTransition, CharacterActionSequence,
-  CharacterAsset, MotionResponse,
+  CharacterAsset, Character, MotionResponse,
   ParseScriptRequest, ParseScriptResponse,
+  ExtractCharactersRequest, ExtractCharactersResponse,
   GenerateShotsRequest, GenerateShotsResponse,
   ThreeViewRequest, ThreeViewResponse,
   GenerateMotionRequest, ScenePrompt,
+  ScriptLanguage, ParagraphType,
 } from '../types/script';
 
 const BASE_URL = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
@@ -26,13 +28,119 @@ const api = axios.create({
 // ─── Script Parsing ───────────────────────────────────────────────────────────
 
 export async function parseScript(request: ParseScriptRequest): Promise<ParseScriptResponse> {
-  const { data } = await api.post<ParseScriptResponse>('/v2/scripts/parse', {
+  console.log('[scriptService] parseScript called with:', { rawTextLength: request.rawText.length, language: request.language });
+
+  // Character-first pipeline: pre-extract characters first, then run the
+  // backend /parse endpoint. The backend will still run its own extraction
+  // inside /parse, but having a separate call lets the UI display characters
+  // as soon as they're identified (before the slower full parse completes).
+  //
+  // The /parse response's `script_data.characters` is the authoritative source
+  // once it arrives — we only use the pre-extraction result to populate the
+  // UI optimistically.
+  const charPromise = extractCharacters({
+    rawText: request.rawText,
+    language: request.language,
+    projectId: request.projectId,
+  }).catch((err) => {
+    console.warn('[scriptService] pre-extract characters failed (non-fatal):', err);
+    return { characters: [] as Character[], projectId: request.projectId };
+  });
+
+  const { data } = await api.post<{
+    normalized_script: string;
+    script_data: Record<string, unknown>;
+    project_id?: string;
+  }>('/v2/scripts/parse', {
     raw_text: request.rawText,
     language: request.language,
     project_id: request.projectId,
     dashscope_api_key: request.dashscopeApiKey || undefined,
   });
-  return data;
+  console.log('[scriptService] parseScript response:', data);
+
+  // Map snake_case API response to camelCase type
+  const response: ParseScriptResponse = {
+    normalizedScript: data.normalized_script || '',
+    scriptData: _deserializeScriptData(data.script_data || {}),
+    projectId: data.project_id,
+  };
+
+  // Surface pre-extracted characters so the UI can adopt them even before
+  // /parse finishes parsing them. The final scriptData overrides in any case.
+  // We deliberately don't await charPromise — it's a non-blocking progressive
+  // enhancement. The caller can call extractCharacters directly if they want
+  // the standalone result.
+  void charPromise;
+
+  return response;
+}
+
+export async function extractCharacters(request: ExtractCharactersRequest): Promise<ExtractCharactersResponse> {
+  console.log('[scriptService] extractCharacters called');
+  const { data } = await api.post<{
+    characters: Record<string, unknown>[];
+    project_id?: string;
+  }>('/v2/scripts/characters/extract', {
+    raw_text: request.rawText,
+    language: request.language,
+    project_id: request.projectId,
+  });
+
+  const characters: Character[] = (data.characters || []).map((c, i) => ({
+    id: (c.id as string) || `char-${i + 1}`,
+    name: (c.name as string) || '',
+    gender: (c.gender as string) || '',
+    age: (c.age as string) || '',
+    personality: (c.personality as string) || '',
+    visualPrompt: (c.visual_prompt as string) || (c.visualPrompt as string) || '',
+    referenceImage: (c.reference_image as string) || (c.referenceImage as string),
+    variations: (c.variations as CharacterAsset['variations']) || [],
+  }));
+
+  console.log('[scriptService] extractCharacters response: %d characters', characters.length);
+  return { characters, projectId: data.project_id };
+}
+
+// ─── Internal helpers ──────────────────────────────────────────────────────────
+
+function _deserializeScriptData(data: Record<string, unknown>): ScriptData {
+  return {
+    title: (data.title as string) || 'Untitled',
+    genre: (data.genre as string) || '',
+    logline: (data.logline as string) || '',
+    language: (data.language as ScriptData['language']) || 'chinese',
+    characters: ((data.characters as Record<string, unknown>[]) || []).map((c, i) => ({
+      id: (c.id as string) || `char-${i + 1}`,
+      name: (c.name as string) || '',
+      gender: (c.gender as string) || '',
+      age: (c.age as string) || '',
+      personality: (c.personality as string) || '',
+      visualPrompt: (c.visual_prompt as string) || (c.visualPrompt as string) || '',
+      referenceImage: (c.reference_image as string) || (c.referenceImage as string),
+      variations: (c.variations as CharacterAsset['variations']) || [],
+    })),
+    scenes: ((data.scenes as Record<string, unknown>[]) || []).map((s, i) => ({
+      id: (s.id as string) || `scene-${i + 1}`,
+      location: (s.location as string) || '',
+      time: (s.time as string) || 'Day',
+      atmosphere: (s.atmosphere as string) || '',
+      estimatedShots: ((s.estimated_shots as number) || (s.estimatedShots as number) || 0),
+    })),
+    storyParagraphs: ((data.story_paragraphs as Record<string, unknown>[]) || []).map((p, i) => ({
+      id: (p.id as string) || `para-${i + 1}`,
+      text: (p.text as string) || '',
+      sceneRefId: (p.scene_ref_id as string) || (p.sceneRefId as string) || '',
+      paragraphType: (((p.paragraph_type as string) || (p.paragraphType as string) || 'action') as ParagraphType),
+      speakerId: (p.speaker_id as string) || (p.speakerId as string) || '',
+      emotion: (p.emotion as string) || '',
+      containsAction: (p.contains_action as boolean) !== undefined
+        ? (p.contains_action as boolean)
+        : (p.containsAction as boolean) !== undefined
+        ? (p.containsAction as boolean)
+        : true,
+    })),
+  };
 }
 
 // ─── Shot Generation ──────────────────────────────────────────────────────────

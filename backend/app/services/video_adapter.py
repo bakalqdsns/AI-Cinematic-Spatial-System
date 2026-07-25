@@ -30,6 +30,8 @@ from typing import Optional
 
 import numpy as np
 
+from app.config import CACHE_DIR
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,20 +113,30 @@ class DashScopeFilmProvider(VideoProvider):
             task_id = task_resp.output.task_id
             logger.info("[VideoAdapter:DashScope] task created: %s", task_id)
 
-            max_wait, elapsed = 300, 0
-            while elapsed < max_wait:
+            # 指数退避轮询策略：开始时频繁检查，成功后快速确认
+            # 间隔序列：[5, 10, 15, 20, 30, 30, 30, ...] 最多等待 300s
+            poll_intervals = [5, 10, 15, 20, 30]
+            elapsed = 0
+            poll_idx = 0
+
+            while elapsed < 300:
                 status_resp = dashscope.Film.fetch(task_id=task_id)
                 task_status = status_resp.output.task_status
                 if task_status == "succeed":
                     video_url = status_resp.output.video.video_url
+                    logger.info("[VideoAdapter:DashScope] task succeeded after %ds", elapsed)
                     return await self._download_video(video_url)
                 if task_status in ("failed", "error"):
                     logger.warning("[VideoAdapter:DashScope] task failed: %s", status_resp.output)
                     return None
-                time.sleep(10)
-                elapsed += 10
 
-            logger.warning("[VideoAdapter:DashScope] task timed out after %ds", max_wait)
+                # 获取当前轮询间隔（指数退避）
+                interval = poll_intervals[min(poll_idx, len(poll_intervals) - 1)]
+                time.sleep(interval)
+                elapsed += interval
+                poll_idx += 1
+
+            logger.warning("[VideoAdapter:DashScope] task timed out after 300s")
             return None
 
         except Exception as e:
@@ -139,7 +151,7 @@ class DashScopeFilmProvider(VideoProvider):
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     return None
-            cache_dir = Path("backend/.cache/videos")
+            cache_dir = CACHE_DIR / "videos"
             cache_dir.mkdir(parents=True, exist_ok=True)
             video_path = cache_dir / f"{uuid.uuid4().hex[:8]}.mp4"
             with open(video_path, "wb") as f:
@@ -216,7 +228,7 @@ class LocalWanProvider(VideoProvider):
     async def _save_video_frames(frames, duration: float) -> Optional[str]:
         try:
             import cv2
-            cache_dir = Path("backend/.cache/videos")
+            cache_dir = CACHE_DIR / "videos"
             cache_dir.mkdir(parents=True, exist_ok=True)
             video_path = cache_dir / f"{uuid.uuid4().hex[:8]}.mp4"
             first = frames[0]
@@ -307,7 +319,7 @@ class SVDProvider(VideoProvider):
     async def _frames_to_video(frames, duration: float) -> Optional[str]:
         try:
             import cv2
-            cache_dir = Path("backend/.cache/videos")
+            cache_dir = CACHE_DIR / "videos"
             cache_dir.mkdir(parents=True, exist_ok=True)
             video_path = cache_dir / f"{uuid.uuid4().hex[:8]}.mp4"
             first = frames[0]

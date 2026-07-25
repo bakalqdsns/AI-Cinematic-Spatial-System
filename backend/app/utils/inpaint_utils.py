@@ -152,9 +152,8 @@ def generate_inpaint(
             f"Image too small: {w}x{h}px. LaMa requires at least 128x128 pixels."
         )
 
-    print(f"[inpaint] base_image: {base_image.size}, mode={base_image.mode}")
-    print(f"[inpaint] mask_image: {mask_image.size}, mode={mask_image.mode}")
-    print(f"[inpaint] prompt: {prompt[:120]!r}")
+    logger.debug("[inpaint] base_image: %s, mode=%s", base_image.size, base_image.mode)
+    logger.debug("[inpaint] mask_image: %s, mode=%s", mask_image.size, mask_image.mode)
 
     # 分析原始 mask
     if mask_image.mode == "RGBA":
@@ -163,7 +162,7 @@ def generate_inpaint(
         alpha = mask_image.convert("L")
     alpha_arr = np.array(alpha)
     white_ratio = (alpha_arr > 0).mean()
-    print(f"[inpaint] mask non-zero ratio: {white_ratio:.4f}")
+    logger.debug("[inpaint] mask non-zero ratio: %.4f", white_ratio)
 
     if white_ratio < 0.001:
         raise ValueError(
@@ -172,8 +171,8 @@ def generate_inpaint(
         )
 
     if white_ratio < 0.05:
-        print(f"[inpaint WARNING] mask is very small ({white_ratio*100:.2f}% of pixels). "
-              "Results may be similar to the original image.")
+        logger.warning("[inpaint] mask is very small (%.2f%% of pixels). "
+                      "Results may be similar to the original image.", white_ratio * 100)
 
     # 准备图像和 mask
     processed_image, orig_size = _encode_image_for_lama(base_image)
@@ -184,13 +183,13 @@ def generate_inpaint(
         if DEBUG_INPAINT_MASK or DEBUG_INPAINT_OUTPUT_DIR:
             debug_mask_path = _write_debug_image("lama_mask.png", processed_mask)
             if debug_mask_path:
-                print(f"[inpaint DEBUG] mask saved: {debug_mask_path}")
+                logger.debug("[inpaint DEBUG] mask saved: %s", debug_mask_path)
             
             debug_image_path = _write_debug_image("lama_image.png", processed_image)
             if debug_image_path:
-                print(f"[inpaint DEBUG] image saved: {debug_image_path}")
+                logger.debug("[inpaint DEBUG] image saved: %s", debug_image_path)
     except Exception as e:
-        print(f"[inpaint DEBUG] debug save failed: {e}")
+        logger.debug("[inpaint DEBUG] debug save failed: %s", e)
 
     # 调用 LaMa 模型
     lama = model_manager.lama_model
@@ -198,7 +197,7 @@ def generate_inpaint(
 
     # 如果处理后的图像尺寸与原始尺寸不同，需要将结果调整回原始尺寸
     if result.size != orig_size:
-        print(f"[inpaint] Resizing result from {result.size} to {orig_size}")
+        logger.debug("[inpaint] Resizing result from %s to %s", result.size, orig_size)
         result = result.resize(orig_size, Image.LANCZOS)
 
     # 保存结果调试文件
@@ -206,9 +205,9 @@ def generate_inpaint(
         if DEBUG_INPAINT_MASK or DEBUG_INPAINT_OUTPUT_DIR:
             result_path = _write_debug_image("lama_result.png", result)
             if result_path:
-                print(f"[inpaint DEBUG] result saved: {result_path}")
+                logger.debug("[inpaint DEBUG] result saved: %s", result_path)
     except Exception as e:
-        print(f"[inpaint DEBUG] result save failed: {e}")
+        logger.debug("[inpaint DEBUG] debug save failed: %s", e)
 
     return result
 
@@ -355,25 +354,32 @@ async def generate_video(
 async def poll_video_task(task_id: str, max_wait: int = 300) -> Optional[dict]:
     """
     Poll DashScope video task until completion.
+    Uses exponential backoff: [5, 10, 15, 20, 30, 30, ...]
     Returns dict with 'status', 'video_url' or 'error'.
     """
     try:
         import dashscope
         import time
 
+        # 指数退避轮询间隔序列
+        poll_intervals = [5, 10, 15, 20, 30]
         elapsed = 0
+        poll_idx = 0
+
         while elapsed < max_wait:
             status_resp = dashscope.Film.fetch(task_id=task_id)
             task_status = status_resp.output.task_status
 
             if task_status == "succeed":
-                video_url = status_resp.output.video.video_url
-                return {"status": "succeed", "video_url": video_url}
+                return {"status": "succeed", "video_url": status_resp.output.video.video_url}
             elif task_status in ("failed", "error"):
                 return {"status": task_status, "error": str(status_resp.output)}
 
-            time.sleep(10)
-            elapsed += 10
+            # 获取当前轮询间隔（指数退避）
+            interval = poll_intervals[min(poll_idx, len(poll_intervals) - 1)]
+            time.sleep(interval)
+            elapsed += interval
+            poll_idx += 1
 
         return {"status": "timeout", "error": f"Task did not complete within {max_wait}s"}
     except Exception as e:

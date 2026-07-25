@@ -13,18 +13,36 @@ import subprocess
 import argparse
 
 # ─── Auto-detect venv Python ───────────────────────────────────
+# Accept either `.venv` (project convention) or `venv` (often created by `python -m venv venv`).
 _backend_dir = os.path.dirname(os.path.abspath(__file__))
-_venv_python = os.path.join(_backend_dir, ".venv", "Scripts", "python.exe")
 
-# Fallback paths for different OS shells
-if not os.path.exists(_venv_python):
-    _venv_python = os.path.join(_backend_dir, ".venv", "bin", "python")
+
+def _locate_venv_python() -> str | None:
+    """Return absolute path to the venv's python.exe / python, or None if not found.
+
+    Search order:
+      1. .venv (Scripts/python.exe on Windows, bin/python on POSIX)
+      2. venv  (Scripts/python.exe on Windows, bin/python on POSIX)
+    """
+    is_windows = os.name == "nt"
+    sub_scripts = "Scripts" if is_windows else "bin"
+    exe = "python.exe" if is_windows else "python"
+
+    for venv_name in (".venv", "venv"):
+        candidate = os.path.join(_backend_dir, venv_name, sub_scripts, exe)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+_venv_python = _locate_venv_python()
 
 _current_python = os.path.abspath(sys.executable)
-_is_venv = ".venv" in _current_python
+# Treat the script as "running inside venv" if its path lives under either .venv or venv
+_is_venv = (os.sep + ".venv") in _current_python or (os.sep + "venv") in _current_python
 
-def is_venv_valid():
-    return os.path.exists(_venv_python)
+# Backwards compat: older callers referenced this name
+is_venv_valid = _venv_python is not None
 
 # ─── Parse args before re-launch ────────────────────────────────
 parser = argparse.ArgumentParser(description="AICSS Backend Runner")
@@ -39,7 +57,7 @@ parser.add_argument(
 args, _unknown = parser.parse_known_args()
 
 # ─── Re-launch with venv Python if needed ─────────────────────
-if not _is_venv and is_venv_valid():
+if not _is_venv and is_venv_valid:
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     if args.cpu:
@@ -67,7 +85,7 @@ if __name__ == "__main__":
             print(f"[run.py] ERROR: download helper missing: {helper}", file=sys.stderr)
             sys.exit(1)
         result = subprocess.run(
-            [_venv_python if is_venv_valid() else sys.executable, helper],
+            [_venv_python if is_venv_valid else sys.executable, helper],
             cwd=_backend_dir,
         )
         if result.returncode != 0:

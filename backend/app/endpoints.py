@@ -251,12 +251,12 @@ async def analyze(request: AnalyzeRequest):
 
     try:
         # Step 1: Load image
-        print(f"[{analysis_id}] Loading image from {request.imageUrl[:50]}...")
+        _log.info("[%s] Loading image...", analysis_id)
         image = await _load_image(request.imageUrl)
         w, h = image.size
 
         # ── Step 2: DepthAnything V2 ────────────────────────────────────────────
-        print(f"[{analysis_id}] Running depth estimation...")
+        _log.info("[%s] Running depth estimation...", analysis_id)
         depth_norm = model_manager.depth_model.predict(image)
         # scale=50.0 将深度图像素值线性映射到米：pixel_value (0-255) → depth_m = pixel * 50.0 / 255.0
         # 即最远可表示 ~50m，与室内场景和大多数电影镜头场景吻合
@@ -271,22 +271,22 @@ async def analyze(request: AnalyzeRequest):
         model_manager.unload_depth()
 
         # ── Step 2b: Qwen3-VL ─────────────────────────────────────────────────
-        print(f"[{analysis_id}] Running VLM detection (local Qwen3-VL)...")
+        _log.info("[%s] Running VLM detection (local Qwen3-VL)...", analysis_id)
         import asyncio
         vlm_task = asyncio.create_task(vlm_detect(image))
         detected_classes, detected_scene = await vlm_task
         effective_prompt = ".".join(detected_classes)
-        print(f"[{analysis_id}] VLM scene='{detected_scene}' classes={detected_classes}")
+        _log.info("[%s] VLM scene='%s' classes=%s", analysis_id, detected_scene, detected_classes)
 
         # Unload Qwen3-VL immediately — only detected_classes list needed from here on
         model_manager.unload_qwen3vl()
 
         # ── Step 3: Grounding DINO ────────────────────────────────────────────
-        print(f"[{analysis_id}] Running Grounding DINO with prompt: {effective_prompt[:60]}...")
+        _log.info("[%s] Running Grounding DINO...", analysis_id)
         detections = model_manager.grounding_dino.detect(image, prompt=effective_prompt, threshold=0.3)
 
         if not detections:
-            print(f"[{analysis_id}] No objects detected.")
+            _log.info("[%s] No objects detected.", analysis_id)
             return {
                 "analysisId": analysis_id,
                 "depthMapUrl": depth_url,
@@ -306,7 +306,7 @@ async def analyze(request: AnalyzeRequest):
         model_manager.unload_grounding_dino()
 
         # ── Step 4: SAM2 ──────────────────────────────────────────────────────
-        print(f"[{analysis_id}] Running SAM2 segmentation...")
+        _log.info("[%s] Running SAM2 segmentation...", analysis_id)
         masks_and_scores = model_manager.sam2.predict_masks_from_boxes(
             np.array(image), boxes, scores
         )
@@ -315,7 +315,7 @@ async def analyze(request: AnalyzeRequest):
         model_manager.unload_sam2()
 
         # ── Step 4b onwards: CPU post-processing (no model) ─────────────────────
-        print(f"[{analysis_id}] Refining mask edges...")
+        _log.info("[%s] Refining mask edges...", analysis_id)
         image_np = np.array(image)
         masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
 
@@ -338,7 +338,7 @@ async def analyze(request: AnalyzeRequest):
 
             # Extract polygon contour
             polygon = extract_polygon_from_mask(mask)
-            print(f"[{analysis_id}] {det.label}: mask sum={mask.sum()}, polygon points={len(polygon)}")
+            _log.debug("[%s] %s: mask sum=%s, polygon points=%d", analysis_id, det.label, mask.sum(), len(polygon))
 
             objects.append({
                 "id": det.object_id,
@@ -398,8 +398,8 @@ async def analyze(request: AnalyzeRequest):
         return result
 
     except Exception as e:
-        print(f"[{analysis_id}] Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        _log.exception("[%s] Error", analysis_id)
+        raise HTTPException(status_code=500, detail="Internal processing error")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -429,7 +429,8 @@ async def generate_depth(request: DepthRequest):
 
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _log.exception("[depth] Error")
+        raise HTTPException(status_code=500, detail="Depth estimation failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -450,13 +451,13 @@ async def segment_objects(request: SegmentRequest):
         model_manager.unload_depth()   # depth_m numpy array is all we need
 
         # ── Qwen3-VL ──────────────────────────────────────────────────────────
-        print("[segment] Running VLM detection (local Qwen3-VL)...")
+        _log.info("[segment] Running VLM detection (local Qwen3-VL)...")
         import asyncio
         detected_classes, detected_scene = await asyncio.create_task(
             vlm_detect(image)
         )
         prompt = ".".join(detected_classes)
-        print(f"[segment] VLM scene='{detected_scene}' classes={detected_classes}")
+        _log.info("[segment] VLM scene='%s' classes=%s", detected_scene, detected_classes)
         model_manager.unload_qwen3vl()   # prompt string is all we need
 
         # ── Grounding DINO ───────────────────────────────────────────────────
@@ -516,7 +517,8 @@ async def segment_objects(request: SegmentRequest):
 
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _log.exception("[segment] Error")
+        raise HTTPException(status_code=500, detail="Segmentation failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -562,7 +564,8 @@ async def build_layers(request: LayersRequest):
 
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _log.exception("[layers] Error")
+        raise HTTPException(status_code=500, detail="Layer building failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -586,7 +589,8 @@ async def build_graph(request: SceneGraphRequest):
 
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _log.exception("[scene-graph] Error")
+        raise HTTPException(status_code=500, detail="Scene graph building failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -735,7 +739,8 @@ async def generate_multiface(request: MultifaceRequest):
 
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        _log.exception("[multiface] Error")
+        raise HTTPException(status_code=500, detail="Multiface generation failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -814,10 +819,8 @@ async def inpaint_image(request: InpaintRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[inpaint] Error: {e}\n{tb}")
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+        _log.exception("[inpaint] Error")
+        raise HTTPException(status_code=500, detail="Inpainting failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1007,7 +1010,5 @@ async def paper_layer_generate(request: PaperLayerRequest):
     except HTTPException:
         raise
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[paper-layer] Error: {e}\n{tb}")
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+        _log.exception("[paper-layer] Error")
+        raise HTTPException(status_code=500, detail="Paper layer generation failed")

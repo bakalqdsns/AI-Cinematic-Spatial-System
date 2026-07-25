@@ -10,6 +10,8 @@ from typing import Union
 
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
+from app.config import settings
+
 
 class DepthModel:
     """
@@ -35,15 +37,17 @@ class DepthModel:
         self._model = None
 
     def load(self):
-        """Load model and processor from local cache only (offline-first)."""
+        """Load model and processor from local cache (offline-first)."""
         print(f"[DepthModel] Loading {self.model_name} on {self.device} (local only)...")
         self._processor = AutoImageProcessor.from_pretrained(
             self.model_name,
             local_files_only=True,
+            use_auth_token=settings.hf_token or None,
         )
         self._model = AutoModelForDepthEstimation.from_pretrained(
             self.model_name,
             local_files_only=True,
+            use_auth_token=settings.hf_token or None,
         )
         self._model.to(self.device)
         self._model.eval()

@@ -78,9 +78,15 @@ class ModelManager:
             return
         t0 = time.time()
         print("[ModelManager] Loading DepthAnything V2...")
-        self._depth = DepthModel(model_name=settings.depth_model, device=DEVICE)
-        self._depth.load()
-        print(f"[ModelManager] DepthAnything V2 ready in {time.time() - t0:.1f}s")
+        try:
+            self._depth = DepthModel(model_name=settings.depth_model, device=DEVICE)
+            self._depth.load()
+            print(f"[ModelManager] DepthAnything V2 ready in {time.time() - t0:.1f}s")
+        except FileNotFoundError as e:
+            hint = self._get_download_hint("depth", {"path": str(settings.depth_checkpoint_dir)})
+            raise RuntimeError(
+                f"Depth model not found. Please download it first.\n{hint}"
+            ) from e
 
     def load_grounding_dino(self) -> None:
         """Load Grounding DINO on first use."""
@@ -88,12 +94,18 @@ class ModelManager:
             return
         t0 = time.time()
         print("[ModelManager] Loading Grounding DINO...")
-        self._grounding_dino = GroundingDinoModel(
-            model_name=settings.grounding_dino_model,
-            device=DEVICE,
-        )
-        self._grounding_dino.load()
-        print(f"[ModelManager] Grounding DINO ready in {time.time() - t0:.1f}s")
+        try:
+            self._grounding_dino = GroundingDinoModel(
+                model_name=settings.grounding_dino_model,
+                device=DEVICE,
+            )
+            self._grounding_dino.load()
+            print(f"[ModelManager] Grounding DINO ready in {time.time() - t0:.1f}s")
+        except FileNotFoundError as e:
+            hint = self._get_download_hint("grounding_dino", {"path": str(settings.grounding_dino_checkpoint_dir)})
+            raise RuntimeError(
+                f"Grounding DINO model not found. Please download it first.\n{hint}"
+            ) from e
 
     def load_sam2(self) -> None:
         """Load SAM2 on first use."""
@@ -101,14 +113,20 @@ class ModelManager:
             return
         t0 = time.time()
         print("[ModelManager] Loading SAM2...")
-        sam2_checkpoint_dir = str(settings.sam2_checkpoint_dir) if settings.sam2_checkpoint_dir else None
-        self._sam2 = SAM2Model(
-            model_size=settings.sam2_model_size,
-            device=DEVICE,
-            checkpoint_dir=sam2_checkpoint_dir,
-        )
-        self._sam2.load()
-        print(f"[ModelManager] SAM2 ready in {time.time() - t0:.1f}s")
+        try:
+            sam2_checkpoint_dir = str(settings.sam2_checkpoint_dir) if settings.sam2_checkpoint_dir else None
+            self._sam2 = SAM2Model(
+                model_size=settings.sam2_model_size,
+                device=DEVICE,
+                checkpoint_dir=sam2_checkpoint_dir,
+            )
+            self._sam2.load()
+            print(f"[ModelManager] SAM2 ready in {time.time() - t0:.1f}s")
+        except FileNotFoundError as e:
+            hint = self._get_download_hint("sam2", {"path": str(settings.sam2_checkpoint_dir)})
+            raise RuntimeError(
+                f"SAM2 checkpoint not found. Please download it first.\n{hint}"
+            ) from e
 
     def load_qwen3vl(self) -> None:
         """Load Qwen3-VL on first use."""
@@ -116,13 +134,19 @@ class ModelManager:
             return
         t0 = time.time()
         print("[ModelManager] Loading Qwen3-VL (8GB bfloat16)...")
-        self._qwen3vl = Qwen3VLModel(
-            model_name=settings.vlm_model,
-            device=DEVICE,
-            max_new_tokens=settings.vlm_max_new_tokens,
-        )
-        self._qwen3vl.load()
-        print(f"[ModelManager] Qwen3-VL ready in {time.time() - t0:.1f}s")
+        try:
+            self._qwen3vl = Qwen3VLModel(
+                model_name=settings.vlm_model,
+                device=DEVICE,
+                max_new_tokens=settings.vlm_max_new_tokens,
+            )
+            self._qwen3vl.load()
+            print(f"[ModelManager] Qwen3-VL ready in {time.time() - t0:.1f}s")
+        except FileNotFoundError as e:
+            hint = self._get_download_hint("qwen3vl", {"path": str(settings.vlm_checkpoint_dir)})
+            raise RuntimeError(
+                f"Qwen3-VL model not found. Please download it first.\n{hint}"
+            ) from e
 
     def load_lama(self) -> None:
         """Load LaMa inpainting model on first use."""
@@ -130,13 +154,19 @@ class ModelManager:
             return
         t0 = time.time()
         print("[ModelManager] Loading LaMa inpainting...")
-        lama_checkpoint_dir = str(settings.lama_checkpoint_dir) if settings.lama_checkpoint_dir else None
-        self._lama = LaMaModel(
-            device=DEVICE,
-            checkpoint_dir=lama_checkpoint_dir,
-        )
-        self._lama.load()
-        print(f"[ModelManager] LaMa ready in {time.time() - t0:.1f}s")
+        try:
+            lama_checkpoint_dir = str(settings.lama_checkpoint_dir) if settings.lama_checkpoint_dir else None
+            self._lama = LaMaModel(
+                device=DEVICE,
+                checkpoint_dir=lama_checkpoint_dir,
+            )
+            self._lama.load()
+            print(f"[ModelManager] LaMa ready in {time.time() - t0:.1f}s")
+        except FileNotFoundError as e:
+            hint = self._get_download_hint("lama", {"path": str(settings.lama_checkpoint_dir)})
+            raise RuntimeError(
+                f"LaMa model not found. Please download it first.\n{hint}"
+            ) from e
 
     # ── Individual unload methods ─────────────────────────────────────────────
 
@@ -222,6 +252,119 @@ class ModelManager:
             "qwen3vl": self._qwen3vl is not None,
             "lama": self._lama is not None,
         }
+
+    def check_models_status(self) -> dict[str, dict]:
+        """
+        Check download/availability status of each model.
+        Returns dict with model name -> {available: bool, info: str}.
+        """
+        from pathlib import Path
+        from app.config import CACHE_DIR
+
+        status = {}
+        hf_cache = CACHE_DIR / "huggingface"
+
+        # Depth model
+        depth_path = hf_cache / "hub" / "models--depth-anything--Depth-Anything-V2-Large-hf"
+        status["depth"] = {
+            "available": depth_path.exists() or self._depth is not None,
+            "path": str(depth_path),
+            "model": settings.depth_model,
+        }
+
+        # Grounding DINO
+        dino_path = hf_cache / "hub" / f"models--{settings.grounding_dino_model.replace('/', '--')}"
+        status["grounding_dino"] = {
+            "available": dino_path.exists() or self._grounding_dino is not None,
+            "path": str(dino_path),
+            "model": settings.grounding_dino_model,
+        }
+
+        # SAM2
+        sam2_path = settings.sam2_checkpoint_dir
+        sam2_available = (
+            (sam2_path and sam2_path.exists() and list(sam2_path.glob("*.pt")))
+            or self._sam2 is not None
+        )
+        status["sam2"] = {
+            "available": sam2_available,
+            "path": str(sam2_path) if sam2_path else "N/A",
+            "model": f"facebook/sam2.1_{settings.sam2_model_size}",
+        }
+
+        # Qwen3-VL
+        qwen_path = settings.vlm_checkpoint_dir
+        qwen_available = (
+            (qwen_path and qwen_path.exists() and list(qwen_path.glob("*.safetensors")))
+            or self._qwen3vl is not None
+        )
+        status["qwen3vl"] = {
+            "available": qwen_available,
+            "path": str(qwen_path) if qwen_path else "N/A",
+            "model": settings.vlm_model,
+            "download_script": "python download_qwen3vl.py",
+        }
+
+        # LaMa
+        lama_path = settings.lama_checkpoint_dir
+        lama_available = (
+            (lama_path and lama_path.exists() and list(lama_path.glob("*.pth")))
+            or self._lama is not None
+        )
+        status["lama"] = {
+            "available": lama_available,
+            "path": str(lama_path) if lama_path else "N/A",
+        }
+
+        return status
+
+    def get_missing_models_info(self) -> list[dict]:
+        """
+        Return information about missing models that need to be downloaded.
+        """
+        status = self.check_models_status()
+        missing = []
+
+        for name, info in status.items():
+            if not info["available"]:
+                missing.append({
+                    "model": name,
+                    "path": info["path"],
+                    "download_hint": self._get_download_hint(name, info),
+                })
+
+        return missing
+
+    def _get_download_hint(self, model_name: str, info: dict) -> str:
+        """Get download hint for a specific model."""
+        hints = {
+            "depth": (
+                "Run: huggingface-cli download depth-anything/Depth-Anything-V2-Large-hf\n"
+                "  Or: pip install transformers && python -c \"from transformers import AutoModelForDepthEstimation; "
+                "AutoModelForDepthEstimation.from_pretrained('depth-anything/Depth-Anything-V2-Large-hf')\""
+            ),
+            "grounding_dino": (
+                "Run: huggingface-cli download IDEA-Research/grounding-dino-base\n"
+                "  Or: pip install transformers && python -c \"from transformers import AutoModelForZeroShotObjectDetection; "
+                "AutoModelForZeroShotObjectDetection.from_pretrained('IDEA-Research/grounding-dino-base')\""
+            ),
+            "sam2": (
+                f"Download SAM2 checkpoint from: https://github.com/facebookresearch/segment-anything-2\n"
+                f"Place in: {info['path']}\n"
+                f"Or: huggingface-cli download facebook/sam2.1_{settings.sam2_model_size}"
+            ),
+            "qwen3vl": (
+                "Run: python download_qwen3vl.py  (uses hf-mirror.com)\n"
+                "  Or: huggingface-cli download Qwen/Qwen3-VL-4B-Instruct\n"
+                f"Place in: {info['path']}"
+            ),
+            "lama": (
+                "Download LaMa model from: https://github.com/advimman/lama#model-checkpoints\n"
+                f"Place in: {info['path']}\n"
+                "Required file: big-lama.zip (or lama-model.pth)"
+            ),
+        }
+        return hints.get(model_name, "Please download this model manually.")
 
 
 model_manager = ModelManager()

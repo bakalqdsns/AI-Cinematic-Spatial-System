@@ -8,6 +8,10 @@
 
 export type ScriptLanguage = 'chinese' | 'english' | 'japanese';
 
+export type ParagraphType =
+  | 'action' | 'dialogue' | 'narration' | 'inner'
+  | 'atmosphere' | 'transition';
+
 export interface Character {
   id: string;
   name: string;
@@ -31,12 +35,17 @@ export interface Scene {
   location: string;
   time: 'Day' | 'Night' | 'Dawn' | 'Dusk' | 'Morning' | 'Evening';
   atmosphere: string;
+  estimatedShots: number;
 }
 
 export interface StoryParagraph {
   id: string;
   text: string;
   sceneRefId: string;
+  paragraphType: ParagraphType;
+  speakerId: string;
+  emotion: string;
+  containsAction: boolean;
 }
 
 export interface ScriptData {
@@ -159,6 +168,17 @@ export interface ParseScriptResponse {
   projectId?: string;
 }
 
+export interface ExtractCharactersRequest {
+  rawText: string;
+  language: ScriptLanguage;
+  projectId?: string;
+}
+
+export interface ExtractCharactersResponse {
+  characters: Character[];
+  projectId?: string;
+}
+
 export interface GenerateShotsRequest {
   scriptData: ScriptData;
   shotsPerScene?: number;
@@ -239,11 +259,16 @@ export function serializeScriptData(data: ScriptData): Record<string, unknown> {
       location: s.location,
       time: s.time,
       atmosphere: s.atmosphere,
+      estimated_shots: s.estimatedShots,
     })),
     story_paragraphs: data.storyParagraphs.map(p => ({
       id: p.id,
       text: p.text,
       scene_ref_id: p.sceneRefId,
+      paragraph_type: p.paragraphType,
+      speaker_id: p.speakerId,
+      emotion: p.emotion,
+      contains_action: p.containsAction,
     })),
     language: data.language,
   };
@@ -269,11 +294,20 @@ export function deserializeScriptData(data: Record<string, unknown>): ScriptData
       location: (s.location as string) || '',
       time: ((s.time as string) || 'Day') as Scene['time'],
       atmosphere: (s.atmosphere as string) || '',
+      estimatedShots: ((s.estimated_shots as number) || (s.estimatedShots as number) || 0),
     })),
     storyParagraphs: ((data.story_paragraphs as Record<string, unknown>[]) || []).map(p => ({
       id: (p.id as string) || '',
       text: (p.text as string) || '',
       sceneRefId: (p.scene_ref_id as string) || (p.sceneRefId as string) || '',
+      paragraphType: (((p.paragraph_type as string) || (p.paragraphType as string) || 'action') as ParagraphType),
+      speakerId: (p.speaker_id as string) || (p.speakerId as string) || '',
+      emotion: (p.emotion as string) || '',
+      containsAction: (p.contains_action as boolean) !== undefined
+        ? (p.contains_action as boolean)
+        : (p.containsAction as boolean) !== undefined
+        ? (p.containsAction as boolean)
+        : true,
     })),
     language: ((data.language as string) || 'chinese') as ScriptLanguage,
   };

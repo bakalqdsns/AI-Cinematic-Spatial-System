@@ -914,6 +914,27 @@ class ProjectStore:
             self._write_manifest(project_id, manifest)
             return {"success": True, "scriptData": script_data}
 
+    async def save_characters(
+        self, project_id: str, characters: list[dict]
+    ) -> dict:
+        """
+        Save only the characters subset of script_data to manifest.
+
+        Preserves other fields (scenes, story_paragraphs, title, etc.) if
+        script_data already exists. If script_data is absent, this only
+        populates the characters slice — downstream /parse calls will fill
+        in the rest.
+        """
+        lock = self._get_lock(project_id)
+        async with lock:
+            manifest = self._read_manifest(project_id)
+            existing = manifest.script_data or {}
+            existing["characters"] = characters
+            manifest.script_data = existing
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+            return {"success": True, "characters": characters}
+
     async def save_shot_list(self, project_id: str, shot_list: list) -> dict:
         """保存镜头列表到 manifest。"""
         lock = self._get_lock(project_id)
@@ -938,7 +959,7 @@ class ProjectStore:
             characters_dir = self._characters_dir(project_id)
             characters_dir.mkdir(parents=True, exist_ok=True)
             rel_path = characters_dir / f"{character_id}_{asset_type}.{extension}"
-            abs_path = self._root / rel_path
+            abs_path = self._workspace_dir / rel_path
             abs_path.write_bytes(file_data)
 
             manifest = self._read_manifest(project_id)
@@ -961,7 +982,7 @@ class ProjectStore:
             characters_dir = self._characters_dir(project_id)
             characters_dir.mkdir(parents=True, exist_ok=True)
             rel_path = characters_dir / f"{character_id}_variation_{variation_id}.{extension}"
-            abs_path = self._root / rel_path
+            abs_path = self._workspace_dir / rel_path
             abs_path.write_bytes(file_data)
 
             manifest = self._read_manifest(project_id)
@@ -989,7 +1010,7 @@ class ProjectStore:
             manifest.updated_at = _now_iso()
             self._write_manifest(project_id, manifest)
 
-            return {"success": True, "path": str(seq_path.relative_to(self._root))}
+            return {"success": True, "path": str(seq_path.relative_to(self._workspace_dir))}
 
     async def list_character_assets(self, project_id: str, character_id: str) -> list[dict]:
         """列出某角色的所有资产文件路径。"""
@@ -997,7 +1018,7 @@ class ProjectStore:
         if not characters_dir.is_dir():
             return []
         return [
-            {"name": p.name, "url": str(p.relative_to(self._root))}
+            {"name": p.name, "url": str(p.relative_to(self._workspace_dir))}
             for p in characters_dir.iterdir()
             if character_id in p.name
         ]
@@ -1008,7 +1029,7 @@ class ProjectStore:
         if not motions_dir.is_dir():
             return []
         return [
-            {"name": p.name, "path": str(p.relative_to(self._root))}
+            {"name": p.name, "path": str(p.relative_to(self._workspace_dir))}
             for p in motions_dir.iterdir()
             if character_id in p.name
         ]

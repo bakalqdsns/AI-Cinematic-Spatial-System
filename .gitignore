@@ -48,6 +48,26 @@ backend/thirdparty/
 **/.cache/huggingface/
 **/.cache/torch/
 
+# ─── Local LLM runtime (llama.cpp / GGUF) ─────────────────────────────────────
+# llama.cpp binaries and CUDA libraries are downloaded/unpacked by
+# install_cuda12.ps1 / start-llama-server.bat and shouldn't live in git.
+backend/llmserver/*.dll
+backend/llmserver/*.exe
+backend/llmserver/*.zip
+backend/llmserver/models/
+backend/llmserver/logs/
+backend/llmserver/_backup_*/
+backend/llmserver/.cache/
+backend/llmserver/.lock
+# Allow the convenience scripts / docs
+!backend/llmserver/install_cuda12.ps1
+!backend/llmserver/start-llama-server.bat
+!backend/llmserver/stop-llama-server.bat
+!backend/llmserver/README.md
+
+# ─── Local pip wheel cache used by install_cuda12.ps1 ─────────────────────────
+backend/temp_wheels/
+
 # ─── Frontend ─────────────────────────────────────────────────────────────────
 frontend/node_modules/
 frontend/dist/

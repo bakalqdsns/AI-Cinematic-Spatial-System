@@ -40,6 +40,8 @@ from app.endpoints_sequence import router as sequence_router
 from app.endpoints_shots import router as shots_router
 from app.endpoints_script import router as script_router
 from app.endpoints_mesh import router as mesh_router
+from app.endpoints_llm import router as llm_router
+from app.services.llama_server_manager import ensure_server_running
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -55,6 +57,20 @@ async def lifespan(app: FastAPI):
     print(f"[AICSS] Image generator: {settings.image_model_id} (dtype={settings.image_dtype})")
     print(f"[AICSS] Video provider: {settings.video_provider}")
 
+    # Auto-start llama-server if not already running
+    print("[AICSS] Checking llama-server status...")
+    try:
+        llm_started = await ensure_server_running()
+        if llm_started:
+            print("[AICSS] llama-server is running.")
+        else:
+            print("[AICSS] WARNING: llama-server not available. Use POST /api/aicss/llm/start to start it manually.")
+        # Start the auto-unload background manager
+        from app.services.llama_server_manager import start_auto_unload_manager
+        start_auto_unload_manager()
+    except Exception as e:
+        print(f"[AICSS] WARNING: Failed to check llama-server: {e}")
+
     if settings.lazy_load:
         print("[AICSS] Lazy model loading enabled — models load on first use.")
     else:
@@ -68,6 +84,9 @@ async def lifespan(app: FastAPI):
     yield
     print("[AICSS] Shutting down — unloading all models...")
     model_manager.unload_all()
+    from app.services.llama_server_manager import stop_auto_unload_manager, stop_server
+    stop_auto_unload_manager()
+    await stop_server()
     print("[AICSS] Shutdown complete.")
 
 
@@ -98,6 +117,7 @@ app.include_router(sequence_router, prefix="/api/aicss", tags=["v2 - Sequence"])
 app.include_router(shots_router, prefix="/api/aicss", tags=["v2 - Shots"])
 app.include_router(script_router, prefix="/api/aicss", tags=["v2 - Script & Motion"])
 app.include_router(mesh_router, prefix="/api/aicss", tags=["v2 - 3D Mesh Export"])
+app.include_router(llm_router, prefix="/api/aicss", tags=["LLM Server"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,6 +135,7 @@ async def health():
     return {
         "status": "ok",
         "device": DEVICE,
+        "models_loaded": model_manager.is_loaded(),  # 兼容前端期望的字段名
         "lazy_load": settings.lazy_load,
         "all_loaded": model_manager.is_loaded(),
         "models": model_manager.model_status(),

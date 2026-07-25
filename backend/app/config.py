@@ -27,8 +27,18 @@ if _cuda_available:
     print(f"[AICSS] CUDA detected — gpu={_gpu_name}, mem={_gpu_mem:.1f}GB, "
           f"torch.cuda={_torch_cuda_ver}")
 else:
-    print(f"[AICSS] CUDA NOT available — torch.cuda.is_available()=False, "
-          f"torch.version.cuda={_torch_cuda_ver}. Models will run on CPU.")
+    print("=" * 60)
+    print("[AICSS] WARNING: CUDA is NOT available!")
+    print(f"[AICSS]   torch.cuda.is_available() = False")
+    print(f"[AICSS]   torch.version.cuda = {_torch_cuda_ver}")
+    print("[AICSS] Models will run on CPU, which may be very slow.")
+    print("[AICSS]")
+    print("[AICSS] For GPU acceleration, install:")
+    print("[AICSS]   1. NVIDIA driver (latest version)")
+    print("[AICSS]   2. CUDA Toolkit 12.x")
+    print("[AICSS]   3. PyTorch with CUDA support:")
+    print("[AICSS]      pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121")
+    print("=" * 60)
 
 class Settings(BaseSettings):
     # Server

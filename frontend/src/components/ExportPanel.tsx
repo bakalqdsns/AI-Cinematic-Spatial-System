@@ -21,7 +21,7 @@ interface ExportPanelProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
 }
 
-type ExportScope = 'objects' | 'layers' | 'scene';
+type ExportScope = 'object' | 'layer' | 'scene';
 type ExportFormat = 'png' | 'glb' | 'fbx';
 
 export function ExportPanel({ canvasRef }: ExportPanelProps) {
@@ -130,7 +130,9 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
 
       // Auto-download if successful
       if (result.success && result.mesh_id && result.file_name) {
-        downloadMeshFile(result.mesh_id, '', result.file_name);
+        // Use project_id from result if available, otherwise from store
+        const projectId = result.project_id || '';
+        downloadMeshFile(result.mesh_id, projectId, result.file_name);
       }
     } catch (err) {
       setExportResult({
@@ -155,8 +157,8 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
   ]);
 
   const scopeLabel = {
-    objects: '物体',
-    layers: '层',
+    object: '物体',
+    layer: '层',
     scene: '场景',
   }[scope];
 
@@ -229,7 +231,7 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
                     {blenderStatus.message || 'Blender 不可用'}
                     {!blenderStatus.path && (
                       <span className="block mt-0.5 opacity-70">
-                        请安装 Blender >= 3.0 并添加到系统 PATH
+                        请安装 Blender {'>='} 3.0 并添加到系统 PATH
                       </span>
                     )}
                   </p>

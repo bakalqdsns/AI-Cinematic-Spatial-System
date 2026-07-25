@@ -200,7 +200,7 @@ export function SplitControls() {
     try {
       const maskDataUrl = await computeInverseMask();
       const prompt = generatePrompt();
-      const resultUrl = await inpaintImage(effectiveImageUrl, maskDataUrl, prompt, dashscopeApiKey);
+      const resultUrl = await inpaintImage(effectiveImageUrl, maskDataUrl, prompt);
       setInpaintPreview(resultUrl);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

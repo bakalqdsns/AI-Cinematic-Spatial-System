@@ -2,13 +2,8 @@
 Local LLM Client — llama.cpp Qwen3.5-9B-GGUF
 
 Uses llama.cpp's OpenAI-compatible /chat/completions endpoint served by llama-server.
-No GPU VRAM required for the inference server itself (llama.cpp handles quantization).
 
 Usage:
-    # Start the server (one-time, keep running):
-    #   llama-server -hf lmstudio-community/Qwen3.5-9B-GGUF:Q4_K_M \\
-    #       -c 8192 --host 0.0.0.0 --port 8080
-
     client = LocalLLMClient()
     text = await client.chat([{"role": "user", "content": "Hello"}])
 """
@@ -20,6 +15,16 @@ from typing import Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _record_llm_usage():
+    """Record LLM usage to reset idle timer."""
+    try:
+        from app.services.llama_server_manager import record_usage
+        record_usage()
+    except Exception:
+        pass
+
 
 # ── Default config ──────────────────────────────────────────────────────────────
 DEFAULT_BASE_URL = "http://localhost:8080/v1"
@@ -76,7 +81,15 @@ class LocalLLMClient:
             payload["stop"] = stop
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                http2=False,
+                trust_env=False,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            ) as client:
                 resp = await client.post(
                     f"{self.base_url}/chat/completions",
                     json=payload,
@@ -87,7 +100,6 @@ class LocalLLMClient:
             choice = data.get("choices", [{}])[0]
             content = choice.get("message", {}).get("content", "")
             if not content:
-                # Fallback to usage-based check
                 logger.warning("[LocalLLM] Empty response from server")
                 return ""
             return content
@@ -98,6 +110,8 @@ class LocalLLMClient:
         except httpx.RequestError as e:
             logger.error("[LocalLLM] Connection error: %s — is llama-server running?", e)
             raise
+        finally:
+            _record_llm_usage()
 
     async def complete(
         self,
@@ -120,7 +134,11 @@ class LocalLLMClient:
             payload["stop"] = stop
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                http2=False,
+                trust_env=False,
+            ) as client:
                 resp = await client.post(
                     f"{self.base_url}/completions",
                     json=payload,
@@ -134,11 +152,13 @@ class LocalLLMClient:
         except httpx.RequestError as e:
             logger.error("[LocalLLM] Completion connection error: %s", e)
             raise
+        finally:
+            _record_llm_usage()
 
     async def is_alive(self) -> bool:
         """Ping the server's model list endpoint to check connectivity."""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
                 resp = await client.get(f"{self.base_url}/models")
                 return resp.status_code == 200
         except Exception:

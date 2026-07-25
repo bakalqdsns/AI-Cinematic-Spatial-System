@@ -30,8 +30,11 @@ export const ScriptEditor: React.FC = () => {
     parsedScript,
     normalizedScript,
     isParsing,
+    isExtractingCharacters,
+    extractedCharacters,
     error,
     parseScript,
+    extractCharacters,
     generateShots,
     isGeneratingShots,
     activeTab, setActiveTab,
@@ -49,7 +52,17 @@ export const ScriptEditor: React.FC = () => {
   const [projectId] = useState<string | null>(null);
 
   const handleParse = async () => {
-    await parseScript(projectId || undefined);
+    console.log('[ScriptEditor] handleParse called, rawScript length:', rawScript.length);
+    if (!rawScript.trim()) {
+      console.log('[ScriptEditor] rawScript is empty, not calling API');
+      return;
+    }
+    try {
+      await parseScript(projectId || undefined);
+      console.log('[ScriptEditor] parseScript completed');
+    } catch (e) {
+      console.error('[ScriptEditor] parseScript error:', e);
+    }
   };
 
   const handleGenerateShots = async () => {
@@ -65,11 +78,11 @@ export const ScriptEditor: React.FC = () => {
   ];
 
   return (
-    <div className="flex flex-col h-full bg-white text-gray-900">
+    <div className="flex flex-col h-full bg-gray-900 text-gray-100">
       {/* Toolbar */}
-      <div className="flex items-center gap-3 px-4 py-2 border-b bg-gray-50">
+      <div className="flex items-center gap-3 px-4 py-2 border-b border-gray-700 bg-gray-950">
         <select
-          className="px-2 py-1 border rounded text-sm"
+          className="px-2 py-1 bg-gray-800 border border-gray-700 text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
           value={language}
           onChange={e => setLanguage(e.target.value as ScriptLanguage)}
         >
@@ -81,7 +94,7 @@ export const ScriptEditor: React.FC = () => {
         <button
           onClick={handleParse}
           disabled={isParsing || !rawScript.trim()}
-          className="px-4 py-1.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50"
+          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm transition-colors disabled:opacity-50"
         >
           {isParsing ? '解析中...' : '解析剧本'}
         </button>
@@ -89,16 +102,16 @@ export const ScriptEditor: React.FC = () => {
         <button
           onClick={handleGenerateShots}
           disabled={isGeneratingShots || !parsedScript}
-          className="px-4 py-1.5 bg-purple-600 text-white rounded text-sm disabled:opacity-50"
+          className="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm transition-colors disabled:opacity-50"
         >
           {isGeneratingShots ? '生成分镜中...' : '生成分镜表'}
         </button>
 
         {error && (
-          <span className="text-red-500 text-sm">{error}</span>
+          <span className="text-red-400 text-sm">{error}</span>
         )}
 
-        <div className="ml-auto text-sm text-gray-500">
+        <div className="ml-auto text-sm text-gray-400">
           {parsedScript && (
             <span>
               {parsedScript.characters.length} 角色 | {parsedScript.scenes.length} 场景 | {shots.length} 分镜
@@ -108,25 +121,25 @@ export const ScriptEditor: React.FC = () => {
       </div>
 
       {/* Tab bar */}
-      <div className="flex border-b bg-white">
+      <div className="flex border-b border-gray-700 bg-gray-900">
         {tabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`px-4 py-2 text-sm border-b-2 transition-colors ${
               activeTab === tab.id
-                ? 'border-blue-600 text-blue-600 font-medium'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
+                ? 'border-blue-500 text-blue-400 font-medium'
+                : 'border-transparent text-gray-400 hover:bg-gray-800 hover:text-gray-200'
             }`}
           >
             {tab.label}
             {tab.id === 'storyboard' && shots.length > 0 && (
-              <span className="ml-1 text-xs bg-blue-100 text-blue-600 px-1.5 rounded">
+              <span className="ml-1 text-xs bg-blue-900/50 text-blue-300 px-1.5 rounded">
                 {shots.length}
               </span>
             )}
             {tab.id === 'characters' && parsedScript && (
-              <span className="ml-1 text-xs bg-green-100 text-green-600 px-1.5 rounded">
+              <span className="ml-1 text-xs bg-emerald-900/50 text-emerald-300 px-1.5 rounded">
                 {parsedScript.characters.length}
               </span>
             )}
@@ -141,6 +154,9 @@ export const ScriptEditor: React.FC = () => {
             rawScript={rawScript}
             onRawChange={setRawScript}
             parsedScript={parsedScript}
+            extractedCharacters={extractedCharacters}
+            isExtractingCharacters={isExtractingCharacters}
+            onExtractCharacters={() => extractCharacters(projectId || undefined)}
             normalizedScript={normalizedScript}
             language={language}
           />
@@ -179,22 +195,27 @@ interface ScriptTabProps {
   rawScript: string;
   onRawChange: (text: string) => void;
   parsedScript: ScriptData | null;
+  extractedCharacters: Character[];
+  isExtractingCharacters: boolean;
+  onExtractCharacters: () => void;
   normalizedScript: string;
   language: ScriptLanguage;
 }
 
 const ScriptTab: React.FC<ScriptTabProps> = ({
-  rawScript, onRawChange, parsedScript, normalizedScript, language,
+  rawScript, onRawChange, parsedScript,
+  extractedCharacters, isExtractingCharacters, onExtractCharacters,
+  normalizedScript, language,
 }) => {
   const [showNormalized, setShowNormalized] = useState(false);
 
   return (
     <div className="flex h-full">
       {/* Script input */}
-      <div className="flex-1 p-4 border-r">
-        <h3 className="text-sm font-medium text-gray-700 mb-2">原始剧本</h3>
+      <div className="flex-1 p-4 border-r border-gray-700">
+        <h3 className="text-sm font-medium text-gray-200 mb-2">原始剧本</h3>
         <textarea
-          className="w-full h-full min-h-[400px] p-3 border rounded-lg font-mono text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full h-full min-h-[400px] p-3 bg-gray-950 border border-gray-700 text-gray-100 placeholder:text-gray-500 rounded-lg font-mono text-sm resize-none focus:outline-none focus:ring-1 focus:ring-cyan-400"
           placeholder={
             language === 'chinese'
               ? '在此输入或粘贴剧本文本...\n\n示例：\n第一幕 咖啡馆\n\n李明走进咖啡馆，环顾四周。\n\n李明：他已经迟到了半小时了。\n\n张华推门而入。'
@@ -211,8 +232,8 @@ const ScriptTab: React.FC<ScriptTabProps> = ({
       {parsedScript && (
         <div className="flex-1 p-4 overflow-auto">
           <div className="mb-4">
-            <h2 className="text-lg font-bold">{parsedScript.title || '无标题'}</h2>
-            <p className="text-sm text-gray-600">
+            <h2 className="text-lg font-bold text-gray-100">{parsedScript.title || '无标题'}</h2>
+            <p className="text-sm text-gray-400">
               {parsedScript.genre} — {parsedScript.logline}
             </p>
           </div>
@@ -222,29 +243,46 @@ const ScriptTab: React.FC<ScriptTabProps> = ({
             <div className="mb-4">
               <button
                 onClick={() => setShowNormalized(!showNormalized)}
-                className="text-sm text-blue-600 underline"
+                className="text-sm text-cyan-400 hover:text-cyan-300 underline"
               >
                 {showNormalized ? '隐藏标准化剧本' : '显示标准化剧本'}
               </button>
               {showNormalized && (
-                <pre className="mt-2 p-2 bg-gray-100 rounded text-xs whitespace-pre-wrap max-h-48 overflow-auto">
+                <pre className="mt-2 p-2 bg-gray-950 border border-gray-700 text-gray-300 rounded text-xs whitespace-pre-wrap max-h-48 overflow-auto">
                   {normalizedScript}
                 </pre>
               )}
             </div>
           )}
 
-          {/* Characters */}
+          {/* Characters — character-first pipeline: prefer pre-extracted
+              characters (shown as soon as the /characters/extract call
+              returns, even while /parse is still in flight). Fall back to
+              parsedScript.characters once parse completes. */}
           <div className="mb-4">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">
-              角色 ({parsedScript.characters.length})
-            </h3>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-gray-200">
+                角色 ({(extractedCharacters.length || parsedScript.characters.length)})
+                {isExtractingCharacters && (
+                  <span className="ml-2 text-xs text-cyan-400 font-normal">识别中…</span>
+                )}
+              </h3>
+              <button
+                type="button"
+                onClick={onExtractCharacters}
+                disabled={isExtractingCharacters || !rawScript.trim()}
+                className="text-xs px-2 py-1 border border-gray-700 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 hover:border-gray-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title="重新识别角色（仅触发 Pass 1.5）"
+              >
+                {isExtractingCharacters ? '识别中…' : '重新识别'}
+              </button>
+            </div>
             <div className="space-y-2">
-              {parsedScript.characters.map(char => (
-                <div key={char.id} className="p-2 bg-gray-50 rounded border">
-                  <div className="font-medium text-sm">{char.name}</div>
-                  <div className="text-xs text-gray-500">
-                    {char.gender} | {char.age}岁 | {char.personality}
+              {(extractedCharacters.length ? extractedCharacters : parsedScript.characters).map(char => (
+                <div key={char.id} className="p-2 bg-gray-800/60 rounded border border-gray-700">
+                  <div className="font-medium text-sm text-gray-100">{char.name}</div>
+                  <div className="text-xs text-gray-400">
+                    {char.gender} | {char.age} | {char.personality}
                   </div>
                 </div>
               ))}
@@ -253,14 +291,14 @@ const ScriptTab: React.FC<ScriptTabProps> = ({
 
           {/* Scenes */}
           <div className="mb-4">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">
+            <h3 className="text-sm font-semibold text-gray-200 mb-2">
               场景 ({parsedScript.scenes.length})
             </h3>
             <div className="space-y-2">
               {parsedScript.scenes.map(scene => (
-                <div key={scene.id} className="p-2 bg-blue-50 rounded border border-blue-200">
-                  <div className="font-medium text-sm">{scene.location}</div>
-                  <div className="text-xs text-gray-500">
+                <div key={scene.id} className="p-2 bg-cyan-950/40 rounded border border-cyan-800/60">
+                  <div className="font-medium text-sm text-gray-100">{scene.location}</div>
+                  <div className="text-xs text-gray-400">
                     {scene.time} | {scene.atmosphere}
                   </div>
                 </div>
@@ -270,18 +308,18 @@ const ScriptTab: React.FC<ScriptTabProps> = ({
 
           {/* Story paragraphs */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">
+            <h3 className="text-sm font-semibold text-gray-200 mb-2">
               故事段落 ({parsedScript.storyParagraphs.length})
             </h3>
             <div className="space-y-2">
               {parsedScript.storyParagraphs.map(para => {
                 const scene = parsedScript.scenes.find(s => s.id === para.sceneRefId);
                 return (
-                  <div key={para.id} className="p-2 bg-yellow-50 rounded border border-yellow-200">
-                    <div className="text-xs text-blue-600 font-medium mb-1">
+                  <div key={para.id} className="p-2 bg-amber-950/30 rounded border border-amber-800/60">
+                    <div className="text-xs text-cyan-400 font-medium mb-1">
                       [{scene?.location || para.sceneRefId}]
                     </div>
-                    <div className="text-sm text-gray-700">{para.text.slice(0, 200)}</div>
+                    <div className="text-sm text-gray-300">{para.text.slice(0, 200)}</div>
                   </div>
                 );
               })}
@@ -335,37 +373,37 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
                 onClick={() => onSelectShot(shot.id === selectedShotId ? null : shot.id)}
                 className={`p-3 rounded-lg border cursor-pointer transition-all ${
                   shot.id === selectedShotId
-                    ? 'border-blue-500 bg-blue-50 shadow-md'
-                    : 'border-gray-200 bg-white hover:border-blue-300 hover:shadow'
+                    ? 'border-cyan-400 bg-cyan-950/40 shadow-[0_0_0_1px_rgba(34,211,238,0.5)]'
+                    : 'border-gray-700 bg-gray-900 hover:border-gray-500 hover:shadow'
                 }`}
               >
                 {/* Shot number & badges */}
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-bold text-blue-600">
+                  <span className="text-sm font-bold text-cyan-300">
                     镜 {shot.shotNumber}
                   </span>
                   <div className="flex gap-1">
-                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 rounded">
+                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded">
                       {shot.shotSize}
                     </span>
-                    <span className="text-[10px] px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded">
+                    <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded">
                       {shot.cameraMovement}
                     </span>
                   </div>
                 </div>
 
                 {/* Scene & action */}
-                <div className="text-xs text-gray-500 mb-1">
+                <div className="text-xs text-gray-400 mb-1">
                   {scene?.location || shot.sceneId}
                 </div>
-                <div className="text-sm text-gray-800 mb-2 line-clamp-2">
+                <div className="text-sm text-gray-200 mb-2 line-clamp-2">
                   {shot.actionSummary || shot.visualPrompts.actionPrompt}
                 </div>
 
                 {/* Characters */}
                 <div className="flex flex-wrap gap-1 mb-2">
                   {chars.map(c => (
-                    <span key={c.id} className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded">
+                    <span key={c.id} className="text-[10px] px-1.5 py-0.5 bg-emerald-900/50 text-emerald-300 rounded">
                       {c.name}
                     </span>
                   ))}
@@ -383,68 +421,68 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
 
       {/* Shot detail panel */}
       {selectedShot && (
-        <div className="w-96 border-l bg-white p-4 overflow-auto">
-          <h3 className="text-lg font-bold mb-3">
+        <div className="w-96 border-l border-gray-700 bg-gray-900 p-4 overflow-auto">
+          <h3 className="text-lg font-bold mb-3 text-gray-100">
             镜 {selectedShot.shotNumber}
           </h3>
 
           <div className="space-y-3">
             <div>
-              <label className="text-xs font-medium text-gray-500">景别</label>
-              <div className="text-sm font-medium">{selectedShot.shotSize}</div>
+              <label className="text-xs font-medium text-gray-400">景别</label>
+              <div className="text-sm font-medium text-gray-100">{selectedShot.shotSize}</div>
             </div>
 
             <div>
-              <label className="text-xs font-medium text-gray-500">运镜</label>
-              <div className="text-sm">{selectedShot.cameraMovement}</div>
+              <label className="text-xs font-medium text-gray-400">运镜</label>
+              <div className="text-sm text-gray-200">{selectedShot.cameraMovement}</div>
             </div>
 
             <div>
-              <label className="text-xs font-medium text-gray-500">场景提示词</label>
-              <pre className="mt-1 p-2 bg-gray-50 rounded text-xs text-gray-700 whitespace-pre-wrap">
+              <label className="text-xs font-medium text-gray-400">场景提示词</label>
+              <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs whitespace-pre-wrap">
                 {selectedShot.visualPrompts.scenePrompt || selectedShot.keyframeStartPrompt || '-'}
               </pre>
             </div>
 
             <div>
-              <label className="text-xs font-medium text-gray-500">动作提示词</label>
-              <pre className="mt-1 p-2 bg-gray-50 rounded text-xs text-gray-700 whitespace-pre-wrap">
+              <label className="text-xs font-medium text-gray-400">动作提示词</label>
+              <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs whitespace-pre-wrap">
                 {selectedShot.visualPrompts.actionPrompt || '-'}
               </pre>
             </div>
 
             <div>
-              <label className="text-xs font-medium text-gray-500">相机提示词</label>
-              <pre className="mt-1 p-2 bg-gray-50 rounded text-xs text-gray-700">
+              <label className="text-xs font-medium text-gray-400">相机提示词</label>
+              <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs">
                 {selectedShot.visualPrompts.cameraPrompt || '-'}
               </pre>
             </div>
 
             {selectedShot.dialogue && (
               <div>
-                <label className="text-xs font-medium text-gray-500">对白</label>
-                <div className="mt-1 p-2 bg-yellow-50 rounded text-sm italic">
+                <label className="text-xs font-medium text-gray-400">对白</label>
+                <div className="mt-1 p-2 bg-amber-950/30 border border-amber-800/60 text-gray-200 rounded text-sm italic">
                   {selectedShot.dialogue}
                 </div>
               </div>
             )}
 
             <div>
-              <label className="text-xs font-medium text-gray-500">时长</label>
-              <div className="text-sm">{selectedShot.durationSeconds}s</div>
+              <label className="text-xs font-medium text-gray-400">时长</label>
+              <div className="text-sm text-gray-200">{selectedShot.durationSeconds}s</div>
             </div>
 
             {(selectedShot.keyframeStartPrompt || selectedShot.keyframeEndPrompt) && (
               <>
                 <div>
-                  <label className="text-xs font-medium text-gray-500">起始帧提示词</label>
-                  <pre className="mt-1 p-2 bg-gray-50 rounded text-xs text-gray-700">
+                  <label className="text-xs font-medium text-gray-400">起始帧提示词</label>
+                  <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs">
                     {selectedShot.keyframeStartPrompt || '-'}
                   </pre>
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-gray-500">结束帧提示词</label>
-                  <pre className="mt-1 p-2 bg-gray-50 rounded text-xs text-gray-700">
+                  <label className="text-xs font-medium text-gray-400">结束帧提示词</label>
+                  <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs">
                     {selectedShot.keyframeEndPrompt || '-'}
                   </pre>
                 </div>
@@ -484,8 +522,8 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
   return (
     <div className="flex h-full">
       {/* Character list */}
-      <div className="w-64 border-r p-4 overflow-auto">
-        <h3 className="text-sm font-semibold text-gray-700 mb-3">角色列表</h3>
+      <div className="w-64 border-r border-gray-700 p-4 overflow-auto">
+        <h3 className="text-sm font-semibold text-gray-200 mb-3">角色列表</h3>
         <div className="space-y-2">
           {characters.map(char => {
             const asset = characterAssets[char.id];
@@ -495,12 +533,12 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
                 onClick={() => onSelectChar(char.id === selectedCharId ? null : char.id)}
                 className={`p-3 rounded-lg border cursor-pointer transition-all ${
                   char.id === selectedCharId
-                    ? 'border-green-500 bg-green-50'
-                    : 'border-gray-200 bg-white hover:border-green-300'
+                    ? 'border-emerald-400 bg-emerald-950/40'
+                    : 'border-gray-700 bg-gray-900 hover:border-gray-500'
                 }`}
               >
-                <div className="font-medium text-sm">{char.name}</div>
-                <div className="text-xs text-gray-500">{char.gender} | {char.age}</div>
+                <div className="font-medium text-sm text-gray-100">{char.name}</div>
+                <div className="text-xs text-gray-400">{char.gender} | {char.age}</div>
                 {asset?.referenceImage && (
                   <div className="mt-2">
                     <img
@@ -511,7 +549,7 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
                   </div>
                 )}
                 {asset?.threeViewImages?.front && (
-                  <div className="mt-1 text-xs text-green-600">✓ 三视图已生成</div>
+                  <div className="mt-1 text-xs text-emerald-400">✓ 三视图已生成</div>
                 )}
               </div>
             );
@@ -528,15 +566,15 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
         return (
           <div className="flex-1 p-4 overflow-auto">
             <div className="mb-4">
-              <h2 className="text-xl font-bold">{char.name}</h2>
-              <p className="text-sm text-gray-500">{char.personality}</p>
+              <h2 className="text-xl font-bold text-gray-100">{char.name}</h2>
+              <p className="text-sm text-gray-400">{char.personality}</p>
             </div>
 
             {/* Generate button */}
             <button
               onClick={() => onGenerateThreeView(char.id)}
               disabled={isGenerating[char.id]}
-              className="mb-4 px-4 py-2 bg-green-600 text-white rounded disabled:opacity-50"
+              className="mb-4 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-colors disabled:opacity-50"
             >
               {isGenerating[char.id] ? '生成中...' : '生成三视图'}
             </button>
@@ -544,21 +582,21 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
             {/* Three view images */}
             {asset?.threeViewImages && (
               <div className="mb-6">
-                <h3 className="text-sm font-semibold mb-2">三视图</h3>
+                <h3 className="text-sm font-semibold text-gray-200 mb-2">三视图</h3>
                 <div className="grid grid-cols-3 gap-2">
                   {(['front', 'side', 'back'] as const).map(view => {
                     const img = asset.threeViewImages[view];
                     return (
                       <div key={view} className="text-center">
-                        <div className="text-xs text-gray-500 mb-1 capitalize">{view}</div>
+                        <div className="text-xs text-gray-400 mb-1 capitalize">{view}</div>
                         {img ? (
                           <img
                             src={`data:image/png;base64,${img}`}
                             alt={view}
-                            className="w-full aspect-square object-cover rounded border"
+                            className="w-full aspect-square object-cover rounded border border-gray-700"
                           />
                         ) : (
-                          <div className="w-full aspect-square bg-gray-100 rounded border flex items-center justify-center text-gray-400 text-xs">
+                          <div className="w-full aspect-square bg-gray-800 border border-gray-700 rounded flex items-center justify-center text-gray-500 text-xs">
                             未生成
                           </div>
                         )}
@@ -571,9 +609,9 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
 
             {/* Visual prompt */}
             <div className="mb-4">
-              <h3 className="text-sm font-semibold mb-1">视觉提示词</h3>
+              <h3 className="text-sm font-semibold text-gray-200 mb-1">视觉提示词</h3>
               <textarea
-                className="w-full p-2 border rounded text-sm"
+                className="w-full p-2 bg-gray-950 border border-gray-700 text-gray-100 placeholder:text-gray-500 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
                 rows={4}
                 value={char.visualPrompt || asset?.visualPrompt || ''}
                 placeholder="自动生成或手动编辑..."
@@ -583,11 +621,11 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
             {/* Variations */}
             {asset?.variations && asset.variations.length > 0 && (
               <div>
-                <h3 className="text-sm font-semibold mb-2">服装变体</h3>
+                <h3 className="text-sm font-semibold text-gray-200 mb-2">服装变体</h3>
                 <div className="grid grid-cols-3 gap-2">
                   {asset.variations.map(v => (
-                    <div key={v.id} className="border rounded p-2">
-                      <div className="text-xs text-gray-500 mb-1">{v.name}</div>
+                    <div key={v.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-2">
+                      <div className="text-xs text-gray-400 mb-1">{v.name}</div>
                       {v.image && (
                         <img
                           src={`data:image/png;base64,${v.image}`}
@@ -631,7 +669,7 @@ const MotionTab: React.FC<MotionTabProps> = ({ shots, parsedScript }) => {
 
   return (
     <div className="p-4">
-      <h3 className="text-sm font-semibold mb-4">动作序列生成</h3>
+      <h3 className="text-sm font-semibold text-gray-200 mb-4">动作序列生成</h3>
       <div className="space-y-3">
         {shots.map(shot => {
           const chars = characters.filter(c => shot.characters.includes(c.id));
@@ -640,44 +678,44 @@ const MotionTab: React.FC<MotionTabProps> = ({ shots, parsedScript }) => {
             const motion = motionSequences[key];
 
             return (
-              <div key={key} className="p-3 border rounded-lg bg-white">
+              <div key={key} className="p-3 border border-gray-700 rounded-lg bg-gray-900">
                 <div className="flex items-center justify-between mb-2">
                   <div>
-                    <span className="font-medium text-sm">镜 {shot.shotNumber}</span>
-                    <span className="mx-2 text-gray-300">×</span>
-                    <span className="text-sm text-green-700">{char.name}</span>
+                    <span className="font-medium text-sm text-gray-100">镜 {shot.shotNumber}</span>
+                    <span className="mx-2 text-gray-600">×</span>
+                    <span className="text-sm text-emerald-300">{char.name}</span>
                   </div>
                   {motion && (
                     <span className={`text-xs px-2 py-0.5 rounded ${
-                      motion.status === 'done' ? 'bg-green-100 text-green-700' :
-                      motion.status === 'error' ? 'bg-red-100 text-red-700' :
-                      'bg-yellow-100 text-yellow-700'
+                      motion.status === 'done' ? 'bg-emerald-900/50 text-emerald-300' :
+                      motion.status === 'error' ? 'bg-red-900/50 text-red-300' :
+                      'bg-amber-900/50 text-amber-300'
                     }`}>
                       {motion.status}
                     </span>
                   )}
                 </div>
 
-                <div className="text-xs text-gray-500 mb-2 line-clamp-1">
+                <div className="text-xs text-gray-400 mb-2 line-clamp-1">
                   {shot.visualPrompts.actionPrompt}
                 </div>
 
                 <button
                   onClick={() => generateMotion(shot.id, char.id)}
                   disabled={isGeneratingMotion[key]}
-                  className="px-3 py-1 bg-blue-600 text-white text-xs rounded disabled:opacity-50"
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
                 >
                   {isGeneratingMotion[key] ? '生成中...' : '生成动作视频'}
                 </button>
 
                 {motion && motion.frameCount > 0 && (
-                  <div className="mt-2 text-xs text-gray-500">
+                  <div className="mt-2 text-xs text-gray-400">
                     {motion.frameCount} 帧已提取
                     {motion.segmentedDir && ' | 已分割'}
                   </div>
                 )}
                 {motion?.error && (
-                  <div className="mt-2 text-xs text-red-500">
+                  <div className="mt-2 text-xs text-red-400">
                     错误: {motion.error}
                   </div>
                 )}

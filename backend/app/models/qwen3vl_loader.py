@@ -16,6 +16,8 @@ from typing import Union
 
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
+from app.config import settings
+
 
 class Qwen3VLModel:
     """
@@ -41,16 +43,18 @@ class Qwen3VLModel:
         self._model = None
 
     def load(self):
-        """Load processor and model from local cache only (offline-first)."""
+        """Load processor and model from local cache (offline-first)."""
         print(f"[Qwen3VL] Loading {self.model_name} on {self.device} (local only)...")
         self._processor = AutoProcessor.from_pretrained(
             self.model_name,
             local_files_only=True,
+            use_auth_token=settings.hf_token or None,
         )
         self._model = Qwen3VLForConditionalGeneration.from_pretrained(
             self.model_name,
             dtype=torch.bfloat16,
             local_files_only=True,
+            use_auth_token=settings.hf_token or None,
         ).to(self.device).eval()
         print("[Qwen3VL] Loaded.")
 

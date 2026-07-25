@@ -15,10 +15,10 @@ const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:
 
 // Axios 实例配置：
 // - baseURL: 所有请求的公共前缀，由各函数中的路径拼接完整URL
-// - timeout: 120秒，深度学习推理和图像生成耗时较长，2分钟可覆盖大部分场景
+// - timeout: 300秒（5分钟），与后端视频生成/深度学习推理等操作的轮询超时一致
 const client = axios.create({
   baseURL: DEFAULT_BACKEND,
-  timeout: 120_000,
+  timeout: 300_000,
 });
 
 export async function analyzeImage(imageUrl: string, shotId: string = 'shot_001'): Promise<AicssResult> {
@@ -68,13 +68,13 @@ export async function inpaintImage(
   imageUrl: string,
   maskDataUrl: string,
   prompt: string,
-  apiKey?: string,
+  projectId?: string,
 ): Promise<string> {
   const resp = await client.post<{ inpaintResultUrl: string }>('/api/aicss/inpaint', {
     imageUrl,
     maskDataUrl,
     prompt,
-    apiKey: apiKey || undefined,
+    projectId: projectId || undefined,
   });
   return resp.data.inpaintResultUrl;
 }

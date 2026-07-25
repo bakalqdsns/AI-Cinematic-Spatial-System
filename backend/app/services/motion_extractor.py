@@ -20,6 +20,8 @@ from typing import Optional
 
 import numpy as np
 
+from app.config import CACHE_DIR
+
 logger = logging.getLogger(__name__)
 
 
@@ -227,7 +229,7 @@ async def generate_motion_sequence(
     start_image_b64: Optional[str] = None,
     end_image_b64: Optional[str] = None,
     duration_seconds: float = 5.0,
-    output_base_dir: str = "backend/.cache/motion",
+    output_base_dir: str = None,
     sam2_model=None,
     video_provider: str = "dashscope",
 ) -> MotionSequence:
@@ -249,6 +251,9 @@ async def generate_motion_sequence(
         action_description=action_prompt,
         status="generating",
     )
+
+    if output_base_dir is None:
+        output_base_dir = str(CACHE_DIR / "motion")
 
     safe_char = character_name.replace(" ", "_")
     safe_action = action_prompt[:30].replace(" ", "_").replace("/", "_")

@@ -29,6 +29,7 @@ from app.services.script_parser import (
     ScriptLanguage,
     normalize_script,
     parse_script,
+    extract_characters,
     serialize_script_data,
     deserialize_script_data,
 )
@@ -80,9 +81,22 @@ class ParseScriptResponse(BaseModel):
     project_id: Optional[str] = None
 
 
+class ExtractCharactersRequest(BaseModel):
+    raw_text: str = Field(..., description="Raw script text")
+    language: str = Field(default="chinese", description="chinese, english, japanese")
+    project_id: Optional[str] = Field(default=None, description="Optional project ID for persistence")
+
+
+class ExtractCharactersResponse(BaseModel):
+    characters: list[dict] = Field(default_factory=list)
+    project_id: Optional[str] = None
+
+
 class GenerateShotsRequest(BaseModel):
     script_data: dict = Field(..., description="Serialized ScriptData from parse step")
-    shots_per_scene: int = Field(default=6, ge=2, le=12)
+    shots_per_scene: int = Field(default=4, ge=1, le=12,
+                                description="Lower bound per scene. Total shot count is also "
+                                            "driven by story_paragraph count — see /shots endpoint doc.")
     language: Optional[str] = None
     project_id: Optional[str] = None
 
@@ -255,6 +269,39 @@ async def api_normalize_and_parse(request: ParseScriptRequest):
     return ParseScriptResponse(
         normalized_script=normalized,
         script_data=serialized,
+        project_id=project_id,
+    )
+
+
+@router.post("/characters/extract", response_model=ExtractCharactersResponse)
+async def api_extract_characters(request: ExtractCharactersRequest):
+    """
+    Character-first extraction: identify all real human characters in the script.
+
+    This is Pass 1.5 of the character-first pipeline. Runs an LLM call
+    focused exclusively on character identification (no scenes, no paragraphs),
+    then falls back to heuristic bracket/dialogue detection when the LLM is
+    unavailable.
+
+    The returned characters can be passed back into the shot generation
+    pipeline as a curated, character-grounded input — preventing scene/shot
+    generators from inheriting pseudo-character noise ("特写", "异常出现", etc.).
+    """
+    lang = _lang_from_str(request.language)
+    characters = await extract_characters(request.raw_text, lang)
+    # ``extract_characters`` always returns Character dataclasses (or empty
+    # list), so map them to dicts here.
+    char_dicts = [c.to_dict() if hasattr(c, "to_dict") else c for c in characters]
+
+    project_id = request.project_id
+    if project_id:
+        try:
+            await project_store.save_characters(project_id, char_dicts)
+        except Exception as e:
+            logger.warning(f"[script] Failed to persist characters: {e}")
+
+    return ExtractCharactersResponse(
+        characters=char_dicts,
         project_id=project_id,
     )
 

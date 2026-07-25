@@ -664,6 +664,54 @@ def _prepare_textures(scene: SceneExportData, cache_dir: Path) -> Path:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 动态超时计算
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _calculate_export_timeout(scene: SceneExportData) -> int:
+    """
+    根据场景复杂度动态计算 Blender 导出超时时间。
+
+    估算依据：
+    - 基础时间：60s（Blender 启动 + 场景构建）
+    - 每个物体：+5s
+    - 每个层级：+10s
+    - 纹理数量：+15s per texture
+    - FBX 格式：额外 +30s（导出更慢）
+    - 上限：300s（5分钟）
+
+    简单场景（4层无纹理）：~100s
+    复杂场景（20物体 + 纹理）：~300s
+    """
+    base_timeout = 60
+
+    object_count = len(scene.objects)
+    layer_count = len(scene.layers)
+    texture_count = 0
+
+    for layer in scene.layers:
+        for attr in [layer.diffuse_texture, layer.normal_texture, layer.thickness_texture]:
+            if attr and not attr.startswith("data:"):
+                texture_count += 1
+
+    for obj in scene.objects:
+        for attr in [obj.diffuse_texture, obj.normal_texture, obj.thickness_texture]:
+            if attr and not attr.startswith("data:"):
+                texture_count += 1
+
+    estimated = (
+        base_timeout
+        + object_count * 5
+        + layer_count * 10
+        + texture_count * 15
+        + (30 if scene.output_format == "fbx" else 0)
+    )
+
+    # 至少 60s，最多 300s
+    return min(300, max(60, estimated))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 核心导出函数
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -708,12 +756,17 @@ def export_scene(
         out_dir.mkdir(parents=True, exist_ok=True)
         output_file = out_dir / f"{scene.scene_id}.{ext}"
 
+        # 动态计算超时
+        timeout_seconds = _calculate_export_timeout(scene)
+        logger.info(f"[mesh_exporter] Estimated timeout: {timeout_seconds}s "
+                    f"(objects={len(scene.objects)}, layers={len(scene.layers)}, format={fmt})")
+
         try:
             result = subprocess.run(
                 [blender_path, "--background", "--python", str(script_path), "--", str(output_file)],
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout_seconds,
             )
 
             if result.returncode != 0:
@@ -775,7 +828,7 @@ def export_scene(
                 vertex_count=sum(len(o.vertices) for o in scene.objects),
                 face_count=sum(len(o.faces) for o in scene.objects),
                 success=False,
-                error="Blender export timed out after 300 seconds",
+                error=f"Blender export timed out after {timeout_seconds} seconds",
             )
         except FileNotFoundError:
             return MeshExportResult(

@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import type {
   ScriptData, Shot, SceneTransition, CharacterActionSequence,
-  CharacterAsset, MotionSequence, ScriptLanguage,
+  CharacterAsset, Character, MotionSequence, ScriptLanguage,
 } from '../types/script';
 import * as scriptService from '../services/scriptService';
 import { useAppStore } from './useAppStore';
@@ -19,6 +19,11 @@ interface ScriptStore {
   // ─── Parsed state ──────────────────────────────────────────────────────────
   parsedScript: ScriptData | null;
   normalizedScript: string;
+  // Character-first pipeline: characters are identified up front (before the
+  // full scene/paragraph parse) so the UI can render them while the rest of
+  // the pipeline is still running.
+  extractedCharacters: Character[];
+  isExtractingCharacters: boolean;
 
   // ─── Shot generation ───────────────────────────────────────────────────────
   shots: Shot[];
@@ -51,6 +56,7 @@ interface ScriptStore {
   selectCharacter: (charId: string | null) => void;
 
   parseScript: (projectId?: string) => Promise<void>;
+  extractCharacters: (projectId?: string) => Promise<Character[]>;
   generateShots: (projectId?: string) => Promise<void>;
 
   generateCharacterThreeView: (charId: string, projectId?: string) => Promise<void>;
@@ -75,6 +81,8 @@ const initialState = {
   language: 'chinese' as ScriptLanguage,
   parsedScript: null as ScriptData | null,
   normalizedScript: '',
+  extractedCharacters: [] as Character[],
+  isExtractingCharacters: false,
   shots: [] as Shot[],
   sceneTransitions: [] as SceneTransition[],
   characterActionSequences: [] as CharacterActionSequence[],
@@ -99,17 +107,63 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
   selectShot: (shotId) => set({ selectedShotId: shotId }),
   selectCharacter: (charId) => set({ selectedCharacterId: charId }),
 
-  // ─── Pass 1+2: parse raw script into structured ScriptData ────────────────
-  parseScript: async (projectId) => {
+  // ─── Pass 1: extract characters only (independent fast step) ────────────────
+  extractCharacters: async (projectId) => {
     const { rawScript, language } = get();
     if (!rawScript.trim()) {
       set({ error: 'Please enter a script' });
+      return [];
+    }
+    set({ isExtractingCharacters: true, error: null });
+    try {
+      const response = await scriptService.extractCharacters({
+        rawText: rawScript,
+        language,
+        projectId,
+      });
+      set({ extractedCharacters: response.characters, isExtractingCharacters: false });
+      return response.characters;
+    } catch (err) {
+      console.error('[useScriptStore] extractCharacters error:', err);
+      set({
+        isExtractingCharacters: false,
+        error: err instanceof Error ? err.message : 'Character extraction failed',
+      });
+      return [];
+    }
+  },
+
+  // ─── Pass 1+2: parse raw script into structured ScriptData ────────────────
+  // Character-first pipeline:
+  //   1. Run extractCharacters first so the UI shows characters immediately
+  //      while the heavier /parse is in flight.
+  //   2. Run /parse, then merge: keep pre-extracted characters only if the
+  //      parse response's characters list is empty (defence-in-depth — the
+  //      backend's filter should already be reliable, but this guards
+  //      against regressions).
+  parseScript: async (projectId) => {
+    const { rawScript, language } = get();
+    console.log('[useScriptStore] parseScript called, rawScript length:', rawScript.length, 'language:', language);
+    if (!rawScript.trim()) {
+      const error = 'Please enter a script';
+      console.log('[useScriptStore]', error);
+      set({ error });
       return;
     }
 
     const dashscopeApiKey = useAppStore.getState().dashscopeApiKey;
+    console.log('[useScriptStore] dashscopeApiKey:', dashscopeApiKey ? 'set' : 'not set');
+
+    // Kick off character extraction in parallel with /parse. The store will
+    // display characters as soon as the extraction call returns.
+    const charPromise = get().extractCharacters(projectId).catch((err) => {
+      console.warn('[useScriptStore] extractCharacters pre-step failed (non-fatal):', err);
+      return [] as Character[];
+    });
+
     set({ isParsing: true, error: null });
     try {
+      console.log('[useScriptStore] Calling scriptService.parseScript...');
       const response = await scriptService.parseScript({
         rawText: rawScript,
         language,
@@ -117,12 +171,24 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         dashscopeApiKey: dashscopeApiKey || undefined,
       });
 
+      // Make sure character extraction is settled before merging.
+      const preChars = await charPromise;
+
+      console.log('[useScriptStore] parseScript response received, parsedScript:', response.scriptData ? 'exists' : 'null');
+      const finalChars = response.scriptData?.characters?.length
+        ? response.scriptData.characters
+        : (preChars.length ? preChars : response.scriptData?.characters || []);
+
       set({
         normalizedScript: response.normalizedScript,
-        parsedScript: response.scriptData,
+        parsedScript: response.scriptData
+          ? { ...response.scriptData, characters: finalChars }
+          : null,
+        extractedCharacters: finalChars,
         isParsing: false,
       });
     } catch (err) {
+      console.error('[useScriptStore] parseScript error:', err);
       set({
         isParsing: false,
         error: err instanceof Error ? err.message : 'Script parsing failed',
