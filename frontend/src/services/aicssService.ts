@@ -64,6 +64,30 @@ export async function checkHealth(): Promise<{ status: string; device: string; m
   return resp.data;
 }
 
+/**
+ * Per-model availability check. Used by the frontend to surface clear
+ * "model not downloaded" hints before triggering expensive inference.
+ */
+export interface ModelAvailability {
+  available: boolean;
+  path: string;
+  model?: string;
+  download_script?: string;
+}
+
+export interface ModelsHealth {
+  all_ready: boolean;
+  device: string;
+  lazy_load: boolean;
+  models: Record<string, ModelAvailability>;
+  missing: Array<{ model: string; path: string; download_hint: string }>;
+}
+
+export async function checkModelsHealth(): Promise<ModelsHealth> {
+  const resp = await client.get<ModelsHealth>('/health/models');
+  return resp.data;
+}
+
 export async function inpaintImage(
   imageUrl: string,
   maskDataUrl: string,

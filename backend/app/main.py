@@ -41,6 +41,7 @@ from app.endpoints_shots import router as shots_router
 from app.endpoints_script import router as script_router
 from app.endpoints_mesh import router as mesh_router
 from app.endpoints_llm import router as llm_router
+from app.endpoints_settings import router as settings_router
 from app.services.llama_server_manager import ensure_server_running
 
 
@@ -117,7 +118,8 @@ app.include_router(sequence_router, prefix="/api/aicss", tags=["v2 - Sequence"])
 app.include_router(shots_router, prefix="/api/aicss", tags=["v2 - Shots"])
 app.include_router(script_router, prefix="/api/aicss", tags=["v2 - Script & Motion"])
 app.include_router(mesh_router, prefix="/api/aicss", tags=["v2 - 3D Mesh Export"])
-app.include_router(llm_router, prefix="/api/aicss", tags=["LLM Server"])
+app.include_router(llm_router, tags=["LLM Server"])
+app.include_router(settings_router, tags=["Settings"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +146,41 @@ async def health():
         "image_model": settings.image_model_id,
         "video_provider": settings.video_provider,
     }
+
+
+@app.get("/health/models")
+async def health_models():
+    """
+    Detailed per-model availability check.
+
+    Returns whether each model file/weight is present on disk so the frontend
+    can warn the user (and the dev can diagnose 5xx errors) before triggering
+    expensive inference. Lazy-loaded models also report whether they are
+    currently resident in GPU memory.
+
+    The response shape is stable — frontend code can rely on these keys:
+      - `models`     : per-model {available, path, ...} details
+      - `missing`    : list of {model, path, download_hint} for unavailable models
+      - `all_ready`  : True iff every required model is available
+      - `device`     : cuda / cpu
+      - `lazy_load`  : whether models are loaded on first use
+    """
+    try:
+        status = model_manager.check_models_status()
+        missing = model_manager.get_missing_models_info()
+        return {
+            "all_ready": len(missing) == 0,
+            "device": DEVICE,
+            "lazy_load": settings.lazy_load,
+            "models": status,
+            "missing": missing,
+        }
+    except Exception as e:
+        _log.exception("health_models failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"health_models failed: {type(e).__name__}: {e}"[:500],
+        )
 
 
 @app.get("/")

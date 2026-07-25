@@ -63,6 +63,11 @@ interface ScriptStore {
   generateCharacterVariation: (charId: string, prompt: string, projectId?: string) => Promise<void>;
   updateCharacterVisualPrompt: (charId: string, prompt: string) => void;
 
+  // Auto-batch: triggered automatically after /parse completes. The backend
+  // runs all character three-view generations in parallel; this method polls
+  // the progress endpoint and ingests finished CharacterAssets into the store.
+  pollAutoThreeView: (projectId: string, charIds: string[]) => Promise<void>;
+
   generateMotion: (shotId: string, charId: string, projectId?: string) => Promise<void>;
 
   reset: () => void;
@@ -187,6 +192,13 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         extractedCharacters: finalChars,
         isParsing: false,
       });
+
+      // Auto-batch: kick off three-view generation for every detected
+      // character (fire-and-forget on the backend). Poll status to update
+      // characterAssets as they complete.
+      if (projectId && finalChars.length) {
+        get().pollAutoThreeView(projectId, finalChars.map(c => c.id));
+      }
     } catch (err) {
       console.error('[useScriptStore] parseScript error:', err);
       set({
@@ -194,6 +206,90 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         error: err instanceof Error ? err.message : 'Script parsing failed',
       });
     }
+  },
+
+  // ─── Auto three-view: poll backend status, ingest finished assets ──────────
+  pollAutoThreeView: async (projectId, charIds) => {
+    if (!projectId || !charIds?.length) return;
+    console.log('[useScriptStore] pollAutoThreeView start', { projectId, n: charIds.length });
+
+    // Mark all characters as initially "queued" so the UI can show pending badges.
+    set(state => {
+      const isGen = { ...state.isGeneratingCharacter };
+      charIds.forEach(id => { isGen[id] = true; });
+      return { isGeneratingCharacter: isGen };
+    });
+
+    const POLL_INTERVAL_MS = 4000;
+    const TIMEOUT_MS = 5 * 60 * 1000;
+    const deadline = Date.now() + TIMEOUT_MS;
+
+    let stopped = false;
+    const stop = () => { stopped = true; };
+
+    while (!stopped && Date.now() < deadline) {
+      try {
+        const status = await scriptService.getBatchStatus(projectId);
+        const { characters: chMap, summary } = status;
+
+        // Ingest any newly-finished assets.
+        const newAssets: Record<string, CharacterAsset> = {};
+        const stillRunning: string[] = [];
+        for (const id of charIds) {
+          const entry = chMap[id];
+          if (!entry) continue;
+          if (entry.status === 'done' && entry.asset) {
+            const a = entry.asset as unknown as CharacterAsset;
+            newAssets[id] = {
+              characterId: id,
+              visualPrompt: a.visual_prompt || a.visualPrompt || entry.visual_prompt || '',
+              referenceImage: a.reference_image || a.referenceImage,
+              threeViewImages: a.three_view_images || a.threeViewImages || {},
+              variations: a.variations || [],
+            };
+          } else if (entry.status === 'queued' || entry.status === 'running') {
+            stillRunning.push(id);
+          }
+          // 'failed' falls through — leave isGeneratingCharacter[id] = false below.
+        }
+
+        if (Object.keys(newAssets).length) {
+          set(state => ({
+            characterAssets: { ...state.characterAssets, ...newAssets },
+          }));
+        }
+
+        // Clear isGeneratingCharacter for finished/failed characters.
+        const finishedIds = charIds.filter(id => {
+          const e = chMap[id];
+          return e && (e.status === 'done' || e.status === 'failed');
+        });
+        if (finishedIds.length) {
+          set(state => {
+            const isGen = { ...state.isGeneratingCharacter };
+            finishedIds.forEach(id => { isGen[id] = false; });
+            return { isGeneratingCharacter: isGen };
+          });
+        }
+
+        // Stop polling when everything is settled.
+        if (stillRunning.length === 0) {
+          console.log('[useScriptStore] pollAutoThreeView all settled', summary);
+          break;
+        }
+      } catch (err) {
+        console.warn('[useScriptStore] getBatchStatus failed:', err);
+      }
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    }
+
+    // Final cleanup: make sure no character is stuck in "generating" state.
+    set(state => {
+      const isGen = { ...state.isGeneratingCharacter };
+      charIds.forEach(id => { isGen[id] = false; });
+      return { isGeneratingCharacter: isGen };
+    });
+    void stop;
   },
 
   // ─── Pass 3: derive per-scene shots + transitions + character sequences ───

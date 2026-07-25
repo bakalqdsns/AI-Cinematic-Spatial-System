@@ -317,6 +317,254 @@ _NORMALIZE_SYSTEM_JAPANESE = """あなたはプロフェッショナルな脚本
 # System prompts — parsing (Pass 2)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+_PARSE_HEADER_SYSTEM_CHINESE = """你是一个剧本元数据提取助手。请从剧本文本中提取最基础的元信息，返回 JSON 格式。
+
+只输出以下字段：
+- title:   剧本标题（若剧本中无明确标题，从内容里推断；都没有则 "Untitled"）
+- genre:   题材类型（"drama" / "animation" / "fantasy" / "sci-fi" / "romance" 等小写英文）
+- logline: 一句话剧情简介（不超过 50 字）
+
+注意：剧本里"内景 X - 夜晚"这种是场景标题，不是整个剧本的标题。
+
+只输出 JSON：{"title": "...", "genre": "...", "logline": "..."}
+不要任何解释。"""
+
+_PARSE_HEADER_SYSTEM_ENGLISH = """You are a script metadata extractor. Extract basic metadata from the script and return strict JSON.
+
+Output ONLY:
+- title:   script title (infer from content; use "Untitled" if unclear)
+- genre:   genre type ("drama" / "animation" / "fantasy" / "sci-fi" / "romance" ...)
+- logline: one-sentence summary (max 50 words)
+
+Note: "INT. X - DAY" headings are scene markers, not the script title.
+
+Output only JSON: {"title": "...", "genre": "...", "logline": "..."}
+No explanation."""
+
+_PARSE_HEADER_SYSTEM_JAPANESE = """あなたは脚本のメタデータ抽出アシスタントです。脚本から基礎メタデータのみを抽出し、厳格な JSON で返してください。
+
+出力は以下のみ：
+- title:   脚本タイトル（内容から推測、不明なら "Untitled"）
+- genre:   ジャンル（"drama" / "animation" / "fantasy" / "sci-fi" / "romance" ... の小文字英単語）
+- logline: ワンフレーズ概要（50 文字以内）
+
+「INT. X - DAY」のような見出しはシーンマーカーで、タイトルではありません。
+
+JSON のみ出力：{"title": "...", "genre": "...", "logline": "..."}
+解説不要。"""
+
+
+_PARSE_SCENES_SYSTEM_CHINESE = """你是一个场景识别助手。请从剧本文本中**只提取场景列表**，以 JSON 格式返回。
+
+只输出一个字段：
+- scenes: 场景数组，每个对象包含 id, location, time, atmosphere, estimated_shots
+
+字段说明：
+- id:              "scene-1", "scene-2", ... 按出现顺序
+- location:        场景地点。剧本里 "内景 纸境 - 夜晚" 中的 "纸境" 就是 location
+- time:            只能是以下枚举之一: "Day" / "Night" / "Dawn" / "Dusk" / "Morning" / "Evening"
+- atmosphere:      氛围描述，如 "紧张"、"温馨"、"神秘"、"魔幻"
+- estimated_shots: 该场景预估分镜数（整数，通常 1-8）
+
+识别步骤：
+1. 找所有 "内景 X - 时间" 或 "外景 X - 时间" 标题行
+2. 同一地点连续出现的段落合并为一个场景
+3. 没有标准标题时，按段落块分
+
+只输出 JSON：{"scenes": [...]}
+不要任何解释。"""
+
+_PARSE_SCENES_SYSTEM_ENGLISH = """You are a scene identification assistant. Extract ONLY the scene list and return strict JSON.
+
+Output ONLY:
+- scenes: array with id, location, time, atmosphere, estimated_shots
+
+Field rules:
+- id:              "scene-1", "scene-2", ... in order
+- location:        scene location
+- time:            ONE OF "Day" / "Night" / "Dawn" / "Dusk" / "Morning" / "Evening"
+- atmosphere:      mood, e.g. "tense", "warm", "mysterious"
+- estimated_shots: integer 1-8
+
+Steps:
+1. Find every "INT. X - TIME" / "EXT. X - TIME" heading
+2. Merge consecutive paragraphs at the same location
+
+Output only JSON: {"scenes": [...]}. No explanation."""
+
+_PARSE_SCENES_SYSTEM_JAPANESE = """あなたはシーン識別アシスタントです。シーンリストのみを抽出し、厳格な JSON で返してください。
+
+出力は以下のみ：
+- scenes: id, location, time, atmosphere, estimated_shots を含む配列
+
+フィールド：
+- id:              "scene-1", "scene-2", ... 順
+- location:        場所
+- time:            "Day" / "Night" / "Dawn" / "Dusk" / "Morning" / "Evening" のいずれか
+- atmosphere:      雰囲気
+- estimated_shots: 整数 1〜8
+
+JSON のみ出力：{"scenes": [...]}。解説不要。"""
+
+
+_PARSE_PARAGRAPHS_SYSTEM_CHINESE = """你是一个段落切分与分类助手。请将剧本文本**按场景顺序**切分成故事段落，以 JSON 格式返回。
+
+只输出一个字段：
+- paragraphs: 段落数组，每个对象包含 id, text, scene_index, paragraph_type, speaker, emotion, contains_action
+
+字段说明：
+- id:              "para-1", "para-2", ... 按出现顺序
+- text:            **原文段落**（不要修改、翻译、删减）
+- scene_index:     段落所属场景的序号（1-based）
+- paragraph_type:  必须是以下枚举之一:
+    "action"      动作描写（人物做了什么）
+    "dialogue"    角色对白（"林知夏：…"）
+    "narration"   旁白/叙述/画外音
+    "inner"       内心独白
+    "atmosphere"  环境氛围（如"阳光透过窗户"）
+    "transition"  转场标记（如"内景 X - 夜晚"）
+- speaker:         说话角色名（仅 dialogue 类型填写，其他为空字符串）
+- emotion:         "tense" / "sad" / "joyful" / "angry" / "mysterious" / "romantic"，无法判断留空
+- contains_action: true=该段落描述可生成动作的镜头，false=纯氛围/转场
+
+═══════════════════════════════════════════════════════════
+切分原则（重要）
+═══════════════════════════════════════════════════════════
+1. 每个场景标题（如"内景 纸境 - 夜晚"）单独成一个段落，paragraph_type="transition"
+2. 双换行或自然停顿处切分
+3. 每个对白（"名字：内容"）单独成一个段落，speaker 填名字
+4. 不要遗漏任何文本，也不要虚构不存在的段落
+
+═══════════════════════════════════════════════════════════
+判定 paragraph_type 的关键 — **冒号 ≠ 对白**
+═══════════════════════════════════════════════════════════
+"名字：内容" 才是 dialogue（名字是 2-4 字人名，且后面跟的是该人物的台词）。
+下面这些**绝对不是 dialogue**，即使它们中间或开头有冒号：
+
+  • 段落引导词 + 冒号：  "全景：一个完全由纸张构成的世界…"
+  • 场景元素 + 冒号：    "树林：远处有一片树林…"
+  • 方位/视点 + 冒号：   "地面：脚下是…"
+  • 物件 + 冒号：        "漂浮建筑：更远处的天空中…"
+  • 表情/反应 + 冒号：   "她的表情：震惊，但不是恐惧。"
+  • 镜头术语 + 冒号：    "特写：她的瞳孔里倒映出…"
+
+这些都属于：
+  - atmosphere（环境/场景元素）→ contains_action = false
+  - action（镜头引导下的描写）  → contains_action = true
+
+判定 dialogue 的硬标准：**冒号前面是真实人名 + 冒号后面是那个人说的话**。
+两者缺一不可。
+
+═══════════════════════════════════════════════════════════
+示例
+═══════════════════════════════════════════════════════════
+输入片段：
+"内景 纸境 - 夜晚
+
+全景：一个完全由纸张构成的世界。
+
+林知夏：我最近总觉得有人跟着我。
+
+她的表情：震惊，但不是恐惧。
+
+内景 纸境 - 夜晚
+
+林知夏停下旋转。"
+
+输出：
+{
+  "paragraphs": [
+    {"id": "para-1", "text": "内景 纸境 - 夜晚", "scene_index": 1, "paragraph_type": "transition", "speaker": "", "emotion": "", "contains_action": false},
+    {"id": "para-2", "text": "全景：一个完全由纸张构成的世界。", "scene_index": 1, "paragraph_type": "atmosphere", "speaker": "", "emotion": "mysterious", "contains_action": false},
+    {"id": "para-3", "text": "林知夏：我最近总觉得有人跟着我。", "scene_index": 1, "paragraph_type": "dialogue", "speaker": "林知夏", "emotion": "tense", "contains_action": true},
+    {"id": "para-4", "text": "她的表情：震惊，但不是恐惧。", "scene_index": 1, "paragraph_type": "action", "speaker": "", "emotion": "", "contains_action": true},
+    {"id": "para-5", "text": "内景 纸境 - 夜晚", "scene_index": 2, "paragraph_type": "transition", "speaker": "", "emotion": "", "contains_action": false},
+    {"id": "para-6", "text": "林知夏停下旋转。", "scene_index": 2, "paragraph_type": "action", "speaker": "", "emotion": "", "contains_action": true}
+  ]
+}
+
+只输出 JSON：{"paragraphs": [...]}
+不要任何解释。"""
+
+_PARSE_PARAGRAPHS_SYSTEM_ENGLISH = """You are a paragraph segmentation assistant. Split the script into story paragraphs in scene order and return strict JSON.
+
+Output ONLY:
+- paragraphs: array with id, text, scene_index, paragraph_type, speaker, emotion, contains_action
+
+Field rules:
+- id:              "para-1", "para-2", ... in order
+- text:            ORIGINAL paragraph text — do not modify or omit
+- scene_index:     scene number (1-based)
+- paragraph_type:  ONE OF "action" | "dialogue" | "narration" | "inner" | "atmosphere" | "transition"
+- speaker:         speaker name (only for dialogue, empty otherwise)
+- emotion:         "tense" / "sad" / "joyful" / "angry" / "mysterious" / "romantic" (empty if unknown)
+- contains_action: true if this paragraph generates an action shot
+
+Rules:
+1. Each scene heading ("INT. X - DAY") is one paragraph, type=transition
+2. Split at blank lines / natural pauses
+3. Each "NAME: ..." line is one dialogue paragraph
+4. Do NOT skip or invent text
+
+═══════════════════════════════════════════════════════════
+CRITICAL — A colon does NOT mean dialogue
+═══════════════════════════════════════════════════════════
+A "NAME: ..." line is dialogue ONLY if the part before the colon is a real
+human name (2-4 words) AND the part after is what that person is saying.
+
+The following are NEVER dialogue, even with a colon:
+  • Shot labels:  "Wide shot: a paper world..."
+  • Scene elements: "Forest: in the distance..."
+  • Locations:    "Ground: under foot..."
+  • Objects:      "Floating buildings: dozens of..."
+  • Reactions:    "Her expression: shock but not fear"
+  • POV phrases:  "Her POV: the paper sky..."
+
+These belong to atmosphere (no action) or action (yes action).
+Type dialogue ONLY when both sides of the colon match the rule above.
+
+Output only JSON: {"paragraphs": [...]}. No explanation."""
+
+_PARSE_PARAGRAPHS_SYSTEM_JAPANESE = """あなたは段落分割アシスタントです。脚本をシーン順に物語段落に分割し、厳格な JSON で返してください。
+
+出力は以下のみ：
+- paragraphs: id, text, scene_index, paragraph_type, speaker, emotion, contains_action を含む配列
+
+フィールド：
+- id:              "para-1", "para-2", ... 出現順
+- text:            **原文そのまま**。変更・省略禁止
+- scene_index:     シーン番号（1-based）
+- paragraph_type:  "action" | "dialogue" | "narration" | "inner" | "atmosphere" | "transition" のいずれか
+- speaker:         発言者名（dialogue のみ、他は空文字）
+- emotion:         "tense" / "sad" / "joyful" / "angry" / "mysterious" / "romantic"（不明なら空）
+- contains_action: アクションショット生成するなら true
+
+ルール：
+1. シーン見出し（"INT. X - DAY"）はそれ自体が type=transition 段落
+2. 空白行・自然なポーズで分割
+3. 「名前：内容」は一つの dialogue 段落
+4. テキストを省略・捏造しない
+
+═══════════════════════════════════════════════════════════
+重要 — コロンは dialogue を意味しない
+═══════════════════════════════════════════════════════════
+「名前：内容」が dialogue になるのは、コロンの前が実在人名（2〜4 語）かつ、
+後ろがその人物の発言の場合のみ。
+
+以下は絶対 dialogue ではない（コロンがあっても）：
+  • ショットラベル：「ワイドショット：紙の世界が…」
+  • シーン要素：「森：遠くには…」
+  • ロケーション：「地面：足元には…」
+  • オブジェクト：「浮かぶ建物：数十の…」
+  • 反応：「彼女の表情：衝撃しかし恐怖ではない」
+  • 視点：「彼女の視点：紙細工の空…」
+
+これらは atmosphere（アクションなし）か action（アクションあり）に分類。
+dialogue に分類するのは、上記ルールを両方満たす場合のみ。
+
+JSON のみ出力：{"paragraphs": [...]}。解説不要。"""
+
 _PARSE_SYSTEM_CHINESE = """你是一个专业的剧本分析助手。请从剧本文本中提取结构化信息，返回JSON格式。
 
 输出JSON必须包含以下字段：
@@ -338,30 +586,14 @@ _PARSE_SYSTEM_CHINESE = """你是一个专业的剧本分析助手。请从剧�
 - 场景的 estimated_shots 预估该场景需要多少个分镜
 
 ═══════════════════════════════════════════════════════════
-【角色识别规则 — 重要】
-═══════════════════════════════════════════════════════════
-
-✅ 应当作为角色（characters 数组中的 name）：
-1. 剧本中实际出现的人物姓名（中文人名、英文名皆可）
-2. 形式如 "林知夏"、"李明"、"张三" 这种明确人名
-3. 形式如 "林知夏（17岁，短发，校服）" 中的 "林知夏"，且 age/gender/personality 字段可从括号内容提取
-4. 角色名应当在剧本中多次出现并承担动作或对白
-
-❌ 绝不能作为角色（这些是段落标签/场景元素/视角标记）：
-1. 段落类型标记词："特写"、"中景"、"近景"、"远景"、"全景"、"俯拍"、"仰拍"、"长镜头"、"空镜"
-2. 异常/事件标记词："异常出现"、"异常累积"、"异常"
-3. 场景元素词："裂缝"、"树林"、"漂浮建筑"、"地面"、"天空"、"灯光"、"云"、"树叶"
-4. 视角/反应词："她的表情"、"他的反应"、"周围学生的反应"、"周围"、"她的观察"
-5. 泛指代词："她"、"他"、"他们"、"它"、"某人"、"那个人"
-6. 方位/时间词："教室"、"操场"、"学校"、"夜晚"、"傍晚"、"黄昏"
-7. 任何在剧本中只作为段落引导词出现，从不作为动作主语或对白发言者的词
-
-判断标准：当一个词在剧本中：
-  - 出现在引号 "..." 前作为说话者 → 是角色
-  - 出现在括号 (X岁, ...) 描述中 → 是角色
-  - 作为主语驱动动作（"她/他/名字 + 动词"）→ 是角色
-  - 仅作为一行段落的开头标签（如"特写：..."、"异常出现：..."）→ ❌ 不是角色
-
+【角色识别 — 直接用这个问题来引导】
+请用这句话来指导你的识别：
+“这个剧本中有哪些角色？”
+先列出所有像人名的词，再逐一验证它是否：
+  (a) 在引号 "..." 前作为说话者， 或
+  (b) 在括号中被介绍（"林知夏（17岁）"）， 或
+  (c) 作为动作主语（"林知夏 站在…"）。
+满足任一才保留；否则排除。
 ═══════════════════════════════════════════════════════════
 段落类型 paragraph_type 必须使用以下枚举值之一：
 ═══════════════════════════════════════════════════════════
@@ -430,103 +662,147 @@ _PARSE_SYSTEM_JAPANESE = """あなたはプロフェッショナルな脚本分�
 # System prompts — character extraction (Pass 1.5 / character-first pipeline)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CHARACTER_EXTRACT_SYSTEM_CHINESE = """你是一个专业的角色识别助手。请从剧本文本中识别所有【真正的、有名有姓的人物角色】，输出 JSON 格式。
-
-输出 JSON 必须仅包含一个字段：
-- characters: 角色数组，每个包含 id, name, gender, age, personality
+_CHARACTER_EXTRACT_SYSTEM_CHINESE = """你的任务：阅读下面这段剧本，**直接回答**“这个剧本中有哪些角色”，
+并以严格的 JSON 格式输出答案。
 
 ═══════════════════════════════════════════════════════════
-【角色识别规则 — 重要】
+回答问题的思路（请一步步想）
 ═══════════════════════════════════════════════════════════
-
-✅ 应当作为角色（characters 数组中的 name）：
-1. 剧本中实际出现的人物姓名（中文人名、英文名皆可）
-2. 形式如 "林知夏"、"李明"、"张三" 这种明确人名
-3. 形式如 "林知夏（17岁，短发，校服）" 中的 "林知夏"，且 age/gender/personality 字段可从括号内容提取
-4. 角色名应当在剧本中多次出现并承担动作或对白
-5. 即便剧本只有一个人物（如独白剧本）也要识别出来
-
-❌ 绝不能作为角色（这些是段落标签/场景元素/视角标记）：
-1. 段落类型标记词："特写"、"中景"、"近景"、"远景"、"全景"、"俯拍"、"仰拍"、"长镜头"、"空镜"
-2. 异常/事件标记词："异常出现"、"异常累积"、"异常"
-3. 场景元素词："裂缝"、"树林"、"漂浮建筑"、"地面"、"天空"、"灯光"、"云"、"树叶"
-4. 视角/反应词："她的表情"、"他的反应"、"周围学生的反应"、"周围"、"她的观察"
-5. 泛指代词："她"、"他"、"他们"、"它"、"某人"、"那个人"
-6. 方位/时间词："教室"、"操场"、"学校"、"夜晚"、"傍晚"、"黄昏"
-7. 任何在剧本中只作为段落引导词出现，从不作为动作主语或对白发言者的词
-
-判断标准：当一个词在剧本中：
-  - 出现在引号 "..." 前作为说话者 → 是角色
-  - 出现在括号 (X岁, ...) 描述中 → 是角色
-  - 作为主语驱动动作（"她/他/名字 + 动词"）→ 是角色
-  - 仅作为一行段落的开头标签（如"特写：..."、"异常出现：..."）→ ❌ 不是角色
+第一步：把剧本中所有**看起来像人名**的词先列出来。
+第二步：对每个候选词，检查它在剧本中是否：
+        (a) 在某段引号 “...” 前面作为说话者（“林知夏：...”），或者
+        (b) 在括号里被介绍外貌/年龄/性格（“林知夏（17 岁，短发）”），或者
+        (c) 作为动作的主语（“林知夏 推开门”）。
+        满足任一条就**保留**；都不满足就**剔除**。
+第三步：把保留下来的名字填到 JSON。
 
 ═══════════════════════════════════════════════════════════
-字段填写要求
+JSON 格式（必须严格遵守，不要任何多余内容）
 ═══════════════════════════════════════════════════════════
-
-- id: 简短字符串如 "char-1", "char-2"，按识别顺序递增
-- name: 中文姓名保留中文，英文姓名保留英文
-- gender: "male" / "female" / "other" / "" (无法判断留空)
-- age: 字符串如 "17"、"30s"、"child"、"adult"；括号内的具体年龄直接取
-- personality: 一句话简述角色性格特征，可从剧本动作描述中推断；如无法推断留空
-
-═══════════════════════════════════════════════════════════
-
-只输出 JSON，格式严格如下：
 {
   "characters": [
     {"id": "char-1", "name": "林知夏", "gender": "female", "age": "17", "personality": "安静、敏感的学生"}
   ]
 }
 
-不要输出 scenes / story_paragraphs / 任何其他字段。不要输出任何解释。"""
+字段要求：
+- id    : "char-1"、"char-2"... 按识别顺序递增
+- name  : 保留剧本原文（中文人名保留中文，英文名保留英文）
+- gender: "male" / "female" / "other" / ""  （无法判断留空）
+- age   : "17" / "30s" / "child" / "adult"   （括号里的具体年龄直接取）
+- personality: 一句话简述；无法推断留空
 
-_CHARACTER_EXTRACT_SYSTEM_ENGLISH = """You are a professional character identification assistant. Identify all REAL named human characters from the script text and return JSON format.
+═══════════════════════════════════════════════════════════
+哪些词**绝对不是**角色（哪怕它们出现在剧本开头）
+═══════════════════════════════════════════════════════════
+• 镜头/景别词：特写、中景、近景、远景、全景、俯拍、仰拍、长镜头、空镜
+• 段落引导词：异常出现、异常累积、异常、声音、光线
+• 场景元素：裂缝、树林、漂浮建筑、地面、天空、灯光、云、树叶
+• 视角/反应：她的表情、他的反应、周围学生的反应
+• 泛指代词：她、他、他们、它、某人、那个人
+• 方位/时间：教室、操场、学校、夜、傍晚、黄昏
 
-Output JSON must contain ONLY one field:
-- characters: array with id, name, gender, age, personality
+═══════════════════════════════════════════════════════════
+示例（few-shot）
+═══════════════════════════════════════════════════════════
+输入剧本：
+“特写：林知夏（17 岁，校服，短发）站在教室窗前。
+ 林知夏：我最近总觉得有人跟着我。
+ 中景：教室走廊空无一人。
+ 旁白：夜深了。”
 
-CHARACTER IDENTIFICATION RULES — IMPORTANT
-
-YES — these should be in characters[].name:
-1. Real human names from the script (Chinese names, English names, all OK)
-2. Names like "John Smith", "Mary", "Dr. Watson"
-3. Names extracted from bracket descriptions like "John (30s, detective)" — extract age/gender/personality from the brackets
-4. Names that recur and drive action or dialogue
-5. Even single-character scripts (monologues) — identify the one speaker
-
-NO — these are paragraph labels / scene elements / perspective markers (DO NOT include):
-1. Shot-type labels: "Close-up", "Wide shot", "POV", "Tracking shot"
-2. Event markers: "Anomaly detected", "Sound effect"
-3. Scene elements: "Crack", "Forest", "Sky", "Door", "Tree"
-4. Perspective phrases: "Her reaction", "His expression"
-5. Generic pronouns: "She", "He", "They", "Someone"
-6. Location/time words: "Classroom", "School", "Night"
-7. Any word that only appears as a paragraph opening label and never as a speaker or action subject
-
-Field requirements:
-- id: short string like "char-1", "char-2", increment in detection order
-- name: preserve original language
-- gender: "male" / "female" / "other" / "" (empty if unknown)
-- age: string like "17", "30s", "child", "adult"; extract from brackets if present
-- personality: one-sentence trait description inferred from script; empty if unknown
-
-Output ONLY this JSON shape:
+你的输出：
 {
   "characters": [
-    {"id": "char-1", "name": "...", "gender": "...", "age": "...", "personality": "..."}
+    {"id": "char-1", "name": "林知夏", "gender": "female", "age": "17", "personality": "敏感、警觉的学生"}
+  ]
+}
+（“特写”“中景”“旁白”都不是角色，已剔除。）"""
+
+_CHARACTER_EXTRACT_SYSTEM_ENGLISH = """Your task: read the script below and directly answer
+**"Which characters appear in this script?"**. Return your answer as strict JSON.
+
+Steps to think through:
+1. List every word in the script that looks like a person's name.
+2. For each candidate, keep it ONLY if it does at least one of these in the script:
+   (a) appears before a quoted line of dialogue ("John: ..."),
+   (b) is introduced inside parentheses with age/appearance ("John (30s, detective)"),
+   (c) acts as the subject of an action ("John opens the door").
+   If none apply, drop it.
+3. Put the survivors into the JSON.
+
+JSON shape (strict, no extra text):
+{
+  "characters": [
+    {"id": "char-1", "name": "John", "gender": "male", "age": "30s", "personality": "curious detective"}
   ]
 }
 
-Do NOT include scenes / story_paragraphs / any other fields. Do NOT output any explanation."""
+Field rules:
+- id    : "char-1", "char-2", ... in detection order
+- name  : preserve original spelling/language
+- gender: "male" / "female" / "other" / ""
+- age   : "17" / "30s" / "child" / "adult" (take from parentheses if present)
+- personality: one short phrase; empty if unknown
 
-_CHARACTER_EXTRACT_SYSTEM_JAPANESE = """あなたはプロフェッショナルなキャラクター識別アシスタントです。脚本から実在する人物キャラクターのみを識別し、JSON形式で返してください。
+Words that are NEVER characters, even if they open a paragraph:
+- Shot labels: "Close-up", "Wide shot", "POV", "Tracking shot", "Voiceover"
+- Event markers: "Anomaly detected", "Sound effect"
+- Scene elements: "Crack", "Forest", "Sky", "Door", "Tree"
+- Perspective phrases: "Her reaction", "His expression"
+- Generic pronouns: "She", "He", "They", "Someone"
+- Locations/times: "Classroom", "School", "Night"
 
-出力JSONには characters 配列のみを含めてください：
-- characters: id, name, gender, age, personality を含む配列
+Example:
+Input script:
+"Close-up on John (30s, detective) standing in the doorway.
+ John: Something's not right here.
+ Wide shot: the empty street.
+ Voiceover: It was past midnight."
 
-判断基準：中国語版・英語版のルールと同じ。段落ラベル・シーン要素・代名詞は含めないでください。"""
+Your output:
+{
+  "characters": [
+    {"id": "char-1", "name": "John", "gender": "male", "age": "30s", "personality": "cautious detective"}
+  ]
+}
+("Close-up", "Wide shot", "Voiceover" are NOT characters.)"""
+
+_CHARACTER_EXTRACT_SYSTEM_JAPANESE = """タスク：以下の脚本を読み、「この脚本にはどのキャラクターが登場しますか？」という問いに
+**直接答え**、結果を厳格な JSON で出力してください。
+
+思考手順：
+1. まず、人名のように見える語を全てリストアップする。
+2. 各候補について、脚本の中で次のいずれかを行っているか確認する：
+   (a) セリフ “...” の前に話者として現れる（「林：...」）、
+   (b) 括弧内で年齢・外見とともに紹介される（「林（17歳、学生）」）、
+   (c) 動作の主語になっている（「林 が ドアを開ける」）。
+   どれにも当てはまらなければ除外する。
+3. 残った名前を JSON に詰める。
+
+JSON 形式（厳守、解説不要）：
+{
+  "characters": [
+    {"id": "char-1", "name": "林", "gender": "female", "age": "17", "personality": "内気な学生"}
+  ]
+}
+
+フィールド：
+- id    : "char-1", "char-2", ... 検出順
+- name  : 原文のまま
+- gender: "male" / "female" / "other" / ""
+- age   : "17" / "30s" / "child" / "adult"（括弧内から取得）
+- personality: 短い一文。分からなければ空文字
+
+絶対にキャラクターではない語（段落頭でも除外）：
+- ショット名：「クローズアップ」「ワイドショット」「POV」「モノローグ」
+- 出来事：「異変」「物音」
+- シーン要素：「森」「空」「ドア」「木」
+- 視点・反応：「彼女の表情」「彼の反応」
+- 代名詞：「彼」「彼女」「誰か」
+- 場所・時間：「教室」「学校」「夜」"""
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -567,15 +843,15 @@ def _build_character_extract_prompt(language: ScriptLanguage) -> tuple[str, str]
     prompts = {
         ScriptLanguage.CHINESE: (
             _CHARACTER_EXTRACT_SYSTEM_CHINESE,
-            "请从以下剧本文本中识别所有角色：\n\n{text}",
+            "问题：这个剧本中有哪些角色？\n\n以下是剧本：\n{text}\n\n请按 system 中规定的 JSON 格式回答，只输出 JSON。",
         ),
         ScriptLanguage.ENGLISH: (
             _CHARACTER_EXTRACT_SYSTEM_ENGLISH,
-            "Identify all characters from the following script:\n\n{text}",
+            "Question: Which characters appear in this script?\n\nScript:\n{text}\n\nAnswer strictly in the JSON format defined in the system prompt.",
         ),
         ScriptLanguage.JAPANESE: (
             _CHARACTER_EXTRACT_SYSTEM_JAPANESE,
-            "以下の脚本からキャラクターを識別してください：\n\n{text}",
+            "質問：この脚本にはどのキャラクターが登場しますか？\n\n脚本：\n{text}\n\nsystem で指定された JSON 形式でだけ答えてください。",
         ),
     }
     return prompts[language]
@@ -720,47 +996,354 @@ async def normalize_script(
     return "\n\n".join(lines)
 
 
+async def _extract_header(
+    raw_text: str,
+    language: ScriptLanguage = ScriptLanguage.CHINESE,
+) -> dict:
+    """
+    Sub-task: extract title / genre / logline via a tiny, dedicated LLM call.
+    Returns a dict with keys: title, genre, logline (any may be missing).
+    Falls back to a deterministic extract when LLM is unavailable.
+    """
+    system_prompts = {
+        ScriptLanguage.CHINESE: _PARSE_HEADER_SYSTEM_CHINESE,
+        ScriptLanguage.ENGLISH: _PARSE_HEADER_SYSTEM_ENGLISH,
+        ScriptLanguage.JAPANESE: _PARSE_HEADER_SYSTEM_JAPANESE,
+    }
+    user_templates = {
+        ScriptLanguage.CHINESE: "请提取下面这段剧本的元信息（title/genre/logline）：\n\n{text}",
+        ScriptLanguage.ENGLISH: "Extract metadata (title/genre/logline) from this script:\n\n{text}",
+        ScriptLanguage.JAPANESE: "次の脚本のメタデータ（title/genre/logline）を抽出してください：\n\n{text}",
+    }
+    try:
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(
+            [
+                {"role": "system", "content": system_prompts[language]},
+                {"role": "user", "content": user_templates[language].format(text=raw_text)},
+            ],
+            temperature=0.1,
+            max_tokens=512,
+        )
+        if content:
+            data = _extract_json(content)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        logger.warning("[script_parser] header extract failed: %s — fallback", e)
+    # Fallback
+    title_match = re.search(r"《([^》\n]+)》|^\s*([A-Z][A-Za-z0-9 _-]{2,40})\s*$", raw_text, re.M)
+    title = "Untitled"
+    if title_match:
+        title = title_match.group(1) or title_match.group(2) or title
+    return {"title": title, "genre": "drama", "logline": raw_text[:60].replace("\n", " ").strip()}
+
+
+async def _extract_scenes(
+    raw_text: str,
+    language: ScriptLanguage = ScriptLanguage.CHINESE,
+) -> list[dict]:
+    """
+    Sub-task: extract scenes array only (no characters, no paragraphs).
+    Returns a list of scene dicts: id, location, time, atmosphere, estimated_shots.
+    On failure returns an empty list.
+    """
+    system_prompts = {
+        ScriptLanguage.CHINESE: _PARSE_SCENES_SYSTEM_CHINESE,
+        ScriptLanguage.ENGLISH: _PARSE_SCENES_SYSTEM_ENGLISH,
+        ScriptLanguage.JAPANESE: _PARSE_SCENES_SYSTEM_JAPANESE,
+    }
+    user_templates = {
+        ScriptLanguage.CHINESE: "请从这个剧本中**只**提取场景列表：\n\n{text}",
+        ScriptLanguage.ENGLISH: "Extract ONLY the scene list from this script:\n\n{text}",
+        ScriptLanguage.JAPANESE: "次の脚本からシーンリスト**のみ**を抽出してください：\n\n{text}",
+    }
+    try:
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(
+            [
+                {"role": "system", "content": system_prompts[language]},
+                {"role": "user", "content": user_templates[language].format(text=raw_text)},
+            ],
+            temperature=0.2,
+            max_tokens=2048,
+        )
+        if content:
+            data = _extract_json(content)
+            if isinstance(data, dict) and isinstance(data.get("scenes"), list):
+                return data["scenes"]
+    except Exception as e:
+        logger.warning("[script_parser] scenes extract failed: %s — fallback", e)
+    return []
+
+
+async def _extract_paragraphs(
+    raw_text: str,
+    scene_count: int,
+    language: ScriptLanguage = ScriptLanguage.CHINESE,
+) -> list[dict]:
+    """
+    Sub-task: extract story paragraphs only (no title, no characters, no scenes).
+    Returns a list of paragraph dicts: id, text, scene_index, paragraph_type,
+    speaker, emotion, contains_action.
+    """
+    system_prompts = {
+        ScriptLanguage.CHINESE: _PARSE_PARAGRAPHS_SYSTEM_CHINESE,
+        ScriptLanguage.ENGLISH: _PARSE_PARAGRAPHS_SYSTEM_ENGLISH,
+        ScriptLanguage.JAPANESE: _PARSE_PARAGRAPHS_SYSTEM_JAPANESE,
+    }
+    user_templates = {
+        ScriptLanguage.CHINESE: (
+            "剧本共 {scene_count} 个场景（scene_index 从 1 到 {scene_count}）。"
+            "请按场景顺序切分下面的剧本为段落数组：\n\n{{text}}"
+        ).format(scene_count=scene_count, text="{text}"),
+        ScriptLanguage.ENGLISH: (
+            "The script has {scene_count} scenes (scene_index 1..{scene_count}). "
+            "Split the following script into paragraphs in scene order:\n\n{{text}}"
+        ).format(scene_count=scene_count, text="{text}"),
+        ScriptLanguage.JAPANESE: (
+            "脚本には {scene_count} 個のシーンがあります（scene_index は 1〜{scene_count}）。"
+            "次の脚本をシーン順に段落配列へ分割してください：\n\n{{text}}"
+        ).format(scene_count=scene_count, text="{text}"),
+    }
+    try:
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(
+            [
+                {"role": "system", "content": system_prompts[language]},
+                {"role": "user", "content": user_templates[language].format(text=raw_text)},
+            ],
+            temperature=0.2,
+            max_tokens=4096,
+        )
+        if content:
+            data = _extract_json(content)
+            if isinstance(data, dict) and isinstance(data.get("paragraphs"), list):
+                return data["paragraphs"]
+    except Exception as e:
+        logger.warning("[script_parser] paragraphs extract failed: %s — fallback", e)
+    return []
+
+
+async def _llm_chat_safe(system: str, user: str, *, temperature: float = 0.2, max_tokens: int = 1024) -> str:
+    """Helper: call local LLM, return "" on any failure (so gather() never crashes)."""
+    try:
+        from .local_llm import get_llm_client
+        client = get_llm_client()
+        content = await client.chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return content or ""
+    except Exception as e:
+        logger.warning("[script_parser] LLM chat failed: %s", e)
+        return ""
+
+
 async def parse_script(
     normalized_text: str,
     language: ScriptLanguage = ScriptLanguage.CHINESE,
     dashscope_api_key: Optional[str] = None,
 ) -> ScriptData:
     """
-    Pass 2 — Extract structured ScriptData from normalized screenplay text.
+    Pass 2 — Chunked script extraction.
 
-    Uses local llama.cpp server (Qwen3.5-9B-GGUF) expecting JSON output; falls
-    back to heuristic extraction if the call fails.
+    llama.cpp's default single-slot server cannot serve concurrent
+    /v1/chat requests reliably — bursts trigger 503 or even connection
+    drops. The semaphore in local_llm.py keeps things from crashing, but
+    real-world throughput ends up near-serial anyway. We therefore run the
+    sub-tasks as a *dependency graph* instead of a flat gather:
+
+        chars  ──┐                (parallel, two small calls)
+        header ──┤
+                 ▼
+                scenes ──┐
+                         ▼
+                    paragraphs     (depends on scene_count)
+
+    Each call has a short retry-with-backoff so transient 5xx / connection
+    drops degrade gracefully. Failure of any single sub-task only affects
+    that field; the rest of ScriptData stays populated.
     """
-    system_prompt, user_template = _build_parse_prompt(language)
-    user_text = user_template.format(normalized_script=normalized_text)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_text},
-    ]
+    import asyncio
 
+    async def _with_retry(coro_factory, label: str, attempts: int = 2):
+        last_exc = None
+        for i in range(attempts):
+            try:
+                return await coro_factory()
+            except Exception as e:
+                last_exc = e
+                logger.warning("[script_parser] %s attempt %d failed: %s", label, i + 1, e)
+                if i + 1 < attempts:
+                    await asyncio.sleep(0.6 * (i + 1))
+        logger.warning("[script_parser] %s exhausted retries: %s", label, last_exc)
+        raise last_exc
+
+    # ── Stage 1: chars + header (two small independent calls) ─────────────────
+    header_data, chars = await asyncio.gather(
+        _with_retry(lambda: _extract_header(normalized_text, language), "header"),
+        _with_retry(lambda: extract_characters(normalized_text, language), "characters"),
+        return_exceptions=True,
+    )
+    if isinstance(header_data, Exception):
+        logger.warning("[script_parser] header gather exc: %s", header_data)
+        header_data = {}
+    if isinstance(chars, Exception):
+        logger.warning("[script_parser] chars gather exc: %s", chars)
+        chars = []
+
+    # ── Stage 2: scenes (depends on chars for filtering, can run concurrently
+    # with stage 1 if we want, but kept serial here for predictability)
     try:
-        from .local_llm import get_llm_client
-        client = get_llm_client()
-        content = await client.chat(messages, temperature=0.3, max_tokens=4096)
-        if content:
-            data = _extract_json(content)
-            if data is not None:
-                result = _build_script_data(data, language)
-                logger.info(
-                    "[script_parser] parse succeeded: title=%r, chars=%d, scenes=%d, paras=%d",
-                    result.title,
-                    len(result.characters),
-                    len(result.scenes),
-                    len(result.story_paragraphs),
-                )
-                return result
-            logger.warning("[script_parser] No JSON object found in LLM output — falling back")
-        else:
-            logger.warning("[script_parser] Local LLM returned empty — falling back")
-    except Exception as e:
-        logger.warning("[script_parser] parse exception: %s — falling back", e)
+        scenes_list = await _with_retry(
+            lambda: _extract_scenes(normalized_text, language), "scenes",
+        )
+    except Exception:
+        scenes_list = []
 
-    return _fallback_script_data(normalized_text, language)
+    # ── Stage 3: paragraphs (depends on scene_count) ──────────────────────────
+    scene_count = len(scenes_list) if scenes_list else 1
+    try:
+        paragraphs_data = await _with_retry(
+            lambda: _extract_paragraphs(normalized_text, scene_count, language),
+            "paragraphs",
+        )
+    except Exception:
+        paragraphs_data = []
+
+    # ── Assemble ScriptData ──────────────────────────────────────────────────
+    script = ScriptData(
+        title=(header_data or {}).get("title", "Untitled"),
+        genre=(header_data or {}).get("genre", "drama"),
+        logline=(header_data or {}).get("logline", ""),
+        language=language,
+    )
+
+    # Characters → Character list
+    for c in chars or []:
+        if not getattr(c, "name", ""):
+            continue
+        script.characters.append(c)
+
+    # Scenes → Scene list (with heuristic fallback when scenes failed)
+    if scenes_list:
+        for idx, s in enumerate(scenes_list, start=1):
+            try:
+                est = int(s.get("estimated_shots", 0) or 0)
+            except (TypeError, ValueError):
+                est = 0
+            script.scenes.append(Scene(
+                id=s.get("id") or f"scene-{idx}",
+                location=s.get("location", ""),
+                time=_normalize_time(s.get("time", "Day")),
+                atmosphere=s.get("atmosphere", ""),
+                estimated_shots=est,
+            ))
+    else:
+        # Heuristic fallback: single scene wrapping everything
+        script.scenes.append(Scene(
+            id="scene-1",
+            location="Unknown Location",
+            time="Day",
+        ))
+
+    # Paragraphs → StoryParagraph list (with heuristic fallback when paragraphs failed)
+    if paragraphs_data:
+        # Build name → char_id map so we can convert speaker name → speaker_id.
+        name_to_id: dict[str, str] = {c.name: c.id for c in script.characters}
+        for idx, p in enumerate(paragraphs_data, start=1):
+            try:
+                ptype = ParagraphType(p.get("paragraph_type", "action"))
+            except ValueError:
+                ptype = ParagraphType.ACTION
+            scene_idx = p.get("scene_index", 1)
+            try:
+                scene_idx = int(scene_idx)
+            except (TypeError, ValueError):
+                scene_idx = 1
+            scene_idx = max(1, min(scene_idx, len(script.scenes)))
+            scene_ref_id = script.scenes[scene_idx - 1].id
+            speaker_name = (p.get("speaker") or "").strip()
+            speaker_id = name_to_id.get(speaker_name, "") if speaker_name else ""
+            script.story_paragraphs.append(StoryParagraph(
+                id=p.get("id") or f"para-{idx}",
+                text=p.get("text", ""),
+                scene_ref_id=scene_ref_id,
+                paragraph_type=ptype,
+                speaker_id=speaker_id,
+                emotion=p.get("emotion", "") or "",
+                contains_action=bool(p.get("contains_action", ptype != ParagraphType.ATMOSPHERE)),
+            ))
+    else:
+        # Heuristic fallback: split on blank lines, all in scene-1
+        scene_ref_id = script.scenes[0].id
+        for raw_para in _split_into_paragraphs(normalized_text):
+            speaker_match = _DIALOGUE_PREFIX.match(raw_para)
+            ptype = _classify_paragraph(raw_para, speaker_match)
+            speaker_id = ""
+            if ptype == ParagraphType.DIALOGUE and speaker_match:
+                sname = speaker_match.group(1).strip()
+                for c in script.characters:
+                    if c.name == sname:
+                        speaker_id = c.id
+                        break
+            script.story_paragraphs.append(StoryParagraph(
+                id=f"para-{len(script.story_paragraphs) + 1}",
+                text=raw_para,
+                scene_ref_id=scene_ref_id,
+                paragraph_type=ptype,
+                speaker_id=speaker_id,
+                emotion="",
+                contains_action=(ptype != ParagraphType.ATMOSPHERE),
+            ))
+
+    # Compute estimated_shots per scene if LLM didn't provide them
+    for scene in script.scenes:
+        if scene.estimated_shots <= 0:
+            paras_in_scene = [p for p in script.story_paragraphs if p.scene_ref_id == scene.id]
+            scene.estimated_shots = max(1, len([p for p in paras_in_scene if p.contains_action]))
+
+    # Filter characters one more time, anchored against the actual paragraphs
+    final_chars = [
+        c for c in script.characters
+        if (c.name and c.name not in _PSEUDO_CHARACTER_BLACKLIST)
+    ]
+    script.characters = final_chars
+
+    logger.info(
+        "[script_parser] parallel parse: title=%r, chars=%d, scenes=%d, paras=%d",
+        script.title,
+        len(script.characters),
+        len(script.scenes),
+        len(script.story_paragraphs),
+    )
+
+    # If we got literally nothing from any sub-task, fall back to heuristic only.
+    if not script.scenes and not script.story_paragraphs:
+        return _fallback_script_data(normalized_text, language)
+    return script
+
+
+def _normalize_time(value: str) -> str:
+    """Coerce LLM-emitted time strings to the canonical 6-value enum."""
+    v = (value or "Day").strip()
+    mapping = {
+        "day": "Day", "night": "Night", "dawn": "Dawn",
+        "dusk": "Dusk", "morning": "Morning", "evening": "Evening",
+        "日": "Day", "夜": "Night", "夜晚": "Night", "昼": "Day",
+        "黄昏": "Dusk", "黎明": "Dawn", "清晨": "Morning", "傍晚": "Evening",
+    }
+    return mapping.get(v.lower() if v.isascii() else v, v or "Day")
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

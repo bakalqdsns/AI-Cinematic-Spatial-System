@@ -20,11 +20,14 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import httpx
 
-logger = logging.getLogger(__name__)
+# Use a child of the project-wide "aicss" logger so llama-server output ends up
+# in backend/logs/aicss.log alongside the rest of the Python backend logs.
+logger = logging.getLogger("aicss.llama_server")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -86,6 +89,30 @@ def find_available_model() -> dict | None:
 
 # ── Core operations ───────────────────────────────────────────────────────────
 
+def _forward_llama_output(pipe) -> None:
+    """Forward llama-server stdout/stderr into the `aicss.llama_server` logger.
+
+    Runs in a daemon thread so the asyncio event loop is never blocked by
+    llama-server's output. Each line is prefixed with `[llama-server]` so
+    entries are easy to grep out of aicss.log.
+    """
+    try:
+        with pipe:
+            for raw_line in iter(pipe.readline, ""):
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                # Promote known error/failure strings to WARNING/ERROR so the
+                # RotatingFileHandler doesn't bury them under INFO.
+                lower = line.lower()
+                if "error" in lower or "fail" in lower or "abort" in lower:
+                    logger.warning("[llama-server] %s", line)
+                else:
+                    logger.info("[llama-server] %s", line)
+    except Exception as exc:
+        logger.warning("[llama-server] Log forwarding stopped: %s", exc)
+
+
 async def health_check(port: int = DEFAULT_PORT, timeout: float = 2.0) -> bool:
     """Check if llama-server is responding on the port (fast timeout)."""
     try:
@@ -140,13 +167,6 @@ async def start_server() -> dict:
     env = os.environ.copy()
     env.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
-    # Capture stdout/stderr to a rotating log so we can diagnose GPU/CPU mode
-    # without running the server interactively.
-    log_dir = LLMSERVER_DIR / "logs"
-    log_dir.mkdir(exist_ok=True)
-    log_file = log_dir / "llama-server.log"
-    log_fp = open(log_file, "ab", buffering=0)
-
     cmd = [
         str(SERVER_EXE),
         "-m", model["path"],
@@ -158,15 +178,38 @@ async def start_server() -> dict:
     logger.info("[LlamaServer] Launching: %s", " ".join(cmd))
 
     try:
+        # Pipe stdout/stderr back into the Python logger. A daemon thread reads
+        # them line-by-line and routes every line through the `aicss.llama_server`
+        # logger so it interleaves with the rest of the backend output in
+        # backend/logs/aicss.log. We intentionally do NOT have llama-server
+        # write to aicss.log directly: the RotatingFileHandler rotates the file
+        # underneath us, which would break a long-lived file handle.
+        # stderr is merged into stdout — llama.cpp writes progress/diagnostics
+        # (CUDA init, model load, errors) to stderr, so dropping it would lose
+        # most of the useful output.
         proc = subprocess.Popen(
             cmd,
             cwd=str(LLMSERVER_DIR),
-            stdout=log_fp,
-            stderr=log_fp,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             env=env,
             creationflags=creationflags,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
-        logger.info("[LlamaServer] Launched with PID %d, logs → %s", proc.pid, log_file)
+        if proc.stdout is not None:
+            threading.Thread(
+                target=_forward_llama_output,
+                args=(proc.stdout,),
+                daemon=True,
+                name="llama-server-log-forwarder",
+            ).start()
+        logger.info(
+            "[LlamaServer] Launched with PID %d; llama-server output is forwarded to aicss.log",
+            proc.pid,
+        )
     except FileNotFoundError:
         return {"success": False, "message": f"llama-server.exe not found at {SERVER_EXE}", "already_running": False}
     except Exception as e:

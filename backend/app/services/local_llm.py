@@ -9,6 +9,7 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -29,6 +30,23 @@ def _record_llm_usage():
 # ── Default config ──────────────────────────────────────────────────────────────
 DEFAULT_BASE_URL = "http://localhost:8080/v1"
 DEFAULT_MODEL = "qwen3.5-9b"
+
+# ── Global concurrency limiter ────────────────────────────────────────────────
+# llama.cpp server is single-threaded by default — concurrent /v1/chat
+# requests race for the inference slot and trigger 503 "Loading model"
+# responses. A process-wide asyncio.Semaphore caps in-flight calls so that
+# callers using asyncio.gather() queue up gracefully instead of hammering
+# the server. Set to 2 to allow a small overlap (header is tiny, scenes is
+# medium) without crashing single-slot llama-server instances.
+_LLM_SEM: Optional[asyncio.Semaphore] = None
+_LLM_CONCURRENCY = 2
+
+
+def _get_llm_sem() -> asyncio.Semaphore:
+    global _LLM_SEM
+    if _LLM_SEM is None:
+        _LLM_SEM = asyncio.Semaphore(_LLM_CONCURRENCY)
+    return _LLM_SEM
 
 
 class LocalLLMClient:
@@ -90,10 +108,14 @@ class LocalLLMClient:
                     "Accept": "application/json",
                 },
             ) as client:
-                resp = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                )
+                # Limit concurrency so the single-threaded llama.cpp server
+                # doesn't get hammered with simultaneous requests.
+                sem = _get_llm_sem()
+                async with sem:
+                    resp = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        json=payload,
+                    )
                 resp.raise_for_status()
                 data = resp.json()
 

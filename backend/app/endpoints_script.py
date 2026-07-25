@@ -50,6 +50,11 @@ from app.services.character_generator import (
     build_character_asset,
     serialize_character_asset,
 )
+from app.services.auto_three_view import (
+    kickoff_after_parse,
+    get_progress as get_auto_three_view_progress,
+    clear_progress as clear_auto_three_view_progress,
+)
 from app.services.motion_extractor import (
     MotionSequence,
     SegmentedFrame,
@@ -243,17 +248,43 @@ def _lang_from_str(lang_str: str) -> ScriptLanguage:
 @router.post("/parse", response_model=ParseScriptResponse)
 async def api_normalize_and_parse(request: ParseScriptRequest):
     """
-    Two-pass script processing: normalize + parse into structured data.
+    Script processing with optional normalize + parallel parse.
 
-    Pass 1 (normalize): rewrites raw text into standard screenplay format.
-    Pass 2 (parse): extracts structured ScriptData (title, characters, scenes, paragraphs).
+    The /parse endpoint used to be a strict 2-pass flow (always normalize
+    first, then parse). For scripts that already follow standard screenplay
+    conventions ("内景 X - 时间", "EXT. X - TIME" headings), the normalize
+    step is now skipped — the regex-based skip check looks at the first 200
+    non-empty lines for at least one recognised scene heading.
+
+    Pass 2 (parse) runs FOUR LLM calls in parallel:
+      - header   (title / genre / logline)
+      - scenes   (scene list)
+      - characters (via existing Pass 1.5)
+      - paragraphs (depends on scene_count, runs after scenes)
+    Any sub-task failure only degrades that field; the rest stay populated.
     """
     lang = _lang_from_str(request.language)
+    raw = request.raw_text
 
-    # Pass 1: Normalize (uses local llama.cpp server)
-    normalized = await normalize_script(request.raw_text, lang)
+    # ── Skip normalize when the script already looks standardised ───────────
+    def _looks_normalised(text: str) -> bool:
+        """True if at least one scene heading is found in the first 200 lines."""
+        import re as _re
+        head_re = _re.compile(
+            r"^\s*(?:(?:内|外)景\s*.+?\s*[-—]\s*(?:日|夜|黎明|清晨|傍晚|黄昏|夜晚|白天|昼)"
+            r"|INT\.|EXT\.)",
+            _re.M,
+        )
+        lines = [l for l in text.splitlines() if l.strip()][:200]
+        return any(head_re.match(l) for l in lines)
 
-    # Pass 2: Parse (uses local llama.cpp server)
+    if _looks_normalised(raw):
+        normalized = raw
+        logger.info("[script] normalize skipped (input already in screenplay form)")
+    else:
+        normalized = await normalize_script(raw, lang)
+
+    # Pass 2: Parallel parse (4 LLM calls fired concurrently)
     script_data = await parse_script(normalized, lang)
 
     project_id = request.project_id
@@ -265,6 +296,18 @@ async def api_normalize_and_parse(request: ParseScriptRequest):
             await project_store.save_script_data(project_id, serialized)
         except Exception as e:
             logger.warning(f"[script] Failed to persist script data: {e}")
+
+        # ── Auto-batch: kick off three-view generation for every detected
+        # character (fire-and-forget; progress polled via /characters/batch-status).
+        try:
+            await kickoff_after_parse(
+                project_id=project_id,
+                characters=script_data.characters,
+                genre=script_data.genre or "cinematic",
+                language=lang,
+            )
+        except Exception as e:
+            logger.warning(f"[script] Failed to kick off auto three-view: {e}")
 
     return ParseScriptResponse(
         normalized_script=normalized,
@@ -523,7 +566,7 @@ async def api_generate_three_view(request: GenerateThreeViewRequest):
             await project_store.save_character_asset(
                 project_id,
                 request.character_id,
-                serialize_character_asset(asset),
+                payload=serialize_character_asset(asset),
             )
         except Exception as e:
             logger.warning(f"[script] Failed to persist character asset: {e}")
@@ -576,6 +619,50 @@ async def api_generate_variation(request: GenerateVariationRequest):
         image=image,
         project_id=project_id,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto Three-View Batch Status (polled by frontend after /parse)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BatchStatusEntry(BaseModel):
+    name: str
+    status: str                # queued | running | done | failed
+    started_at: float = 0.0
+    finished_at: Optional[float] = None
+    error: Optional[str] = None
+    visual_prompt: Optional[str] = None
+    asset: Optional[dict] = None
+
+
+class BatchStatusResponse(BaseModel):
+    project_id: str
+    characters: dict[str, BatchStatusEntry]
+    summary: dict              # {queued, running, done, failed}
+
+
+@router.get("/characters/batch-status", response_model=BatchStatusResponse)
+async def api_batch_status(project_id: str):
+    """
+    Poll this from the frontend after /parse returns. Tells the UI which
+    characters have their three-view assets ready.
+    """
+    raw = get_auto_three_view_progress(project_id)
+    summary = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    for entry in raw.values():
+        summary[entry.get("status", "queued")] = summary.get(entry.get("status", "queued"), 0) + 1
+    return BatchStatusResponse(
+        project_id=project_id,
+        characters={k: BatchStatusEntry(**v) for k, v in raw.items()},
+        summary=summary,
+    )
+
+
+@router.post("/characters/batch-clear", response_model=dict)
+async def api_batch_clear(project_id: str):
+    """Drop the in-memory progress table for a project (e.g. on project delete)."""
+    clear_auto_three_view_progress(project_id)
+    return {"success": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

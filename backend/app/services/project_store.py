@@ -949,18 +949,46 @@ class ProjectStore:
         self,
         project_id: str,
         character_id: str,
-        asset_type: str,
-        file_data: bytes,
-        extension: str = "png",
+        asset_type: str = "asset",
+        file_data=None,
+        extension: str = "json",
+        payload: Optional[dict] = None,
     ) -> dict:
-        """保存角色资产（正面图/三视图/变体）到磁盘。"""
+        """
+        Save a character asset bundle to disk.
+
+        Two calling conventions are supported for backwards compatibility:
+
+        1. ``save_character_asset(project_id, character_id, payload_dict)``
+           — the canonical one used by the auto three-view worker.
+           Writes ``<char_id>_asset.json`` with the serialised CharacterAsset.
+
+        2. ``save_character_asset(project_id, character_id, asset_type, file_data, extension)``
+           — legacy call writing a single PNG/JSON file under ``<char_id>_<asset_type>.<ext>``.
+        """
         lock = self._get_lock(project_id)
         async with lock:
             characters_dir = self._characters_dir(project_id)
             characters_dir.mkdir(parents=True, exist_ok=True)
-            rel_path = characters_dir / f"{character_id}_{asset_type}.{extension}"
-            abs_path = self._workspace_dir / rel_path
-            abs_path.write_bytes(file_data)
+
+            # Convention 1: payload-only call (preferred).
+            if payload is None and file_data is None:
+                if not isinstance(asset_type, dict):
+                    raise TypeError(
+                        "save_character_asset requires payload= or file_data="
+                    )
+                payload = asset_type
+                rel_path = characters_dir / f"{character_id}_asset.json"
+                abs_path = self._workspace_dir / rel_path
+                import json as _json
+                abs_path.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            else:
+                rel_path = characters_dir / f"{character_id}_{asset_type}.{extension}"
+                abs_path = self._workspace_dir / rel_path
+                if isinstance(file_data, (bytes, bytearray)):
+                    abs_path.write_bytes(bytes(file_data))
+                else:
+                    abs_path.write_text(str(file_data), encoding="utf-8")
 
             manifest = self._read_manifest(project_id)
             manifest.updated_at = _now_iso()

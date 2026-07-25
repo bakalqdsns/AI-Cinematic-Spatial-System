@@ -2,6 +2,7 @@
 // App — Main layout: top toolbar + split pane (2D editor | 3D viewer)
 // ─────────────────────────────────────────────────────────────────────────────
 import { useCallback, useRef, useState, useEffect } from 'react';
+import axios from 'axios';
 import { Upload, Play, Undo2, Redo2, Film, Camera, RefreshCw, Key, Sparkles, Image as ImageIcon, Layers, BookText } from 'lucide-react';
 import type { DepthLayerKey } from './types';
 import type { DepthLayerDioramaAsset } from './types';
@@ -9,12 +10,31 @@ import { ImageCanvas } from './components/ImageCanvas';
 import { LayerSelector } from './components/LayerSelector';
 import { Viewer3D } from './components/Viewer3D';
 import { SplitControls } from './components/SplitControls';
+import { SettingsPanel } from './components/SettingsPanel';
 import { SequencePanel } from './components/sequence/SequencePanel';
 import { ScriptEditor } from './components/ScriptEditor';
 import { useAppStore } from './store/useAppStore';
-import { analyzeImage } from './services/aicssService';
+import { analyzeImage, checkModelsHealth } from './services/aicssService';
 import { splitDepthLayers } from './utils/depthSplit';
 import { generatePaperLayer } from './services/aicssService';
+
+// Extract a user-friendly diagnostic message from any thrown value.
+// Backend errors from FastAPI land on `err.response.data.detail`; axios
+// network errors surface on `err.message`. Anything else falls back to
+// String(err) so the UI never displays "Error: [object Object]".
+function describeApiError(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const detail = (err.response?.data as { detail?: unknown } | undefined)?.detail;
+    if (typeof detail === 'string' && detail.length > 0) return detail;
+    if (Array.isArray(detail) && detail.length > 0) {
+      return detail.map((d) => (typeof d === 'string' ? d : JSON.stringify(d))).join('; ');
+    }
+    if (err.code === 'ECONNABORTED') return '请求超时：后端未在限定时间内返回，请重试';
+    if (err.code === 'ERR_NETWORK') return '网络错误：无法连接到后端，请检查后端是否运行';
+    return `HTTP ${err.response?.status ?? '?'}: ${err.message}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
 
 type AppMode = 'single' | 'sequence' | 'script';
 
@@ -132,9 +152,21 @@ function Toolbar({
       }
       setAnalysisResult(result);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      // Surface the backend's per-stage detail (e.g. "[vlm] FileNotFoundError: ...")
+      // so users can tell which model is the problem.
+      const msg = describeApiError(err);
       setAnalysisError(msg);
       setVlmHint(`分析失败：${msg}`);
+      // Best-effort model health probe — helps the user decide whether to download weights.
+      try {
+        const health = await checkModelsHealth();
+        if (!health.all_ready && health.missing.length > 0) {
+          const names = health.missing.map((m) => m.model).join(', ');
+          setAnalysisError(`${msg}\n缺失模型：${names}`);
+        }
+      } catch {
+        // Health probe is best-effort; ignore failures here.
+      }
     } finally {
       setIsAnalyzing(false);
     }
@@ -220,9 +252,12 @@ function Toolbar({
       console.log('[AICSS-DEBUG] autoGen-complete', { layerAssetKeys: Object.keys(layerAssets), depthSplitKeys: Object.keys(depthSplit) });
       // #endregion
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = describeApiError(err);
       setAutoGenPhase('error');
       setAutoGenError(msg);
+      // Also surface this on the analyze error panel so the user sees the
+      // diagnostic in both places.
+      setAnalysisError(msg);
     } finally {
       setIsAnalyzing(false);
     }
@@ -416,6 +451,9 @@ function Toolbar({
           <button onClick={() => setAutoGenPhase('idle')} className="underline hover:text-red-300">重试</button>
         </div>
       )}
+
+      {/* Settings panel (gear icon) — sits at the very right of the toolbar */}
+      <SettingsPanel />
     </header>
   );
 }

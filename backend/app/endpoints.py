@@ -249,41 +249,79 @@ async def analyze(request: AnalyzeRequest):
     """
     analysis_id = f"aicss_{uuid.uuid4().hex[:8]}"
 
+    # Pipeline-stage flags used by the final except block to return a meaningful
+    # HTTP 503 (with the failing stage name) instead of a generic 500.
+    _stage = "init"
+
+    def _fail(stage: str, exc: Exception) -> None:
+        """Record and raise a 503 with a per-stage diagnostic detail."""
+        nonlocal _stage
+        _stage = stage
+        msg = f"[{stage}] {type(exc).__name__}: {exc}"
+        # Truncate long exception messages (e.g., HF Hub errors can be huge)
+        if len(msg) > 500:
+            msg = msg[:500] + "...(truncated)"
+        _log.error("[%s] %s", analysis_id, msg)
+        _log.exception("[%s] Traceback", analysis_id)
+        raise HTTPException(status_code=503, detail=msg)
+
     try:
-        # Step 1: Load image
+        # ── Step 1: Load image ────────────────────────────────────────────────
+        _stage = "image_load"
         _log.info("[%s] Loading image...", analysis_id)
-        image = await _load_image(request.imageUrl)
-        w, h = image.size
+        try:
+            image = await _load_image(request.imageUrl)
+            w, h = image.size
+        except Exception as e:
+            _fail("image_load", e)
 
-        # ── Step 2: DepthAnything V2 ────────────────────────────────────────────
+        # ── Step 2: DepthAnything V2 ────────────────────────────────────────
+        _stage = "depth"
         _log.info("[%s] Running depth estimation...", analysis_id)
-        depth_norm = model_manager.depth_model.predict(image)
-        # scale=50.0 将深度图像素值线性映射到米：pixel_value (0-255) → depth_m = pixel * 50.0 / 255.0
-        # 即最远可表示 ~50m，与室内场景和大多数电影镜头场景吻合
-        depth_m = depth_to_meters(depth_norm, scale=50.0)
+        try:
+            depth_norm = model_manager.depth_model.predict(image)
+            # scale=50.0 将深度图像素值线性映射到米：pixel_value (0-255) → depth_m = pixel * 50.0 / 255.0
+            # 即最远可表示 ~50m，与室内场景和大多数电影镜头场景吻合
+            depth_m = depth_to_meters(depth_norm, scale=50.0)
 
-        # Convert depth to base64 PNG
-        depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
-        depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
-        depth_url = pil_to_base64(depth_pil_resized)
+            # Convert depth to base64 PNG
+            depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
+            depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
+            depth_url = pil_to_base64(depth_pil_resized)
+        except Exception as e:
+            _fail("depth", e)
 
         # Unload DepthAnything immediately — only depth_m numpy array needed from here on
-        model_manager.unload_depth()
+        try:
+            model_manager.unload_depth()
+        except Exception as e:
+            _log.warning("[%s] unload_depth failed (non-fatal): %s", analysis_id, e)
 
-        # ── Step 2b: Qwen3-VL ─────────────────────────────────────────────────
+        # ── Step 2b: Qwen3-VL ───────────────────────────────────────────────
+        _stage = "vlm"
         _log.info("[%s] Running VLM detection (local Qwen3-VL)...", analysis_id)
         import asyncio
-        vlm_task = asyncio.create_task(vlm_detect(image))
-        detected_classes, detected_scene = await vlm_task
+        try:
+            vlm_task = asyncio.create_task(vlm_detect(image))
+            detected_classes, detected_scene = await vlm_task
+        except Exception as e:
+            _fail("vlm", e)
         effective_prompt = ".".join(detected_classes)
         _log.info("[%s] VLM scene='%s' classes=%s", analysis_id, detected_scene, detected_classes)
 
         # Unload Qwen3-VL immediately — only detected_classes list needed from here on
-        model_manager.unload_qwen3vl()
+        try:
+            model_manager.unload_qwen3vl()
+        except Exception as e:
+            _log.warning("[%s] unload_qwen3vl failed (non-fatal): %s", analysis_id, e)
 
-        # ── Step 3: Grounding DINO ────────────────────────────────────────────
+        # ── Step 3: Grounding DINO ──────────────────────────────────────────
+        _stage = "grounding_dino"
         _log.info("[%s] Running Grounding DINO...", analysis_id)
-        detections = model_manager.grounding_dino.detect(image, prompt=effective_prompt, threshold=0.3)
+        try:
+            detections = model_manager.grounding_dino.detect(image, prompt=effective_prompt, threshold=0.3)
+        except Exception as e:
+            _fail("grounding_dino", e)
 
         if not detections:
             _log.info("[%s] No objects detected.", analysis_id)
@@ -303,58 +341,72 @@ async def analyze(request: AnalyzeRequest):
         labels = [d.label for d in detections]
 
         # Unload Grounding DINO immediately
-        model_manager.unload_grounding_dino()
+        try:
+            model_manager.unload_grounding_dino()
+        except Exception as e:
+            _log.warning("[%s] unload_grounding_dino failed (non-fatal): %s", analysis_id, e)
 
-        # ── Step 4: SAM2 ──────────────────────────────────────────────────────
+        # ── Step 4: SAM2 ────────────────────────────────────────────────────
+        _stage = "sam2"
         _log.info("[%s] Running SAM2 segmentation...", analysis_id)
-        masks_and_scores = model_manager.sam2.predict_masks_from_boxes(
-            np.array(image), boxes, scores
-        )
+        try:
+            masks_and_scores = model_manager.sam2.predict_masks_from_boxes(
+                np.array(image), boxes, scores
+            )
+        except Exception as e:
+            _fail("sam2", e)
 
         # Unload SAM2 immediately
-        model_manager.unload_sam2()
+        try:
+            model_manager.unload_sam2()
+        except Exception as e:
+            _log.warning("[%s] unload_sam2 failed (non-fatal): %s", analysis_id, e)
 
-        # ── Step 4b onwards: CPU post-processing (no model) ─────────────────────
+        # ── Step 4b onwards: CPU post-processing (no model) ────────────────
+        _stage = "post_process"
         _log.info("[%s] Refining mask edges...", analysis_id)
-        image_np = np.array(image)
-        masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
+        try:
+            image_np = np.array(image)
+            masks_and_scores = refine_mask_edges(masks_and_scores, image_np, snap_distance=8)
 
-        objects = []
-        for i, (mask, score) in enumerate(masks_and_scores):
-            det = detections[i]
-            # 从 mask 覆盖区域内取深度值的中位数（忽略 NaN）：
-            # nanmedian 比普通 median 更鲁棒，因为 mask 边缘像素可能位于深度图的有效区域之外，
-            # 直接求 median 会受到边缘无效值干扰；nanmedian 自动跳过这些无效像素。
-            masked_depth = np.where(mask, depth_m, np.nan)
-            obj_depth = float(np.nanmedian(masked_depth))
-            layer_name, _, _ = assign_to_depth_layer(obj_depth)
+            objects = []
+            for i, (mask, score) in enumerate(masks_and_scores):
+                det = detections[i]
+                # 从 mask 覆盖区域内取深度值的中位数（忽略 NaN）：
+                # nanmedian 比普通 median 更鲁棒，因为 mask 边缘像素可能位于深度图的有效区域之外，
+                # 直接求 median 会受到边缘无效值干扰；nanmedian 自动跳过这些无效像素。
+                masked_depth = np.where(mask, depth_m, np.nan)
+                obj_depth = float(np.nanmedian(masked_depth))
+                layer_name, _, _ = assign_to_depth_layer(obj_depth)
 
-            # Encode mask as base64 PNG
-            mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-            mask_url = pil_to_base64(mask_img)
+                # Encode mask as base64 PNG
+                mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+                mask_url = pil_to_base64(mask_img)
 
-            # Normalized bounding box
-            norm_bbox = bbox_to_xywh(det.box, w, h)
+                # Normalized bounding box
+                norm_bbox = bbox_to_xywh(det.box, w, h)
 
-            # Extract polygon contour
-            polygon = extract_polygon_from_mask(mask)
-            _log.debug("[%s] %s: mask sum=%s, polygon points=%d", analysis_id, det.label, mask.sum(), len(polygon))
+                # Extract polygon contour
+                polygon = extract_polygon_from_mask(mask)
+                _log.debug("[%s] %s: mask sum=%s, polygon points=%d", analysis_id, det.label, mask.sum(), len(polygon))
 
-            objects.append({
-                "id": det.object_id,
-                "classLabel": det.label,
-                "depth": round(obj_depth, 2),
-                "boundingBox": norm_bbox,
-                "maskDataUrl": mask_url,
-                "polygon": polygon,
-                "layer": layer_name,
-            })
+                objects.append({
+                    "id": det.object_id,
+                    "classLabel": det.label,
+                    "depth": round(obj_depth, 2),
+                    "boundingBox": norm_bbox,
+                    "maskDataUrl": mask_url,
+                    "polygon": polygon,
+                    "layer": layer_name,
+                })
 
-        # Step 5: Build spatial layers
-        layers = build_spatial_layers_from_objects(objects, depth_m, w, h)
+            # Step 5: Build spatial layers
+            layers = build_spatial_layers_from_objects(objects, depth_m, w, h)
 
-        # Step 6: Build scene graph (pure CPU, no model)
-        scene_graph = build_scene_graph_from_objects(request.shotId, objects)
+            # Step 6: Build scene graph (pure CPU, no model)
+            scene_graph = build_scene_graph_from_objects(request.shotId, objects)
+        except Exception as e:
+            _fail("post_process", e)
 
         result = {
             "analysisId": analysis_id,
@@ -368,38 +420,51 @@ async def analyze(request: AnalyzeRequest):
 
         # Persist all artifacts if projectId is supplied
         if request.projectId:
-            saved_all: list[str] = []
-            # depth step
-            saved_all += await _save_project_artifact(
-                request.projectId, "depth", {"depth_map.png": _pil_to_png_bytes(depth_pil_resized)}
-            ) or []
-            # segment step (objects.json + per-object masks)
-            seg_files: dict[str, bytes | dict] = {
-                "objects.json": {"objects": objects, "width": w, "height": h}
-            }
-            for i, (mask, _) in enumerate(masks_and_scores):
-                obj_id = objects[i]["id"]
-                seg_files[f"mask_{obj_id}.png"] = _pil_to_png_bytes(
-                    Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-                )
-            saved_all += await _save_project_artifact(request.projectId, "segment", seg_files) or []
-            # scene step
-            graph_data = scene_graph.model_dump() if hasattr(scene_graph, "model_dump") else scene_graph
-            saved_all += await _save_project_artifact(
-                request.projectId, "scene", {"scene_graph.json": {"shotId": request.shotId, "graph": graph_data}}
-            ) or []
-            # layers step
-            layer_data = [l.model_dump() if hasattr(l, "model_dump") else l for l in layers]
-            saved_all += await _save_project_artifact(
-                request.projectId, "layers", {"layer_assignments.json": {"width": w, "height": h, "layers": layer_data}}
-            ) or []
-            result["savedArtifacts"] = saved_all
+            _stage = "persist"
+            try:
+                saved_all: list[str] = []
+                # depth step
+                saved_all += await _save_project_artifact(
+                    request.projectId, "depth", {"depth_map.png": _pil_to_png_bytes(depth_pil_resized)}
+                ) or []
+                # segment step (objects.json + per-object masks)
+                seg_files: dict[str, bytes | dict] = {
+                    "objects.json": {"objects": objects, "width": w, "height": h}
+                }
+                for i, (mask, _) in enumerate(masks_and_scores):
+                    obj_id = objects[i]["id"]
+                    seg_files[f"mask_{obj_id}.png"] = _pil_to_png_bytes(
+                        Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+                    )
+                saved_all += await _save_project_artifact(request.projectId, "segment", seg_files) or []
+                # scene step
+                graph_data = scene_graph.model_dump() if hasattr(scene_graph, "model_dump") else scene_graph
+                saved_all += await _save_project_artifact(
+                    request.projectId, "scene", {"scene_graph.json": {"shotId": request.shotId, "graph": graph_data}}
+                ) or []
+                # layers step
+                layer_data = [l.model_dump() if hasattr(l, "model_dump") else l for l in layers]
+                saved_all += await _save_project_artifact(
+                    request.projectId, "layers", {"layer_assignments.json": {"width": w, "height": h, "layers": layer_data}}
+                ) or []
+                result["savedArtifacts"] = saved_all
+            except Exception as e:
+                _fail("persist", e)
 
         return result
 
+    except HTTPException:
+        # Re-raise HTTPExceptions raised by the per-stage handlers as-is
+        # so the client sees the meaningful 503 detail.
+        raise
     except Exception as e:
-        _log.exception("[%s] Error", analysis_id)
-        raise HTTPException(status_code=500, detail="Internal processing error")
+        # Last-resort safety net for anything not caught by the per-stage
+        # handlers (e.g., an error during early request parsing).
+        _log.exception("[%s] Unhandled error", analysis_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"[{_stage}] {type(e).__name__}: {e}"[:500],
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -378,3 +378,38 @@ export async function generateVisualPrompt(
   });
   return data.visual_prompt;
 }
+
+// ─── Auto Three-View Batch Status ─────────────────────────────────────────────
+
+export interface BatchCharacterStatus {
+  name: string;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  started_at: number;
+  finished_at: number | null;
+  error: string | null;
+  visual_prompt: string | null;
+  asset: Record<string, unknown> | null;
+}
+
+export interface BatchStatusResponse {
+  project_id: string;
+  characters: Record<string, BatchCharacterStatus>;
+  summary: { queued: number; running: number; done: number; failed: number };
+}
+
+export async function getBatchStatus(projectId: string): Promise<BatchStatusResponse> {
+  const { data } = await api.get<{
+    project_id: string;
+    characters: Record<string, BatchCharacterStatus>;
+    summary: { queued: number; running: number; done: number; failed: number };
+  }>('/v2/scripts/characters/batch-status', { params: { project_id: projectId } });
+  return {
+    projectId: data.project_id,
+    characters: data.characters || {},
+    summary: data.summary || { queued: 0, running: 0, done: 0, failed: 0 },
+  };
+}
+
+export async function clearBatchStatus(projectId: string): Promise<void> {
+  await api.post('/v2/scripts/characters/batch-clear', null, { params: { project_id: projectId } });
+}

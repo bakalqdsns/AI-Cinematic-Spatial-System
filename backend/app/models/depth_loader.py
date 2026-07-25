@@ -11,6 +11,7 @@ from typing import Union
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
 from app.config import settings
+from app.models.hf_compat import auth_kwargs
 
 
 class DepthModel:
@@ -39,15 +40,20 @@ class DepthModel:
     def load(self):
         """Load model and processor from local cache (offline-first)."""
         print(f"[DepthModel] Loading {self.model_name} on {self.device} (local only)...")
+        # transformers >= 4.43 renamed `use_auth_token` -> `token`; some model
+        # classes (e.g. DepthAnythingForDepthEstimation) don't forward unknown
+        # kwargs into __init__, so we must only pass the kwarg the installed
+        # version understands.
+        token_kwargs = auth_kwargs(settings.hf_token)
         self._processor = AutoImageProcessor.from_pretrained(
             self.model_name,
             local_files_only=True,
-            use_auth_token=settings.hf_token or None,
+            **token_kwargs,
         )
         self._model = AutoModelForDepthEstimation.from_pretrained(
             self.model_name,
             local_files_only=True,
-            use_auth_token=settings.hf_token or None,
+            **token_kwargs,
         )
         self._model.to(self.device)
         self._model.eval()

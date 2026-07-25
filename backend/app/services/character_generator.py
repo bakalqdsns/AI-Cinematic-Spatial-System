@@ -6,6 +6,7 @@ Uses local models:
   - LLM: llama.cpp Qwen3.5-9B-GGUF (via local_llm)
   - Image: Stable Diffusion XL / Z-Image (via image_generator)
 """
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -130,31 +131,112 @@ async def generate_character_reference(
 async def generate_character_three_view(
     character: Character,
     visual_prompt: Optional[str] = None,
+    *,
+    reference_image: Optional[str] = None,
+    seed: Optional[int] = None,
+    max_retries: int = 2,
 ) -> dict[str, Optional[str]]:
     """
     Generate three-view (front/side/back) character reference images.
+
+    Strategy:
+      1. Generate a "reference image" (front view, neutral pose) — this anchors
+         the character's look across all three views.
+      2. Use img2img with that reference for the side/back views, so the
+         character stays recognisable across angles.
+
+    If ``reference_image`` is provided, step 1 is skipped (use the supplied
+    image as the visual anchor) and we only generate side/back via img2img.
+
     Returns dict with keys: front, side, back (base64 images).
+    Each call is retried up to ``max_retries`` times on transient failures.
     """
     base_prompt = visual_prompt or character.visual_prompt
     if not base_prompt:
         base_prompt = await generate_visual_prompt(character)
 
-    view_prompts = {
-        "front": f"{base_prompt}, front view, facing camera, neutral pose, full body",
-        "side": f"{base_prompt}, side profile view, 90 degree angle, standing pose, full body",
-        "back": f"{base_prompt}, back view, from behind, standing pose, full body",
-    }
+    results: dict[str, Optional[str]] = {"front": None, "side": None, "back": None}
 
-    results: dict[str, Optional[str]] = {}
-    for view, view_prompt in view_prompts.items():
-        try:
-            image_b64 = await _generate_via_local(view_prompt)
-            results[view] = image_b64
-        except Exception as e:
-            logger.warning("[character_generator] Failed to generate %s view: %s", view, e)
-            results[view] = None
+    # ── Step 1: anchor with reference image (front view) ─────────────────────
+    if reference_image:
+        logger.info("[character_generator] reusing supplied reference for %s", character.id)
+        anchor_b64 = reference_image
+        results["front"] = anchor_b64
+    else:
+        anchor_prompt = (
+            f"{base_prompt}, character sheet, front view, facing camera, neutral pose, "
+            f"full body, white background, concept art, anime style, high detail"
+        )
+        anchor_b64 = await _generate_with_retry(anchor_prompt, label=f"{character.id}:anchor", seed=seed)
+        results["front"] = anchor_b64
+
+    # ── Step 2: side / back views via img2img of the anchor ──────────────────
+    if anchor_b64:
+        side_prompt = (
+            f"{base_prompt}, side profile view, 90 degree angle, full body, "
+            f"same character, same outfit, same art style, white background"
+        )
+        back_prompt = (
+            f"{base_prompt}, back view, from behind, full body, same character, "
+            f"same outfit, same art style, white background"
+        )
+        results["side"] = await _img2img_with_retry(
+            side_prompt, anchor_b64, label=f"{character.id}:side", strength=0.7,
+        )
+        results["back"] = await _img2img_with_retry(
+            back_prompt, anchor_b64, label=f"{character.id}:back", strength=0.7,
+        )
 
     return results
+
+
+async def _generate_with_retry(
+    prompt: str,
+    *,
+    label: str,
+    seed: Optional[int] = None,
+    max_retries: int = 2,
+) -> Optional[str]:
+    """Generate via txt2img with retry/backoff."""
+    import asyncio as _asyncio
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await _generate_via_local(prompt, seed=seed)
+        except Exception as e:
+            last_exc = e
+            logger.warning(
+                "[character_generator] %s attempt %d failed: %s", label, attempt + 1, e,
+            )
+            if attempt < max_retries:
+                await _asyncio.sleep(0.6 * (attempt + 1))
+    logger.error("[character_generator] %s exhausted retries: %s", label, last_exc)
+    return None
+
+
+async def _img2img_with_retry(
+    prompt: str,
+    anchor_b64: str,
+    *,
+    label: str,
+    strength: float = 0.7,
+    max_retries: int = 2,
+) -> Optional[str]:
+    """Generate via img2img with retry/backoff."""
+    import asyncio as _asyncio
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await _generate_via_local_with_reference(prompt, anchor_b64, strength=strength)
+        except Exception as e:
+            last_exc = e
+            logger.warning(
+                "[character_generator] %s attempt %d failed: %s", label, attempt + 1, e,
+            )
+            if attempt < max_retries:
+                await _asyncio.sleep(0.6 * (attempt + 1))
+    logger.error("[character_generator] %s exhausted retries: %s", label, last_exc)
+    return None
 
 
 async def generate_character_variation(
@@ -175,12 +257,13 @@ async def generate_character_variation(
 
 # ── Internal image generation helpers ───────────────────────────────────────────
 
-async def _generate_via_local(prompt: str) -> Optional[str]:
+async def _generate_via_local(prompt: str, *, seed: Optional[int] = None) -> Optional[str]:
     """Generate image via local Diffusers pipeline (SDXL / Z-Image)."""
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
-        image = generator.generate(prompt)
+        # Run in a thread so we don't block the event loop while SDXL churns.
+        image = await asyncio.to_thread(generator.generate, prompt, seed=seed)
         if image is not None:
             return generator.pil_to_base64(image)
     except Exception as e:
@@ -191,12 +274,17 @@ async def _generate_via_local(prompt: str) -> Optional[str]:
 async def _generate_via_local_with_reference(
     prompt: str,
     reference_image_b64: str,
+    *,
+    strength: float = 0.7,
 ) -> Optional[str]:
     """Generate image with style reference using local img2img pipeline."""
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
-        image = generator.generate_with_image(prompt, reference_image_b64, strength=0.65)
+        image = await asyncio.to_thread(
+            generator.generate_with_image,
+            prompt, reference_image_b64, strength,
+        )
         if image is not None:
             return generator.pil_to_base64(image)
     except Exception as e:

@@ -18,6 +18,7 @@ except ImportError:
     raise ImportError("Please install transformers: pip install transformers")
 
 from app.config import settings
+from app.models.hf_compat import auth_kwargs
 
 
 @dataclass
@@ -54,17 +55,18 @@ class GroundingDinoModel:
     def load(self):
         """Load model from local cache (offline-first)."""
         print(f"[GroundingDINO] Loading {self.model_name} on {self.device} (local only)...")
+        token_kwargs = auth_kwargs(settings.hf_token)
         self._processor = AutoProcessor.from_pretrained(
             self.model_name,
             trust_remote_code=True,
             local_files_only=True,
-            use_auth_token=settings.hf_token or None,
+            **token_kwargs,
         )
         self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
             self.model_name,
             trust_remote_code=True,
             local_files_only=True,
-            use_auth_token=settings.hf_token or None,
+            **token_kwargs,
         )
         self._model.to(self.device)
         self._model.eval()
