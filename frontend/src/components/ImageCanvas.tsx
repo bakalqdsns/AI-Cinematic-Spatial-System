@@ -5,6 +5,7 @@ import { useCallback, useMemo } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import type { DetectedObject } from '../types';
 import { LAYER_COLORS } from '../types';
+import { PolygonOverlay, RegionOverlays } from './PolygonDrawTool';
 
 interface Props {
   width: number;
@@ -16,6 +17,11 @@ export function ImageCanvas({ width, height }: Props) {
   const originalImageUrl = useAppStore((s) => s.originalImageUrl);
   const croppedImageUrl = useAppStore((s) => s.croppedImageUrl);
   const originalImageBase64 = useAppStore((s) => s.originalImageBase64);
+  // Strip-pipeline state: currentImageUrl is the image that should be drawn
+  // on the canvas and used as the base for the next strip step. After each
+  // strip step the inpainting result is promoted into currentImageUrl, so
+  // the canvas always shows "the image with all already-stripped layers gone".
+  const currentImageUrl = useAppStore((s) => s.currentImageUrl);
   const imageMode = useAppStore((s) => s.imageMode);
   const depthSplitResult = useAppStore((s) => s.depthSplitResult);
   const selectedDepthLayer = useAppStore((s) => s.selectedDepthLayer);
@@ -24,10 +30,17 @@ export function ImageCanvas({ width, height }: Props) {
   const selectedObjectId = useAppStore((s) => s.selectedObjectId);
   const toggleObjectLayer = useAppStore((s) => s.toggleObjectLayer);
   const setSelectedObjectId = useAppStore((s) => s.setSelectedObjectId);
+  const regions = useAppStore((s) => s.regions);
+  const drawMode = useAppStore((s) => s.drawMode);
+  const drawPoints = useAppStore((s) => s.drawPoints);
+  const addDrawPoint = useAppStore((s) => s.addDrawPoint);
 
   const objects: DetectedObject[] = analysisResult?.objects ?? [];
 
-  const originalUrl = croppedImageUrl || originalImageUrl || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
+  const originalUrl = currentImageUrl
+    || croppedImageUrl
+    || originalImageUrl
+    || (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
 
   const bgUrl = useMemo(() => {
     if (imageMode === 'depth-layer') {
@@ -61,9 +74,32 @@ export function ImageCanvas({ width, height }: Props) {
     [selectedLayerIndex, selectedObjectId, toggleObjectLayer, setSelectedObjectId],
   );
 
-  const handleCanvasClick = useCallback(() => {
-    setSelectedObjectId(null);
-  }, [setSelectedObjectId]);
+  // Handle canvas click: in draw mode → add polygon point; otherwise → deselect object
+  const handleCanvasClick = useCallback(
+    (e: React.MouseEvent<SVGSVGElement>) => {
+      if (drawMode === 'drawing') {
+        const svg = e.currentTarget;
+        const rect = svg.getBoundingClientRect();
+        const nx = (e.clientX - rect.left) / rect.width;
+        const ny = (e.clientY - rect.top) / rect.height;
+        addDrawPoint([nx, ny]);
+        return;
+      }
+      setSelectedObjectId(null);
+    },
+    [drawMode, addDrawPoint, setSelectedObjectId],
+  );
+
+  // Handle double-click in draw mode → complete polygon
+  // (completion is handled by SplitControls via keyboard listener)
+  const handleCanvasDoubleClick = useCallback(
+    (e: React.MouseEvent<SVGSVGElement>) => {
+      if (drawMode === 'drawing') {
+        e.preventDefault();
+      }
+    },
+    [drawMode],
+  );
 
   return (
     <div
@@ -86,7 +122,8 @@ export function ImageCanvas({ width, height }: Props) {
           className="absolute inset-0 w-full h-full"
           viewBox={`0 0 ${width} ${height}`}
           onClick={handleCanvasClick}
-          style={{ cursor: selectedLayerIndex !== null ? 'crosshair' : 'default' }}
+          onDoubleClick={handleCanvasDoubleClick}
+          style={{ cursor: drawMode === 'drawing' ? 'crosshair' : selectedLayerIndex !== null ? 'crosshair' : 'default' }}
         >
           {/*
             按面积从大到小排序 → 渲染顺序由大到小。
@@ -183,6 +220,12 @@ export function ImageCanvas({ width, height }: Props) {
             );
           })}
         </svg>
+      )}
+
+      {/* Drawing mode polygon overlay (live preview + committed regions) */}
+      <RegionOverlays regions={regions} imageWidth={width} imageHeight={height} />
+      {drawMode === 'drawing' && (
+        <PolygonOverlay points={drawPoints} imageWidth={width} imageHeight={height} />
       )}
 
       {/* Empty state */}

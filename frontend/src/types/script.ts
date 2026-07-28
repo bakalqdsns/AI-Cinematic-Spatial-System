@@ -36,6 +36,21 @@ export interface Scene {
   time: 'Day' | 'Night' | 'Dawn' | 'Dusk' | 'Morning' | 'Evening';
   atmosphere: string;
   estimatedShots: number;
+  visualPrompt?: string;
+}
+
+export interface SceneVariation {
+  id: string;
+  name: string;
+  visualPrompt: string;
+  image?: string;
+}
+
+export interface SceneAsset {
+  sceneId: string;
+  visualPrompt: string;
+  keyframeImages: { wide?: string; closeup?: string; mood?: string };
+  variations?: SceneVariation[];
 }
 
 export interface StoryParagraph {

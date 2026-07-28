@@ -77,6 +77,19 @@ class ExportSceneRequest(BaseModel):
     layer_assets: dict = Field(..., description="depthLayerDioramaAssets 字典")
     object_assets: dict = Field(default_factory=dict, description="objectDioramaAssets 字典")
     billboard_offsets: dict = Field(default_factory=dict, description="物体 3D 偏移")
+    regions: list[dict] = Field(
+        default_factory=list,
+        description="前端 LayerRegion[] 数组：用户自由选区，用于多面片3D重建导出"
+    )
+    strip_stack: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "前端 stripStack 数组（逐层剥离流水线产物）。每项包含 regionId, "
+            "baseImageDataUrl, inpaintResultUrl, billboardUrl, layerPolygon, "
+            "depthLayer, depthValue, colorIndex。最后一项的 inpaintResultUrl "
+            "就是剥去所有层后剩下的纯背景纹理。"
+        ),
+    )
     format: str = Field("glb", description="glb | fbx")
     include_textures: bool = Field(True)
 
@@ -339,6 +352,9 @@ async def api_export_scene(request: ExportSceneRequest):
         layer_assets=request.layer_assets,
         object_assets=request.object_assets,
         billboard_offsets=request.billboard_offsets,
+        # regions: LayerRegion[] — passed but not yet consumed by Blender exporter.
+        # Each region has { id, polygon, depthLayer, colorIndex, depthValue }.
+        # Full Blender integration (build PlaneGeometry per polygon at correct Z) is TBD.
         scene_id=(
             f"scene_{Path(request.project_id).name}"
             if request.project_id else None

@@ -1,17 +1,19 @@
 """
 Character Generator Service
+===========================
 Generates character reference images and three-view turnarounds.
 
-Uses local models:
-  - LLM: llama.cpp Qwen3.5-9B-GGUF (via local_llm)
-  - Image: Stable Diffusion XL / Z-Image (via image_generator)
+Mode routing:
+  - image_mode == "cloud" → DashScope ImageSynthesis API (no img2img fallback)
+  - image_mode == "local"  → local Diffusers (Z-Image / SDXL)
+  - model_mode  == "cloud" → DashScope LLM for prompt generation
+  - model_mode  == "local" → local llama.cpp LLM
 """
 import asyncio
+import base64
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
-
-from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,24 @@ class CharacterVariation:
     image: Optional[str] = None  # base64
 
 
+# ── Settings helpers ────────────────────────────────────────────────────────────
+
+def _get_image_mode() -> str:
+    try:
+        from app.config import settings
+        return settings.image_mode
+    except Exception:
+        return "local"
+
+
+def _get_model_mode() -> str:
+    try:
+        from app.config import settings
+        return settings.model_mode
+    except Exception:
+        return "local"
+
+
 # ── LLM: visual prompt generation ─────────────────────────────────────────────
 
 async def generate_visual_prompt(
@@ -71,7 +91,8 @@ async def generate_visual_prompt(
     language: ScriptLanguage = ScriptLanguage.CHINESE,
 ) -> str:
     """
-    Generate English visual art prompt for a character using local LLM.
+    Generate English visual art prompt for a character.
+    Routes through settings.model_mode: cloud → DashScope, local → llama.cpp.
     """
     prompts = {
         ScriptLanguage.CHINESE: GENERATE_VISUAL_PROMPT_CHINESE,
@@ -88,19 +109,37 @@ async def generate_visual_prompt(
 
 请生成视觉描述提示词："""
 
-    try:
-        from .local_llm import get_llm_client
-        client = get_llm_client()
-        content = await client.chat(
-            [{"role": "system", "content": system_prompt},
-             {"role": "user", "content": user_text}],
-            temperature=0.3,
-            max_tokens=256,
-        )
-        if content:
-            return content.strip()
-    except Exception as e:
-        logger.warning("[character_generator] LLM visual prompt failed: %s", e)
+    model_mode = _get_model_mode()
+
+    if model_mode == "cloud":
+        try:
+            from app.services.dashscope_client import get_dashscope_client
+            client = get_dashscope_client()
+            content = await asyncio.to_thread(
+                client.chat,
+                [{"role": "system", "content": system_prompt},
+                 {"role": "user", "content": user_text}],
+                temperature=0.3,
+                max_tokens=256,
+            )
+            if content:
+                return content.strip()
+        except Exception as e:
+            logger.warning("[character_generator] DashScope LLM visual prompt failed: %s", e)
+    else:
+        try:
+            from .local_llm import get_llm_client
+            client = get_llm_client()
+            content = await client.chat(
+                [{"role": "system", "content": system_prompt},
+                 {"role": "user", "content": user_text}],
+                temperature=0.3,
+                max_tokens=256,
+            )
+            if content:
+                return content.strip()
+        except Exception as e:
+            logger.warning("[character_generator] Local LLM visual prompt failed: %s", e)
 
     # Fallback
     return f"{character.name}, {character.gender}, {character.age} years old, {character.personality} personality, cinematic style"
@@ -114,19 +153,23 @@ async def generate_character_reference(
     provider: str = "local",
 ) -> Optional[str]:
     """
-    Generate character reference image using local image generator.
+    Generate character reference image.
+    Routes through settings.image_mode: cloud → DashScope, local → local Diffusers.
     Returns base64-encoded PNG image.
     """
     prompt = visual_prompt or character.visual_prompt
     if not prompt:
         prompt = await generate_visual_prompt(character)
 
-    if provider == "local":
-        return await _generate_via_local(prompt)
+    image_mode = _get_image_mode()
+
+    if image_mode == "cloud":
+        return await _generate_via_cloud(prompt)
     else:
-        logger.warning("[character_generator] Unknown image provider %r — using local", provider)
         return await _generate_via_local(prompt)
 
+
+# ── Image: three-view ──────────────────────────────────────────────────────────
 
 async def generate_character_three_view(
     character: Character,
@@ -198,18 +241,24 @@ async def _generate_with_retry(
     max_retries: int = 2,
 ) -> Optional[str]:
     """Generate via txt2img with retry/backoff."""
-    import asyncio as _asyncio
     last_exc = None
+    image_mode = _get_image_mode()
+
     for attempt in range(max_retries + 1):
         try:
-            return await _generate_via_local(prompt, seed=seed)
+            if image_mode == "cloud":
+                return await _generate_via_cloud(prompt)
+            else:
+                return await _generate_via_local(prompt, seed=seed)
         except Exception as e:
             last_exc = e
             logger.warning(
-                "[character_generator] %s attempt %d failed: %s", label, attempt + 1, e,
+                "[character_generator] %s attempt %d failed (mode=%s): %s",
+                label, attempt + 1, image_mode, e,
             )
             if attempt < max_retries:
-                await _asyncio.sleep(0.6 * (attempt + 1))
+                await asyncio.sleep(0.6 * (attempt + 1))
+
     logger.error("[character_generator] %s exhausted retries: %s", label, last_exc)
     return None
 
@@ -223,18 +272,25 @@ async def _img2img_with_retry(
     max_retries: int = 2,
 ) -> Optional[str]:
     """Generate via img2img with retry/backoff."""
-    import asyncio as _asyncio
     last_exc = None
+    image_mode = _get_image_mode()
+
     for attempt in range(max_retries + 1):
         try:
-            return await _generate_via_local_with_reference(prompt, anchor_b64, strength=strength)
+            if image_mode == "cloud":
+                # DashScope doesn't natively support img2img — fall back to txt2img
+                return await _generate_via_cloud(prompt)
+            else:
+                return await _generate_via_local_with_reference(prompt, anchor_b64, strength=strength)
         except Exception as e:
             last_exc = e
             logger.warning(
-                "[character_generator] %s attempt %d failed: %s", label, attempt + 1, e,
+                "[character_generator] %s attempt %d failed (mode=%s): %s",
+                label, attempt + 1, image_mode, e,
             )
             if attempt < max_retries:
-                await _asyncio.sleep(0.6 * (attempt + 1))
+                await asyncio.sleep(0.6 * (attempt + 1))
+
     logger.error("[character_generator] %s exhausted retries: %s", label, last_exc)
     return None
 
@@ -249,20 +305,28 @@ async def generate_character_variation(
     If reference_image_b64 is provided, uses it as style reference for consistency.
     Returns base64 image.
     """
+    image_mode = _get_image_mode()
+
+    if image_mode == "cloud":
+        return await _generate_via_cloud(variation_prompt)
+
     if reference_image_b64:
         return await _generate_via_local_with_reference(variation_prompt, reference_image_b64)
     else:
         return await _generate_via_local(variation_prompt)
 
 
-# ── Internal image generation helpers ───────────────────────────────────────────
+# ── Internal image generation helpers ────────────────────────────────────────────
 
-async def _generate_via_local(prompt: str, *, seed: Optional[int] = None) -> Optional[str]:
+async def _generate_via_local(
+    prompt: str,
+    *,
+    seed: Optional[int] = None,
+) -> Optional[str]:
     """Generate image via local Diffusers pipeline (SDXL / Z-Image)."""
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
-        # Run in a thread so we don't block the event loop while SDXL churns.
         image = await asyncio.to_thread(generator.generate, prompt, seed=seed)
         if image is not None:
             return generator.pil_to_base64(image)
@@ -291,6 +355,38 @@ async def _generate_via_local_with_reference(
         logger.warning("[character_generator] _generate_via_local_with_reference failed: %s", e)
     return None
 
+
+async def _generate_via_cloud(prompt: str) -> Optional[str]:
+    """
+    Generate image via DashScope ImageSynthesis API.
+
+    Returns base64-encoded PNG, or None on failure.
+    """
+    try:
+        from app.services.dashscope_client import get_dashscope_client
+        client = get_dashscope_client()
+        urls = await asyncio.to_thread(
+            client.generate_image, prompt, size="1024*1024", n=1,
+        )
+        if not urls:
+            return None
+        url = urls[0]
+        image_bytes = await asyncio.to_thread(_fetch_url, url)
+        if image_bytes:
+            return base64.b64encode(image_bytes).decode("ascii")
+    except Exception as e:
+        logger.warning("[character_generator] _generate_via_cloud failed: %s", e)
+    return None
+
+
+def _fetch_url(url: str) -> bytes:
+    """Synchronously fetch a URL (runs in thread)."""
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        return resp.read()
+
+
+# ── Serialisation helpers ───────────────────────────────────────────────────────
 
 def build_character_asset(
     character: Character,

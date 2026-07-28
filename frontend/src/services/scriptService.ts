@@ -12,17 +12,16 @@ import type {
   GenerateShotsRequest, GenerateShotsResponse,
   ThreeViewRequest, ThreeViewResponse,
   GenerateMotionRequest, ScenePrompt,
-  ScriptLanguage, ParagraphType,
+  ScriptLanguage, ParagraphType, SceneAsset,
 } from '../types/script';
 
 const BASE_URL = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
 
 // Script parsing and shot generation involve multi-step LLM pipelines that can
-// take several minutes per scene, so we extend the default timeout to 5min —
-// matches the convention used by sequenceService.
+// take several minutes per scene, so we extend the default timeout to 30min —
 const api = axios.create({
   baseURL: `${BASE_URL}/api/aicss`,
-  timeout: 300_000,
+  timeout: 30 * 60 * 1000,
 });
 
 // ─── Script Parsing ───────────────────────────────────────────────────────────
@@ -412,4 +411,73 @@ export async function getBatchStatus(projectId: string): Promise<BatchStatusResp
 
 export async function clearBatchStatus(projectId: string): Promise<void> {
   await api.post('/v2/scripts/characters/batch-clear', null, { params: { project_id: projectId } });
+}
+
+// ─── Scene Asset Batch Status ──────────────────────────────────────────────────
+
+export interface SceneBatchCharacterStatus {
+  name: string;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  started_at: number;
+  finished_at: number | null;
+  error: string | null;
+  visual_prompt: string | null;
+  asset: Record<string, unknown> | null;
+}
+
+export interface SceneBatchStatusResponse {
+  project_id: string;
+  scenes: Record<string, SceneBatchCharacterStatus>;
+  summary: { queued: number; running: number; done: number; failed: number };
+}
+
+export async function getSceneBatchStatus(projectId: string): Promise<SceneBatchStatusResponse> {
+  const { data } = await api.get<{
+    project_id: string;
+    scenes: Record<string, SceneBatchCharacterStatus>;
+    summary: { queued: number; running: number; done: number; failed: number };
+  }>('/v2/scripts/scenes/batch-status', { params: { project_id: projectId } });
+  return {
+    projectId: data.project_id,
+    scenes: data.scenes || {},
+    summary: data.summary || { queued: 0, running: 0, done: 0, failed: 0 },
+  };
+}
+
+export async function clearSceneBatchStatus(projectId: string): Promise<void> {
+  await api.post('/v2/scripts/scenes/batch-clear', null, { params: { project_id: projectId } });
+}
+
+// ─── Manual Scene Asset (single scene) ────────────────────────────────────────
+
+export interface SceneAssetRequest {
+  sceneId: string;
+  location: string;
+  time: string;
+  atmosphere?: string;
+  visualPrompt?: string;
+  referenceImage?: string;
+  projectId?: string;
+}
+
+export async function generateSceneAsset(request: SceneAssetRequest): Promise<SceneAsset> {
+  const { data } = await api.post<{
+    scene_id: string;
+    visual_prompt: string;
+    keyframe_images: Record<string, string>;
+    project_id?: string;
+  }>('/v2/scripts/scenes/generate-asset', {
+    scene_id: request.sceneId,
+    location: request.location,
+    time: request.time,
+    atmosphere: request.atmosphere || '',
+    visual_prompt: request.visualPrompt,
+    reference_image: request.referenceImage,
+    project_id: request.projectId,
+  });
+  return {
+    sceneId: data.scene_id,
+    visualPrompt: data.visual_prompt,
+    keyframeImages: data.keyframe_images || {},
+  };
 }

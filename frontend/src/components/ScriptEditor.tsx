@@ -12,7 +12,7 @@ import React, { useState } from 'react';
 import { useScriptStore } from '../store/useScriptStore';
 import type {
   ScriptLanguage, Character, CharacterAsset, Shot,
-  ScriptData,
+  ScriptData, SceneAsset,
 } from '../types/script';
 
 const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
@@ -21,7 +21,7 @@ const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
   { value: 'japanese', label: '日本語' },
 ];
 
-type TabId = 'script' | 'storyboard' | 'characters' | 'motion';
+type TabId = 'script' | 'storyboard' | 'characters' | 'scenes' | 'motion';
 
 export const ScriptEditor: React.FC = () => {
   const {
@@ -41,15 +41,17 @@ export const ScriptEditor: React.FC = () => {
     selectedShotId, selectShot,
     selectedCharacterId, selectCharacter,
     shots,
+    updateShot,
     characterAssets,
     generateCharacterThreeView,
     isGeneratingCharacter,
+    sceneAssets,
+    isGeneratingSceneAsset,
+    updateCharacterVisualPrompt,
+    selectedSceneId, selectScene,
+    generateSceneAsset,
+    projectId,
   } = useScriptStore();
-
-  // Project context is currently sourced from the future persisted-session
-  // flow. Keeping it null here avoids coupling the editor to backend IDs that
-  // don't exist yet — the store accepts an optional projectId argument.
-  const [projectId] = useState<string | null>(null);
 
   const handleParse = async () => {
     console.log('[ScriptEditor] handleParse called, rawScript length:', rawScript.length);
@@ -74,6 +76,7 @@ export const ScriptEditor: React.FC = () => {
     { id: 'script', label: '剧本数据' },
     { id: 'storyboard', label: '分镜预览' },
     { id: 'characters', label: '角色资产' },
+    { id: 'scenes', label: '场景资产' },
     { id: 'motion', label: '动作序列' },
   ];
 
@@ -159,6 +162,8 @@ export const ScriptEditor: React.FC = () => {
             onExtractCharacters={() => extractCharacters(projectId || undefined)}
             normalizedScript={normalizedScript}
             language={language}
+            sceneAssets={sceneAssets}
+            isGeneratingSceneAsset={isGeneratingSceneAsset}
           />
         )}
         {activeTab === 'storyboard' && (
@@ -167,6 +172,7 @@ export const ScriptEditor: React.FC = () => {
             parsedScript={parsedScript}
             selectedShotId={selectedShotId}
             onSelectShot={selectShot}
+            onUpdateShot={updateShot}
           />
         )}
         {activeTab === 'characters' && (
@@ -177,10 +183,21 @@ export const ScriptEditor: React.FC = () => {
             isGenerating={isGeneratingCharacter}
             selectedCharId={selectedCharacterId}
             onSelectChar={selectCharacter}
+            onUpdatePrompt={updateCharacterVisualPrompt}
           />
         )}
         {activeTab === 'motion' && (
           <MotionTab shots={shots} parsedScript={parsedScript} />
+        )}
+        {activeTab === 'scenes' && (
+          <ScenesTab
+            parsedScript={parsedScript}
+            sceneAssets={sceneAssets}
+            isGeneratingSceneAsset={isGeneratingSceneAsset}
+            selectedSceneId={selectedSceneId}
+            onSelectScene={selectScene}
+            onGenerateSceneAsset={generateSceneAsset}
+          />
         )}
       </div>
     </div>
@@ -200,12 +217,15 @@ interface ScriptTabProps {
   onExtractCharacters: () => void;
   normalizedScript: string;
   language: ScriptLanguage;
+  sceneAssets: Record<string, SceneAsset>;
+  isGeneratingSceneAsset: Record<string, boolean>;
 }
 
 const ScriptTab: React.FC<ScriptTabProps> = ({
   rawScript, onRawChange, parsedScript,
   extractedCharacters, isExtractingCharacters, onExtractCharacters,
   normalizedScript, language,
+  sceneAssets, isGeneratingSceneAsset,
 }) => {
   const [showNormalized, setShowNormalized] = useState(false);
 
@@ -295,14 +315,52 @@ const ScriptTab: React.FC<ScriptTabProps> = ({
               场景 ({parsedScript.scenes.length})
             </h3>
             <div className="space-y-2">
-              {parsedScript.scenes.map(scene => (
-                <div key={scene.id} className="p-2 bg-cyan-950/40 rounded border border-cyan-800/60">
-                  <div className="font-medium text-sm text-gray-100">{scene.location}</div>
-                  <div className="text-xs text-gray-400">
-                    {scene.time} | {scene.atmosphere}
+              {parsedScript.scenes.map(scene => {
+                const asset = sceneAssets[scene.id];
+                const generating = !!isGeneratingSceneAsset[scene.id];
+                const thumbB64 = asset?.keyframeImages?.wide;
+                const shotCount = parsedScript.storyParagraphs.filter(
+                  p => p.sceneRefId === scene.id && p.containsAction
+                ).length;
+                return (
+                  <div
+                    key={scene.id}
+                    className="p-2 bg-cyan-950/40 rounded border border-cyan-800/60 flex gap-3"
+                  >
+                    {/* Wide thumbnail or status badge */}
+                    <div className="w-16 h-16 shrink-0 rounded overflow-hidden bg-cyan-900/40 border border-cyan-700/50 flex items-center justify-center text-xs text-gray-300">
+                      {thumbB64 ? (
+                        <img
+                          src={`data:image/png;base64,${thumbB64}`}
+                          alt={scene.location}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : generating ? (
+                        <span className="animate-pulse text-cyan-200">生成中…</span>
+                      ) : (
+                        <span className="text-gray-500">—</span>
+                      )}
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-sm text-gray-100 truncate">
+                        {scene.location}
+                      </div>
+                      <div className="text-xs text-gray-400 mt-0.5">
+                        {scene.time} | {scene.atmosphere || '未指定氛围'}
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-1 flex items-center gap-2">
+                        <span>分镜 {shotCount || scene.estimatedShots || 0}</span>
+                        {asset && (
+                          <span className="text-emerald-400">
+                            ✓ {Object.keys(asset.keyframeImages || {}).filter(k => asset.keyframeImages?.[k]).length}/3 视图
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -340,11 +398,25 @@ interface StoryboardTabProps {
   parsedScript: ScriptData | null;
   selectedShotId: string | null;
   onSelectShot: (id: string | null) => void;
+  onUpdateShot: (shotId: string, updates: Partial<Shot>) => void;
 }
 
+const SHOT_SIZES: Shot['shotSize'][] = [
+  'Extreme Close-up', 'Close-up', 'Medium Close-up', 'Medium Shot',
+  'Medium Wide', 'Wide Shot', 'Extreme Wide', 'Over-the-Shoulder', 'POV', 'Two-Shot',
+];
+
+const CAMERA_MOVEMENTS: Shot['cameraMovement'][] = [
+  'Dolly In', 'Dolly Out', 'Pan Right', 'Pan Left', 'Tilt Up', 'Tilt Down',
+  'Static', 'Handheld', 'Tracking', 'Crane Up', 'Crane Down', 'Zoom In', 'Zoom Out',
+];
+
 const StoryboardTab: React.FC<StoryboardTabProps> = ({
-  shots, parsedScript, selectedShotId, onSelectShot,
+  shots, parsedScript, selectedShotId, onSelectShot, onUpdateShot,
 }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editForm, setEditForm] = useState<Partial<Shot>>({});
+
   if (shots.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-gray-400">
@@ -371,7 +443,18 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
               <div
                 key={shot.id}
                 onClick={() => onSelectShot(shot.id === selectedShotId ? null : shot.id)}
-                className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                onDoubleClick={() => {
+                  onSelectShot(shot.id);
+                  setEditForm({
+                    shotSize: shot.shotSize,
+                    cameraMovement: shot.cameraMovement,
+                    durationSeconds: shot.durationSeconds,
+                    actionSummary: shot.actionSummary,
+                    dialogue: shot.dialogue,
+                  });
+                  setIsEditing(true);
+                }}
+                className={`p-3 rounded-lg border cursor-pointer transition-all select-none ${
                   shot.id === selectedShotId
                     ? 'border-cyan-400 bg-cyan-950/40 shadow-[0_0_0_1px_rgba(34,211,238,0.5)]'
                     : 'border-gray-700 bg-gray-900 hover:border-gray-500 hover:shadow'
@@ -383,10 +466,10 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
                     镜 {shot.shotNumber}
                   </span>
                   <div className="flex gap-1">
-                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded">
+                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded truncate max-w-[80px]" title={shot.shotSize}>
                       {shot.shotSize}
                     </span>
-                    <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded">
+                    <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded truncate max-w-[70px]" title={shot.cameraMovement}>
                       {shot.cameraMovement}
                     </span>
                   </div>
@@ -394,7 +477,7 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
 
                 {/* Scene & action */}
                 <div className="text-xs text-gray-400 mb-1">
-                  {scene?.location || shot.sceneId}
+                  场景：{scene?.location || shot.sceneId}
                 </div>
                 <div className="text-sm text-gray-200 mb-2 line-clamp-2">
                   {shot.actionSummary || shot.visualPrompts.actionPrompt}
@@ -402,16 +485,22 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
 
                 {/* Characters */}
                 <div className="flex flex-wrap gap-1 mb-2">
-                  {chars.map(c => (
+                  {chars.slice(0, 3).map(c => (
                     <span key={c.id} className="text-[10px] px-1.5 py-0.5 bg-emerald-900/50 text-emerald-300 rounded">
                       {c.name}
                     </span>
                   ))}
+                  {chars.length > 3 && (
+                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 rounded">
+                      +{chars.length - 3}
+                    </span>
+                  )}
                 </div>
 
                 {/* Duration */}
-                <div className="text-xs text-gray-400">
-                  {shot.durationSeconds}s
+                <div className="text-xs text-gray-400 flex items-center gap-1">
+                  <span>{shot.durationSeconds}s</span>
+                  {shot.dialogue && <span className="text-amber-400 ml-1">对白</span>}
                 </div>
               </div>
             );
@@ -421,67 +510,171 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
 
       {/* Shot detail panel */}
       {selectedShot && (
-        <div className="w-96 border-l border-gray-700 bg-gray-900 p-4 overflow-auto">
-          <h3 className="text-lg font-bold mb-3 text-gray-100">
-            镜 {selectedShot.shotNumber}
-          </h3>
+        <div className="w-96 border-l border-gray-700 bg-gray-900 p-4 overflow-auto flex flex-col">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-lg font-bold text-gray-100">
+              镜 {selectedShot.shotNumber}
+            </h3>
+            <div className="flex gap-2">
+              {isEditing ? (
+                <>
+                  <button
+                    onClick={() => {
+                      onUpdateShot(selectedShot.id, editForm);
+                      setIsEditing(false);
+                      setEditForm({});
+                    }}
+                    className="px-3 py-1 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded transition-colors"
+                  >
+                    保存
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsEditing(false);
+                      setEditForm({});
+                    }}
+                    className="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded transition-colors"
+                  >
+                    取消
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => {
+                    setEditForm({
+                      shotSize: selectedShot.shotSize,
+                      cameraMovement: selectedShot.cameraMovement,
+                      durationSeconds: selectedShot.durationSeconds,
+                      actionSummary: selectedShot.actionSummary,
+                      dialogue: selectedShot.dialogue,
+                    });
+                    setIsEditing(true);
+                  }}
+                  className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+                >
+                  编辑
+                </button>
+              )}
+            </div>
+          </div>
 
-          <div className="space-y-3">
+          <div className="space-y-3 flex-1">
+            {/* Shot size */}
             <div>
-              <label className="text-xs font-medium text-gray-400">景别</label>
-              <div className="text-sm font-medium text-gray-100">{selectedShot.shotSize}</div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">景别</label>
+              {isEditing ? (
+                <select
+                  value={editForm.shotSize ?? selectedShot.shotSize}
+                  onChange={e => setEditForm(f => ({ ...f, shotSize: e.target.value as Shot['shotSize'] }))}
+                  className="w-full px-2 py-1.5 bg-gray-800 border border-gray-600 text-gray-100 rounded text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
+                >
+                  {SHOT_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              ) : (
+                <div className="text-sm text-gray-100">{selectedShot.shotSize}</div>
+              )}
             </div>
 
+            {/* Camera movement */}
             <div>
-              <label className="text-xs font-medium text-gray-400">运镜</label>
-              <div className="text-sm text-gray-200">{selectedShot.cameraMovement}</div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">运镜</label>
+              {isEditing ? (
+                <select
+                  value={editForm.cameraMovement ?? selectedShot.cameraMovement}
+                  onChange={e => setEditForm(f => ({ ...f, cameraMovement: e.target.value as Shot['cameraMovement'] }))}
+                  className="w-full px-2 py-1.5 bg-gray-800 border border-gray-600 text-gray-100 rounded text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
+                >
+                  {CAMERA_MOVEMENTS.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              ) : (
+                <div className="text-sm text-gray-200">{selectedShot.cameraMovement}</div>
+              )}
             </div>
 
+            {/* Duration */}
             <div>
-              <label className="text-xs font-medium text-gray-400">场景提示词</label>
+              <label className="text-xs font-medium text-gray-400 block mb-1">时长 (秒)</label>
+              {isEditing ? (
+                <input
+                  type="number"
+                  min={0.5}
+                  max={30}
+                  step={0.5}
+                  value={editForm.durationSeconds ?? selectedShot.durationSeconds}
+                  onChange={e => setEditForm(f => ({ ...f, durationSeconds: parseFloat(e.target.value) || 3 }))}
+                  className="w-full px-2 py-1.5 bg-gray-800 border border-gray-600 text-gray-100 rounded text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
+                />
+              ) : (
+                <div className="text-sm text-gray-200">{selectedShot.durationSeconds}s</div>
+              )}
+            </div>
+
+            {/* Action summary */}
+            <div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">动作描述</label>
+              {isEditing ? (
+                <textarea
+                  rows={2}
+                  value={editForm.actionSummary ?? selectedShot.actionSummary}
+                  onChange={e => setEditForm(f => ({ ...f, actionSummary: e.target.value }))}
+                  className="w-full px-2 py-1.5 bg-gray-800 border border-gray-600 text-gray-100 rounded text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400 resize-none"
+                />
+              ) : (
+                <div className="text-sm text-gray-200">{selectedShot.actionSummary || '-'}</div>
+              )}
+            </div>
+
+            {/* Dialogue */}
+            <div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">对白</label>
+              {isEditing ? (
+                <textarea
+                  rows={2}
+                  value={editForm.dialogue ?? selectedShot.dialogue}
+                  onChange={e => setEditForm(f => ({ ...f, dialogue: e.target.value }))}
+                  className="w-full px-2 py-1.5 bg-gray-800 border border-gray-600 text-gray-100 rounded text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400 resize-none italic"
+                />
+              ) : (
+                selectedShot.dialogue ? (
+                  <div className="text-sm text-gray-200 italic">{selectedShot.dialogue}</div>
+                ) : (
+                  <div className="text-sm text-gray-500">—</div>
+                )
+              )}
+            </div>
+
+            {/* Scene prompts (read-only) */}
+            <div>
+              <label className="text-xs font-medium text-gray-400 block mb-1">场景提示词</label>
               <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs whitespace-pre-wrap">
                 {selectedShot.visualPrompts.scenePrompt || selectedShot.keyframeStartPrompt || '-'}
               </pre>
             </div>
 
             <div>
-              <label className="text-xs font-medium text-gray-400">动作提示词</label>
+              <label className="text-xs font-medium text-gray-400 block mb-1">动作提示词</label>
               <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs whitespace-pre-wrap">
                 {selectedShot.visualPrompts.actionPrompt || '-'}
               </pre>
             </div>
 
             <div>
-              <label className="text-xs font-medium text-gray-400">相机提示词</label>
+              <label className="text-xs font-medium text-gray-400 block mb-1">相机提示词</label>
               <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs">
                 {selectedShot.visualPrompts.cameraPrompt || '-'}
               </pre>
             </div>
 
-            {selectedShot.dialogue && (
-              <div>
-                <label className="text-xs font-medium text-gray-400">对白</label>
-                <div className="mt-1 p-2 bg-amber-950/30 border border-amber-800/60 text-gray-200 rounded text-sm italic">
-                  {selectedShot.dialogue}
-                </div>
-              </div>
-            )}
-
-            <div>
-              <label className="text-xs font-medium text-gray-400">时长</label>
-              <div className="text-sm text-gray-200">{selectedShot.durationSeconds}s</div>
-            </div>
-
             {(selectedShot.keyframeStartPrompt || selectedShot.keyframeEndPrompt) && (
               <>
                 <div>
-                  <label className="text-xs font-medium text-gray-400">起始帧提示词</label>
+                  <label className="text-xs font-medium text-gray-400 block mb-1">起始帧提示词</label>
                   <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs">
                     {selectedShot.keyframeStartPrompt || '-'}
                   </pre>
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-gray-400">结束帧提示词</label>
+                  <label className="text-xs font-medium text-gray-400 block mb-1">结束帧提示词</label>
                   <pre className="mt-1 p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded text-xs">
                     {selectedShot.keyframeEndPrompt || '-'}
                   </pre>
@@ -506,11 +699,17 @@ interface CharactersTabProps {
   isGenerating: Record<string, boolean>;
   selectedCharId: string | null;
   onSelectChar: (id: string | null) => void;
+  onUpdatePrompt: (charId: string, prompt: string) => void;
 }
 
 const CharactersTab: React.FC<CharactersTabProps> = ({
   characters, characterAssets, onGenerateThreeView, isGenerating, selectedCharId, onSelectChar,
+  onUpdatePrompt,
 }) => {
+  const [editingPrompt, setEditingPrompt] = useState<Record<string, string>>({});
+  const char = characters.find(c => c.id === selectedCharId);
+  const asset = selectedCharId ? characterAssets[selectedCharId] : undefined;
+  const promptValue = editingPrompt[selectedCharId ?? ''] ?? char?.visualPrompt ?? asset?.visualPrompt ?? '';
   if (characters.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-gray-400">
@@ -613,8 +812,13 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
               <textarea
                 className="w-full p-2 bg-gray-950 border border-gray-700 text-gray-100 placeholder:text-gray-500 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
                 rows={4}
-                value={char.visualPrompt || asset?.visualPrompt || ''}
+                value={promptValue}
                 placeholder="自动生成或手动编辑..."
+                onChange={e => {
+                  if (!selectedCharId) return;
+                  setEditingPrompt(prev => ({ ...prev, [selectedCharId]: e.target.value }));
+                  onUpdatePrompt(selectedCharId, e.target.value);
+                }}
               />
             </div>
 
@@ -724,6 +928,173 @@ const MotionTab: React.FC<MotionTabProps> = ({ shots, parsedScript }) => {
           });
         })}
       </div>
+    </div>
+  );
+};
+
+// ==============================
+// Tab: Scenes — list + keyframe grid per scene
+// ==============================
+
+interface ScenesTabProps {
+  parsedScript: ScriptData | null;
+  sceneAssets: Record<string, SceneAsset>;
+  isGeneratingSceneAsset: Record<string, boolean>;
+  selectedSceneId: string | null;
+  onSelectScene: (id: string | null) => void;
+  onGenerateSceneAsset: (
+    sceneId: string,
+    location: string,
+    time: string,
+    atmosphere: string,
+    visualPrompt: string,
+    projectId?: string,
+  ) => Promise<void>;
+}
+
+const ScenesTab: React.FC<ScenesTabProps> = ({
+  parsedScript, sceneAssets, isGeneratingSceneAsset,
+  selectedSceneId, onSelectScene, onGenerateSceneAsset,
+}) => {
+  const scenes = parsedScript?.scenes ?? [];
+
+  if (scenes.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full text-gray-400">
+        <p>解析剧本后查看场景</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full">
+      {/* Scene list */}
+      <div className="w-64 border-r border-gray-700 p-4 overflow-auto">
+        <h3 className="text-sm font-semibold text-gray-200 mb-3">场景列表</h3>
+        <div className="space-y-2">
+          {scenes.map(scene => {
+            const asset = sceneAssets[scene.id];
+            const doneCount = asset
+              ? Object.values(asset.keyframeImages ?? {}).filter(Boolean).length
+              : 0;
+            return (
+              <div
+                key={scene.id}
+                onClick={() => onSelectScene(scene.id === selectedSceneId ? null : scene.id)}
+                className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                  scene.id === selectedSceneId
+                    ? 'border-cyan-400 bg-cyan-950/40'
+                    : 'border-gray-700 bg-gray-900 hover:border-gray-500'
+                }`}
+              >
+                <div className="font-medium text-sm text-gray-100">{scene.location}</div>
+                <div className="text-xs text-gray-400">{scene.time}</div>
+                {doneCount > 0 && (
+                  <div className="text-xs text-emerald-400 mt-1">✓ {doneCount}/3 已生成</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Scene detail */}
+      {selectedSceneId ? (() => {
+        const scene = scenes.find(s => s.id === selectedSceneId);
+        if (!scene) return null;
+        const asset = sceneAssets[scene.id];
+        const generating = !!isGeneratingSceneAsset[scene.id];
+        const keyframes = ['wide', 'closeup', 'mood'] as const;
+
+        return (
+          <div className="flex-1 p-4 overflow-auto">
+            <div className="mb-4">
+              <h2 className="text-xl font-bold text-gray-100">{scene.location}</h2>
+              <p className="text-sm text-gray-400">
+                {scene.time} | {scene.atmosphere || '未指定氛围'}
+              </p>
+            </div>
+
+            {/* Scene visual prompt */}
+            <div className="mb-4">
+              <h3 className="text-sm font-semibold text-gray-200 mb-1">视觉提示词</h3>
+              <pre className="p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded-lg text-sm whitespace-pre-wrap">
+                {asset?.visualPrompt || scene.atmosphere || '—'}
+              </pre>
+            </div>
+
+            {/* Generate button */}
+            <button
+              onClick={() =>
+                onGenerateSceneAsset(
+                  scene.id,
+                  scene.location,
+                  scene.time,
+                  scene.atmosphere || '',
+                  asset?.visualPrompt || scene.atmosphere || '',
+                )
+              }
+              disabled={generating}
+              className="mb-4 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors disabled:opacity-50"
+            >
+              {generating ? '生成中...' : '生成场景关键帧'}
+            </button>
+
+            {/* Keyframe grid */}
+            {asset?.keyframeImages && (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-200 mb-2">关键帧</h3>
+                <div className="grid grid-cols-3 gap-3">
+                  {keyframes.map(k => {
+                    const b64 = asset.keyframeImages?.[k];
+                    return (
+                      <div key={k} className="text-center">
+                        <div className="text-xs text-gray-400 mb-1 capitalize">{k}</div>
+                        {b64 ? (
+                          <img
+                            src={`data:image/png;base64,${b64}`}
+                            alt={k}
+                            className="w-full aspect-video object-cover rounded border border-gray-700"
+                          />
+                        ) : (
+                          <div className="w-full aspect-video bg-gray-800 border border-gray-700 rounded flex items-center justify-center text-gray-500 text-xs">
+                            未生成
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Variations */}
+                {asset.variations && asset.variations.length > 0 && (
+                  <div className="mt-4">
+                    <h3 className="text-sm font-semibold text-gray-200 mb-2">变体</h3>
+                    <div className="grid grid-cols-4 gap-2">
+                      {asset.variations.map(v => (
+                        <div key={v.id} className="bg-gray-800/60 border border-gray-700 rounded-lg p-2">
+                          <div className="text-xs text-gray-400 mb-1">{v.name}</div>
+                          {v.image && (
+                            <img
+                              src={`data:image/png;base64,${v.image}`}
+                              alt={v.name}
+                              className="w-full aspect-video object-cover rounded"
+                            />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })() : (
+        <div className="flex-1 flex items-center justify-center text-gray-500">
+          选择左侧场景查看详情
+        </div>
+      )}
     </div>
   );
 };

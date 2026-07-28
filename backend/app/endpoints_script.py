@@ -27,6 +27,7 @@ from app.services.script_parser import (
     ScriptData,
     Character,
     ScriptLanguage,
+    StoryParagraph,
     normalize_script,
     parse_script,
     extract_characters,
@@ -54,6 +55,18 @@ from app.services.auto_three_view import (
     kickoff_after_parse,
     get_progress as get_auto_three_view_progress,
     clear_progress as clear_auto_three_view_progress,
+)
+from app.services.auto_scene_view import (
+    kickoff_after_parse as kickoff_scene_after_parse,
+    get_progress as get_auto_scene_progress,
+    clear_progress as clear_auto_scene_progress,
+)
+from app.services.scene_generator import (
+    SceneAsset as SceneAssetModel,
+    generate_scene_keyframes,
+    generate_scene_visual_prompt,
+    build_scene_asset,
+    serialize_scene_asset,
 )
 from app.services.motion_extractor import (
     MotionSequence,
@@ -127,6 +140,7 @@ class ScenePromptsResponse(BaseModel):
 class ActionSequencesRequest(BaseModel):
     shots: list[dict]
     characters: list[dict]
+    paragraphs: Optional[list[dict]] = None
     project_id: Optional[str] = None
 
 
@@ -157,7 +171,7 @@ class GenerateThreeViewRequest(BaseModel):
 class ThreeViewResponse(BaseModel):
     character_id: str
     visual_prompt: str
-    three_view_images: dict[str, str]  # front/side/back -> base64
+    three_view_images: dict[str, Optional[str]]  # front/side/back -> base64 or None
     reference_image: Optional[str] = None
     project_id: Optional[str] = None
 
@@ -309,6 +323,17 @@ async def api_normalize_and_parse(request: ParseScriptRequest):
         except Exception as e:
             logger.warning(f"[script] Failed to kick off auto three-view: {e}")
 
+        # ── Auto-batch: kick off scene keyframe generation (wide/closeup/mood)
+        try:
+            await kickoff_scene_after_parse(
+                project_id=project_id,
+                scenes=script_data.scenes,
+                genre=script_data.genre or "cinematic",
+                language=lang,
+            )
+        except Exception as e:
+            logger.warning(f"[script] Failed to kick off auto scene assets: {e}")
+
     return ParseScriptResponse(
         normalized_script=normalized,
         script_data=serialized,
@@ -367,7 +392,9 @@ async def api_generate_shots(request: GenerateShotsRequest):
     # Generate shots
     shots = await generate_shots(script_data, request.shots_per_scene, lang)
     scene_transitions = generate_scene_transitions(shots)
-    action_sequences = generate_character_action_sequences(shots, script_data.characters)
+    action_sequences = generate_character_action_sequences(
+        shots, script_data.characters, script_data.story_paragraphs
+    )
 
     total_duration = sum(s.duration_seconds for s in shots)
 
@@ -481,7 +508,22 @@ async def api_get_action_sequences(request: ActionSequencesRequest):
         for c in request.characters
     ]
 
-    sequences = generate_character_action_sequences(shots, characters)
+    paragraphs = None
+    if request.paragraphs:
+        paragraphs = [
+            StoryParagraph(
+                id=p.get("id", ""),
+                text=p.get("text", ""),
+                scene_ref_id=p.get("scene_ref_id", p.get("sceneRefId", "")),
+                paragraph_type=p.get("paragraph_type", "action"),
+                speaker_id=p.get("speaker_id", ""),
+                emotion=p.get("emotion", ""),
+                contains_action=p.get("contains_action", True),
+            )
+            for p in request.paragraphs
+        ]
+
+    sequences = generate_character_action_sequences(shots, characters, paragraphs)
 
     serialized = [
         {
@@ -662,6 +704,102 @@ async def api_batch_status(project_id: str):
 async def api_batch_clear(project_id: str):
     """Drop the in-memory progress table for a project (e.g. on project delete)."""
     clear_auto_three_view_progress(project_id)
+    return {"success": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scene Asset Endpoints (auto batch + manual)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GenerateSceneAssetRequest(BaseModel):
+    scene_id: str
+    location: str
+    time: str = "Day"
+    atmosphere: str = ""
+    visual_prompt: Optional[str] = None
+    reference_image: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+class SceneAssetResponse(BaseModel):
+    scene_id: str
+    visual_prompt: str
+    keyframe_images: dict[str, str]      # wide/closeup/mood -> base64
+    project_id: Optional[str] = None
+
+
+class SceneBatchStatusEntry(BaseModel):
+    name: str
+    status: str                          # queued | running | done | failed
+    started_at: float = 0.0
+    finished_at: Optional[float] = None
+    error: Optional[str] = None
+    visual_prompt: Optional[str] = None
+    asset: Optional[dict] = None
+
+
+class SceneBatchStatusResponse(BaseModel):
+    project_id: str
+    scenes: dict[str, SceneBatchStatusEntry]
+    summary: dict
+
+
+@router.post("/scenes/generate-asset", response_model=SceneAssetResponse)
+async def api_generate_scene_asset(request: GenerateSceneAssetRequest):
+    """Manual single-scene asset generation (3 keyframes)."""
+    from app.services.script_parser import Scene
+    scene = Scene(
+        id=request.scene_id,
+        location=request.location,
+        time=request.time,
+        atmosphere=request.atmosphere,
+        visual_prompt=request.visual_prompt or "",
+    )
+
+    if not scene.visual_prompt:
+        scene.visual_prompt = await generate_scene_visual_prompt(scene)
+
+    keyframes = await generate_scene_keyframes(
+        scene, visual_prompt=scene.visual_prompt,
+        anchor_image=request.reference_image,
+    )
+
+    if request.project_id:
+        try:
+            asset = build_scene_asset(scene, keyframes)
+            asset.visual_prompt = scene.visual_prompt
+            await project_store.save_scene_asset(
+                request.project_id, scene.id,
+                payload=serialize_scene_asset(asset),
+            )
+        except Exception as e:
+            logger.warning(f"[script] Failed to persist scene asset: {e}")
+
+    return SceneAssetResponse(
+        scene_id=request.scene_id,
+        visual_prompt=scene.visual_prompt,
+        keyframe_images=keyframes or {},
+        project_id=request.project_id,
+    )
+
+
+@router.get("/scenes/batch-status", response_model=SceneBatchStatusResponse)
+async def api_scene_batch_status(project_id: str):
+    raw = get_auto_scene_progress(project_id)
+    summary = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    for entry in raw.values():
+        s = entry.get("status", "queued")
+        summary[s] = summary.get(s, 0) + 1
+    return SceneBatchStatusResponse(
+        project_id=project_id,
+        scenes={k: SceneBatchStatusEntry(**v) for k, v in raw.items()},
+        summary=summary,
+    )
+
+
+@router.post("/scenes/batch-clear", response_model=dict)
+async def api_scene_batch_clear(project_id: str):
+    clear_auto_scene_progress(project_id)
     return {"success": True}
 
 

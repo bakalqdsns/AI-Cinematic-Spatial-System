@@ -21,9 +21,28 @@ import type {
   PaperDioramaParams,
   DepthLayerDioramaAsset,
   ObjectDioramaAsset,
+  LayerRegion,
+  PolygonPoint,
 } from '../types';
 
 const MAX_HISTORY = 50;
+
+// StripStep: 一次"剥离"操作的产物。前景→中景→背景→天空逐层推进。
+// - regionId: 抠出物的唯一 id
+// - baseImageDataUrl: 剥离前的 image（用于撤销）
+// - inpaintResultUrl: LaMa 补全结果（也是下一轮的 baseImage）
+// - billboardUrl: 这一层的 RGBA billboard（保存在 billboardAssets[regionId]）
+// - 其余几何/深度信息用于 3D 渲染
+export interface StripStep {
+  regionId: string;
+  baseImageDataUrl: string;
+  inpaintResultUrl: string;
+  billboardUrl?: string;
+  layerPolygon: PolygonPoint[];
+  depthLayer: DepthLayerKey;
+  depthValue: number;
+  colorIndex: number;
+}
 
 interface AppState {
   // Image
@@ -44,6 +63,34 @@ interface AppState {
   // Layer assignments: objectId -> colorIndex
   assignments: LayerAssignments;
   selectedLayerIndex: number | null;
+
+  // Layer regions: arbitrary polygon regions for multi-billboard 3D reconstruction.
+  // Each LayerRegion can come from AI detection (source='ai', linked to an objectId)
+  // or from user freehand drawing (source='manual').
+  // This coexists with assignments — assignments manages AI-detected objects,
+  // regions manages both AI objects and manual regions.
+  regions: LayerRegion[];
+
+  // Drawing mode state — owned by SplitControls (toolbar), consumed by ImageCanvas (overlay).
+  // SplitControls calls startDrawing/cancelDrawing to transition state.
+  // ImageCanvas reads drawMode/drawPoints to show the live polygon overlay.
+  drawMode: 'idle' | 'drawing';
+  drawPoints: PolygonPoint[];
+
+  // Strip pipeline state — the heart of the multi-billboard reconstruction.
+  // stripStack: history of completed strip steps (in order, near→far).
+  // currentImageUrl: image that the canvas should currently display and that
+  //   the next strip step will be applied to. Equal to originalImageUrl when
+  //   stripStack is empty, and to the last step's inpaintResultUrl otherwise.
+  // currentImageWidth / currentImageHeight: dimensions of currentImageUrl.
+  // isStripping: true while a strip step is in-flight (inpaint request active).
+  stripStack: StripStep[];
+  currentImageUrl: string;
+  currentImageBase64: string;
+  currentImageWidth: number;
+  currentImageHeight: number;
+  isStripping: boolean;
+  stripError: string | null;
 
   // Billboard assets (RGBA textures from backend)
   // billboardAssets: 按 objectId 索引，存储每个物体抠出的 RGBA 贴图（用于 billboard 模式）
@@ -128,6 +175,33 @@ interface AppState {
   clearLayer: (colorIndex: number) => void;
   clearAllAssignments: () => void;
 
+  // Layer regions (multi-billboard 3D reconstruction)
+  addRegion: (region: LayerRegion) => void;
+  updateRegion: (id: string, updates: Partial<LayerRegion>) => void;
+  removeRegion: (id: string) => void;
+  setRegions: (regions: LayerRegion[]) => void;
+  clearRegions: () => void;
+
+  // Drawing mode
+  startDrawing: () => void;
+  cancelDrawing: () => void;
+  addDrawPoint: (point: PolygonPoint) => void;
+  undoDrawPoint: () => void;
+  clearDrawPoints: () => void;
+  completeDrawing: () => Promise<void>; // samples depth, creates LayerRegion, adds to store
+
+  // Strip pipeline actions
+  // pushStripStep: append a completed strip step to the stack and advance currentImage*.
+  pushStripStep: (step: StripStep) => void;
+  // undoLastStripStep: pop the last step and restore currentImage* to the previous state.
+  undoLastStripStep: () => void;
+  // resetStripStack: clear all steps and restore currentImage* to the originally imported image.
+  resetStripStack: () => void;
+  // setStripping: set the in-flight flag for the strip pipeline.
+  setStripping: (v: boolean) => void;
+  // setStripError: capture any error encountered during a strip step.
+  setStripError: (msg: string | null) => void;
+
   // Billboard assets
   setBillboardAsset: (objectId: string, rgbaUrl: string) => void;
   setDepthLayerBillboardAsset: (layer: DepthLayerKey, rgbaUrl: string) => void;
@@ -204,6 +278,16 @@ const initialState = {
   analysisError: null as string | null,
   assignments: {} as LayerAssignments,
   selectedLayerIndex: null as number | null,
+  regions: [] as LayerRegion[],
+  drawMode: 'idle' as const,
+  drawPoints: [] as PolygonPoint[],
+  stripStack: [] as StripStep[],
+  currentImageUrl: '',
+  currentImageBase64: '',
+  currentImageWidth: 0,
+  currentImageHeight: 0,
+  isStripping: false,
+  stripError: null,
   billboardAssets: {} as Record<string, BillboardAsset>,
   depthLayerBillboardAssets: {} as Partial<Record<DepthLayerKey, DepthLayerBillboardAsset>>,
   billboardOffsets: {} as Record<string, BillboardOffset>,
@@ -248,6 +332,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       originalImageBase64: base64,
       imageWidth: width,
       imageHeight: height,
+      // Initialize currentImage* to the same as originalImage* — strip pipeline starts clean.
+      currentImageUrl: url,
+      currentImageBase64: base64,
+      currentImageWidth: width,
+      currentImageHeight: height,
+      // Reset strip stack: image just changed, prior steps are stale.
+      stripStack: [],
+      stripError: null,
       depthSplitResult: null,
       depthSplitError: null,
       selectedDepthLayer: null,
@@ -326,6 +418,136 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearAllAssignments: () => {
     get().pushHistory();
     set({ assignments: {} });
+  },
+
+  addRegion: (region) =>
+    set((state) => ({ regions: [...state.regions, region] })),
+
+  updateRegion: (id, updates) =>
+    set((state) => ({
+      regions: state.regions.map((r) =>
+        r.id === id ? { ...r, ...updates } : r,
+      ),
+    })),
+
+  removeRegion: (id) =>
+    set((state) => ({
+      regions: state.regions.filter((r) => r.id !== id),
+    })),
+
+  setRegions: (regions) => set({ regions }),
+
+  clearRegions: () => set({ regions: [] }),
+
+  startDrawing: () => set({ drawMode: 'drawing', drawPoints: [] }),
+
+  cancelDrawing: () => set({ drawMode: 'idle', drawPoints: [] }),
+
+  addDrawPoint: (point) =>
+    set((state) => ({
+      drawPoints: [...state.drawPoints, point],
+    })),
+
+  undoDrawPoint: () =>
+    set((state) => ({
+      drawPoints: state.drawPoints.slice(0, -1),
+    })),
+
+  clearDrawPoints: () => set({ drawPoints: [] }),
+
+  // ─── Strip pipeline ──────────────────────────────────────────────────────
+
+  pushStripStep: (step) =>
+    set((state) => {
+      // Snapshot the image BEFORE this step is applied as the previous
+      // currentImageUrl. The new currentImageUrl becomes the inpaint result.
+      const base64 = step.inpaintResultUrl.split(',')[1] || '';
+      // We can't read image dimensions synchronously here — the caller is
+      // expected to provide them when they have them. Store step as-is and
+      // let ImageCanvas observe currentImageUrl to keep width/height in sync.
+      return {
+        stripStack: [...state.stripStack, step],
+        currentImageUrl: step.inpaintResultUrl,
+        currentImageBase64: base64,
+        drawPoints: [],
+        drawMode: 'idle',
+      };
+    }),
+
+  undoLastStripStep: () =>
+    set((state) => {
+      if (state.stripStack.length === 0) return {};
+      const stack = state.stripStack.slice(0, -1);
+      // Restore currentImage* to the previous step's baseImageDataUrl.
+      // If stack is now empty, restore to originalImageUrl.
+      const baseImageUrl =
+        stack.length > 0
+          ? stack[stack.length - 1].inpaintResultUrl
+          : state.originalImageUrl;
+      const baseImageBase64 =
+        stack.length > 0
+          ? stack[stack.length - 1].inpaintResultUrl.split(',')[1] || ''
+          : state.originalImageBase64;
+      return {
+        stripStack: stack,
+        currentImageUrl: baseImageUrl,
+        currentImageBase64: baseImageBase64,
+      };
+    }),
+
+  resetStripStack: () =>
+    set((state) => ({
+      stripStack: [],
+      currentImageUrl: state.originalImageUrl,
+      currentImageBase64: state.originalImageBase64,
+      drawMode: 'idle',
+      drawPoints: [],
+    })),
+
+  setStripping: (v) => set({ isStripping: v }),
+  setStripError: (msg) => set({ stripError: msg }),
+
+  completeDrawing: async () => {
+    const { loadDepthMapImageData, sampleDepthAtPolygon, autoAssignDepthLayer } = await import('../utils/depthUtils');
+    const state = get();
+    if (state.drawMode !== 'drawing' || state.drawPoints.length < 3) return;
+
+    const depthMapUrl = state.analysisResult?.depthMapUrl;
+    const imageWidth = state.imageWidth || 1920;
+    const imageHeight = state.imageHeight || 1080;
+    const selectedLayerIndex = state.selectedLayerIndex;
+    const regions = state.regions;
+    const { LAYER_COLORS } = await import('../types');
+
+    let depthValue = 128;
+    let depthLayer: import('../types').DepthLayerKey = 'foreground';
+
+    if (depthMapUrl) {
+      try {
+        const depthData = await loadDepthMapImageData(depthMapUrl);
+        depthValue = sampleDepthAtPolygon(depthData, state.drawPoints, imageWidth, imageHeight);
+        depthLayer = autoAssignDepthLayer(depthValue);
+      } catch (err) {
+        console.error('Failed to sample depth for polygon:', err);
+      }
+    }
+
+    const colorIndex = selectedLayerIndex ?? (regions.length % LAYER_COLORS.length);
+
+    const region: LayerRegion = {
+      id: `region-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      polygon: state.drawPoints,
+      depthLayer,
+      colorIndex,
+      source: 'manual',
+      depthValue,
+    };
+
+    set({
+      regions: [...regions, region],
+      drawMode: 'idle',
+      drawPoints: [],
+    });
   },
 
   setBillboardAsset: (objectId, rgbaUrl) =>
@@ -476,16 +698,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     autoGenPhase: 'idle',
     autoGenProgress: 0,
     autoGenError: null,
+    regions: [],
+    drawMode: 'idle',
+    drawPoints: [],
   }),
 }));
 
-// Keyboard shortcut handler for undo/redo
+// Keyboard shortcut handler for undo/redo and draw mode
 // 在模块顶层注册 keydown 监听器，而非在 React 组件中注册，
-// 这样可以确保无论哪个组件获得焦点，Ctrl+Z / Ctrl+Y 都能正常工作。
+// 这样可以确保无论哪个组件获得焦点，Ctrl+Z / Ctrl+Y / Enter / Esc 都能正常工作。
 // 检测 e.ctrlKey || e.metaKey 以兼容 macOS 的 Command 键。
 if (typeof window !== 'undefined') {
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     const ctrl = e.ctrlKey || e.metaKey;
+    const state = useAppStore.getState();
+
+    // Draw mode shortcuts (only active when drawing)
+    if (state.drawMode === 'drawing') {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        state.completeDrawing();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        state.cancelDrawing();
+        return;
+      }
+      if ((e.key === 'z' && ctrl) || e.key === 'Backspace') {
+        e.preventDefault();
+        state.undoDrawPoint();
+        return;
+      }
+    }
+
+    // Undo / redo
     if (ctrl && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
       useAppStore.getState().undo();

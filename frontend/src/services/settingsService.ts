@@ -12,21 +12,43 @@ const client = axios.create({
 });
 
 export interface RuntimeSettings {
+  model_mode: string;
+  vlm_mode: string;
+  image_mode: string;
+  video_mode: string;
+  dashscope_llm_model: string;
+  dashscope_vlm_model: string;
+  dashscope_image_model: string;
   llm_base_url: string;
   llm_model: string;
   image_model_id: string;
   image_dtype: string;
   video_provider: string;
-  dashscope_api_key: string | null; // masked as "***" after initial read
+  // Per-component DashScope API keys (masked as "***" after initial read).
+  // Each component has its own key so users can mix vendors / accounts.
+  dashscope_llm_api_key: string | null;
+  dashscope_vlm_api_key: string | null;
+  dashscope_image_api_key: string | null;
+  dashscope_video_api_key: string | null;
 }
 
 export type SettingsPatch = Partial<{
+  model_mode: string;
+  vlm_mode: string;
+  image_mode: string;
+  video_mode: string;
+  dashscope_llm_model: string;
+  dashscope_vlm_model: string;
+  dashscope_image_model: string;
   llm_base_url: string;
   llm_model: string;
   image_model_id: string;
   image_dtype: string;
   video_provider: string;
-  dashscope_api_key: string;
+  dashscope_llm_api_key: string;
+  dashscope_vlm_api_key: string;
+  dashscope_image_api_key: string;
+  dashscope_video_api_key: string;
 }>;
 
 export async function fetchSettings(): Promise<RuntimeSettings> {

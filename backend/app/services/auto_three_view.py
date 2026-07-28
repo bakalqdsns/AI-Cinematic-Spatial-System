@@ -8,7 +8,8 @@ click per character. This module owns:
 
   * a process-wide in-memory status table (project_id → per-character state)
   * the batch worker that runs after /parse finishes (fire-and-forget)
-  * a bounded semaphore so we don't OOM the GPU when many characters appear
+  * a wrapper around the shared GPU semaphore so character + scene workers
+    don't collectively OOM the GPU
   * the public helpers used by endpoints and stores
 
 Status table shape:
@@ -41,6 +42,7 @@ from .character_generator import (
     serialize_character_asset,
 )
 from .script_parser import Character, ScriptLanguage
+from ..utils.gpu_concurrency import get_gpu_sem
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +53,8 @@ logger = logging.getLogger(__name__)
 _PROGRESS: dict[str, dict[str, dict]] = {}
 _PROGRESS_LOCK = asyncio.Lock()
 
-# GPU / SDXL is heavy — bound concurrent character-generations.
-# 2 keeps us within the 16 GB RTX 4060 Ti when SDXL is loaded.
-_MAX_CONCURRENT_CHARACTERS = 2
-_GPU_SEM: Optional[asyncio.Semaphore] = None
-
-
-def _get_gpu_sem() -> asyncio.Semaphore:
-    global _GPU_SEM
-    if _GPU_SEM is None:
-        _GPU_SEM = asyncio.Semaphore(_MAX_CONCURRENT_CHARACTERS)
-    return _GPU_SEM
+# GPU concurrency is shared across every background worker (characters,
+# scenes, …). See app.utils.gpu_concurrency for the limit + reasoning.
 
 
 def get_progress(project_id: str) -> dict[str, dict]:
@@ -113,7 +106,7 @@ async def auto_generate_three_views_for_project(
     # Lazy import to avoid a circular dependency at module load.
     from app.services import project_store
 
-    sem = _get_gpu_sem()
+    sem = get_gpu_sem()
 
     async def _one(char: Character) -> None:
         async with sem:

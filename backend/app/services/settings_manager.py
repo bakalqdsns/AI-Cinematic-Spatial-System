@@ -26,16 +26,46 @@ _log = logging.getLogger("aicss.settings")
 # Fields that are visible to the frontend and safe to mutate at runtime.
 # Anything outside this list is server-side only and read-only through the API.
 RUNTIME_FIELDS = (
+    "model_mode",
+    "vlm_mode",
+    "image_mode",
+    "video_mode",
+    "dashscope_llm_model",
+    "dashscope_vlm_model",
+    "dashscope_image_model",
     "llm_base_url",
     "llm_model",
     "image_model_id",
     "image_dtype",
     "video_provider",
-    "dashscope_api_key",
+    "dashscope_llm_api_key",
+    "dashscope_vlm_api_key",
+    "dashscope_image_api_key",
+    "dashscope_video_api_key",
 )
 
 # API keys are sensitive; we redact them in GET responses.
-SENSITIVE_FIELDS = ("dashscope_api_key",)
+SENSITIVE_FIELDS = (
+    "dashscope_llm_api_key",
+    "dashscope_vlm_api_key",
+    "dashscope_image_api_key",
+    "dashscope_video_api_key",
+)
+
+
+def _resolve_api_key(component_key: str) -> str:
+    """Resolve the API key for a given DashScope component.
+
+    Order of precedence:
+      1. The per-component field set via the Settings UI.
+      2. The generic ``DASHSCOPE_API_KEY`` env var (covers legacy deployments).
+      3. Empty string — caller will surface a clear "missing key" error.
+    """
+    from app.config import settings as _settings
+    val = getattr(_settings, component_key, "")
+    if val:
+        return val
+    return os.getenv("DASHSCOPE_API_KEY", "")
 
 
 def _coerce_value(key: str, value: Any) -> Any:
@@ -84,6 +114,61 @@ def update_settings(updates: dict) -> dict:
         return get_settings()
 
     _log.info("[settings] applying changes: %s", sorted(changes.keys()))
+
+    # ── Hot-reload model mode ───────────────────────────────────────────────
+    if "model_mode" in changes:
+        new_mode = changes["model_mode"]
+        cloud = new_mode == "cloud"
+        try:
+            from app.services.local_llm import set_use_cloud
+            set_use_cloud(cloud)
+            _log.info("[settings] Model mode switched to: %s", new_mode)
+        except Exception as exc:
+            _log.warning("[settings] Model mode switch failed: %s", exc)
+
+    # ── Hot-reload per-component modes (vlm, image, video) ──────────────────
+    for mode_key in ("vlm_mode", "image_mode", "video_mode"):
+        if mode_key in changes:
+            new_mode = changes[mode_key]
+            _log.info("[settings] %s switched to: %s", mode_key, new_mode)
+            # Per-component mode switches can be handled by respective services
+            # as needed (e.g., configure_vlm, configure_image_gen, configure_video)
+
+    # ── Hot-reload DashScope client ─────────────────────────────────────────
+    if "dashscope_llm_model" in changes or "dashscope_vlm_model" in changes or "dashscope_image_model" in changes:
+        try:
+            from app.services.dashscope_client import configure_dashscope_client
+            configure_dashscope_client(
+                llm_model=changes.get("dashscope_llm_model") or None,
+                vlm_model=changes.get("dashscope_vlm_model") or None,
+                image_model=changes.get("dashscope_image_model") or None,
+            )
+            updated_keys = [k for k in ("dashscope_llm_model", "dashscope_vlm_model", "dashscope_image_model") if k in changes]
+            _log.info("[settings] DashScope models updated: %s", updated_keys)
+        except Exception as exc:
+            _log.warning("[settings] DashScope reconfigure failed: %s", exc)
+
+    # ── Hot-reload per-component DashScope API keys ─────────────────────────
+    api_key_changes = {
+        k: v for k, v in changes.items()
+        if k in SENSITIVE_FIELDS and isinstance(v, str) and v
+    }
+    if api_key_changes:
+        # Mirror to process env so the dashscope SDK (which reads DASHSCOPE_API_KEY
+        # at call time) and any subprocesses spawned later (e.g. llama-server,
+        # dashscope video adapter) all see the latest key without restart.
+        for k, v in api_key_changes.items():
+            os.environ[k.upper()] = v
+            _log.info("[settings] DashScope API key updated: %s (len=%d)", k, len(v))
+        # Force-reset dashscope.api_key if any component key changed so the SDK
+        # re-reads it on the next call. Setting an empty string clears the cached
+        # key, forcing Generation.call / MultiModalConversation.call / etc. to
+        # re-resolve via the env var.
+        try:
+            import dashscope as _dashscope
+            _dashscope.api_key = ""
+        except Exception:
+            pass
 
     # ── Hot-reload LLM client ──────────────────────────────────────────────
     if "llm_base_url" in changes or "llm_model" in changes:

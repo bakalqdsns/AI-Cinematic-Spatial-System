@@ -20,6 +20,24 @@ from app.config import settings
 from app.models.hf_compat import auth_kwargs
 
 
+def _snapshot_download_hf(model_name: str) -> str:
+    """Download a HuggingFace model via snapshot_download and return the snapshot dir."""
+    import os as _os
+    _os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+    _os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+    from huggingface_hub import snapshot_download
+    token_kwargs = auth_kwargs(settings.hf_token)
+    cache_dir = str(settings.vlm_checkpoint_dir)
+    local_dir = snapshot_download(
+        repo_id=model_name,
+        cache_dir=cache_dir,
+        **token_kwargs,
+    )
+    return local_dir
+
+
 class Qwen3VLModel:
     """
     Qwen3-VL-4B-Instruct via HuggingFace Transformers.
@@ -43,21 +61,50 @@ class Qwen3VLModel:
         self._processor = None
         self._model = None
 
+    def ensure_downloaded(self) -> str:
+        """
+        Ensure the Qwen3-VL checkpoint is on disk.  Returns the snapshot
+        directory path for ``from_pretrained`` with ``local_files_only=True``.
+        """
+        print(f"[Qwen3VL] Ensuring {self.model_name} is on disk ...")
+        path = _snapshot_download_hf(self.model_name)
+        print(f"[Qwen3VL] Snapshot ready: {path}")
+        return path
+
     def load(self):
-        """Load processor and model from local cache (offline-first)."""
-        print(f"[Qwen3VL] Loading {self.model_name} on {self.device} (local only)...")
+        """Load processor and model. Tries online download first, falls back to local cache."""
+        print(f"[Qwen3VL] Loading {self.model_name} on {self.device}...")
         token_kwargs = auth_kwargs(settings.hf_token)
-        self._processor = AutoProcessor.from_pretrained(
-            self.model_name,
-            local_files_only=True,
-            **token_kwargs,
-        )
-        self._model = Qwen3VLForConditionalGeneration.from_pretrained(
-            self.model_name,
-            dtype=torch.bfloat16,
-            local_files_only=True,
-            **token_kwargs,
-        ).to(self.device).eval()
+        loaded = False
+
+        for phase, local_only in enumerate(["online (auto-download)", "local cache"], 1):
+            try:
+                print(f"[Qwen3VL]   phase {phase}: {local_only}...")
+                self._processor = AutoProcessor.from_pretrained(
+                    self.model_name,
+                    local_files_only=local_only,
+                    **token_kwargs,
+                )
+                self._model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    self.model_name,
+                    dtype=torch.bfloat16,
+                    local_files_only=local_only,
+                    **token_kwargs,
+                ).to(self.device).eval()
+                print(f"[Qwen3VL]   ✓ loaded from {local_only}")
+                loaded = True
+                break
+            except FileNotFoundError:
+                print(f"[Qwen3VL]   ✗ not found in {local_only}, trying next...")
+                self._processor = None
+                self._model = None
+                continue
+
+        if not loaded:
+            raise FileNotFoundError(
+                f"Qwen3-VL '{self.model_name}' not found locally and could not be "
+                f"downloaded. Check network / HF_TOKEN / proxy settings."
+            )
         print("[Qwen3VL] Loaded.")
 
     @torch.no_grad()

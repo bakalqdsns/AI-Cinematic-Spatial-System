@@ -73,6 +73,37 @@ export type ImageViewMode = 'depth' | 'original' | 'depth-layer';
 // 与 LayerAssignments 不同：DepthLayerKey 是深度分层裁剪的结果（用于纸模立体画），
 // 而 LayerAssignments 是 2D 画布上 15 色层的分配系统（objectId -> colorIndex 0-14）
 export type DepthLayerKey = 'foreground' | 'midground' | 'background' | 'sky';
+
+// Z 轴常量：每个深度层在 3D 空间中的位置。
+// 这些值与 Viewer3D.tsx 中的 DEPTH_LAYER_Z 保持同步，修改此处即修改全局。
+export const DEPTH_LAYER_Z: Record<DepthLayerKey, number> = {
+  sky: -20,
+  background: -12,
+  midground: -6,
+  foreground: -2,
+};
+
+// 深度阈值：用于从灰度深度图（0-255）判断某像素属于哪个层。
+// 这些阈值与 depthSplit.ts 中的 DEFAULT_DEPTH_SPLIT_THRESHOLDS 保持同步。
+export const DEPTH_LAYER_THRESHOLDS: Record<DepthLayerKey, number> = {
+  foreground: 192,  // 192-255 → foreground
+  midground: 128,  // 128-191 → midground
+  background: 64,    // 64-127  → background
+  // <64         → sky
+};
+
+// LayerRegion: 任意形状的多边形区域，支持 AI 检测物体和用户手绘两种来源。
+// 是多面片3D模型重建系统的核心数据模型——每个 LayerRegion 对应一个独立的 PlaneGeometry billboard。
+export interface LayerRegion {
+  id: string;                      // uuid，用于唯一标识
+  polygon: PolygonPoint[];        // 归一化 0-1 多边形顶点
+  depthLayer: DepthLayerKey;       // 该区域所属的深度层
+  colorIndex: number;             // 可视化颜色（0-14）
+  source: 'ai' | 'manual';        // 来源：AI检测 or 用户手绘
+  objectId?: string;              // 若来自 AI 检测物体，关联其 ID
+  depthValue?: number;            // 该区域从深度图采样的中值深度（0-255 灰度亮度）
+  inpaintMask?: string;           // 该区域的 inpaint mask dataURL（遮罩局部重绘用）
+}
 // DepthSplitResult: 按深度层级分割后的 RGBA PNG 数据，key 为深度层名称，value 为 base64 data URL
 export type DepthSplitResult = Record<DepthLayerKey, string>;
 

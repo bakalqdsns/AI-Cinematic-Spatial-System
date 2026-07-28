@@ -7,6 +7,7 @@ import type {
   BoundingBox,
   PolygonPoint,
   PaperDioramaParams,
+  LayerRegion,
 } from '../types';
 import { DEFAULT_PAPER_DIORAMA_PARAMS } from '../types';
 
@@ -15,10 +16,10 @@ const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:
 
 // Axios 实例配置：
 // - baseURL: 所有请求的公共前缀，由各函数中的路径拼接完整URL
-// - timeout: 300秒（5分钟），与后端视频生成/深度学习推理等操作的轮询超时一致
+// - timeout: 30min（与 Z-Image-Turbo 生图 + LLM prompt 生成耗时匹配）
 const client = axios.create({
   baseURL: DEFAULT_BACKEND,
-  timeout: 300_000,
+  timeout: 30 * 60 * 1000,
 });
 
 export async function analyzeImage(imageUrl: string, shotId: string = 'shot_001'): Promise<AicssResult> {
@@ -174,3 +175,34 @@ export async function generatePaperLayer(
   });
   return resp.data;
 }
+
+// ─── Layer Region support ─────────────────────────────────────────────────────────
+
+/**
+ * Extract a billboard texture for a manually drawn LayerRegion.
+ * Wraps generateBillboard with the region's polygon.
+ * The result is stored in billboardAssets[region.id].
+ */
+export async function extractRegionBillboard(
+  imageUrl: string,
+  region: LayerRegion,
+): Promise<string> {
+  // Compute bounding box from polygon
+  const xs = region.polygon.map(([x]) => x);
+  const ys = region.polygon.map(([, y]) => y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+
+  const boundingBox: BoundingBox = {
+    x: minX,
+    y: minY,
+    w: maxX - minX,
+    h: maxY - minY,
+  };
+
+  return generateBillboard(imageUrl, region.id, boundingBox, region.polygon);
+}
+
+// "Layer（图层）" vs "Object（物体）" 的语义区别：

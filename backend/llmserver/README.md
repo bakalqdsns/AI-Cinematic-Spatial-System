@@ -79,8 +79,8 @@ pip install huggingface_hub
 python -c "
 from huggingface_hub import hf_hub_download
 path = hf_hub_download(
-    'lmstudio-community/Qwen3.5-9B-GGUF',
-    'Q4_K_M/Qwen3.5-9B-Q4_K_M.gguf',
+    'Qwen/Qwen2.5-7B-Instruct-GGUF',
+    'qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf',
     local_dir='./models'
 )
 print(f'Downloaded: {path}')

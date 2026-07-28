@@ -44,7 +44,10 @@ MODEL_CACHE_DIR = MODELS_DIR / "models"
 DEFAULT_PORT = 8080
 
 # Auto-unload after this many seconds of inactivity (None = never auto-unload)
-AUTO_UNLOAD_TIMEOUT: float | None = 300  # 5 minutes
+# IMPORTANT: Keep high enough to avoid killing a long-running LLM call.
+#   - Qwen2.5-7B Q4_K_M on CPU: up to ~5 min per request
+#   - Qwen2.5-7B Q4_K_M on GPU: ~30-120s per request
+AUTO_UNLOAD_TIMEOUT: float | None = 1800  # 30 minutes
 
 
 # ── Model detection ────────────────────────────────────────────────────────────
@@ -167,6 +170,9 @@ async def start_server() -> dict:
     env = os.environ.copy()
     env.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
+    # ── Align the --alias with the client-side model name used in
+    # local_llm.py (DEFAULT_MODEL) so the /v1/chat completions call
+    # finds the right model on the server side.
     cmd = [
         str(SERVER_EXE),
         "-m", model["path"],
@@ -174,6 +180,7 @@ async def start_server() -> dict:
         "-ngl", "99",
         "--host", "0.0.0.0",
         "--port", str(DEFAULT_PORT),
+        "--alias", "qwen2.5-7b-q4_k_m",
     ]
     logger.info("[LlamaServer] Launching: %s", " ".join(cmd))
 

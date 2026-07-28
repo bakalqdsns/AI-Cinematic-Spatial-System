@@ -21,6 +21,24 @@ from app.config import settings
 from app.models.hf_compat import auth_kwargs
 
 
+def _snapshot_download_hf(model_name: str) -> str:
+    """Download a HuggingFace model via snapshot_download and return the snapshot dir."""
+    import os as _os
+    _os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+    _os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+    from huggingface_hub import snapshot_download
+    token_kwargs = auth_kwargs(settings.hf_token)
+    cache_dir = str(settings.grounding_dino_checkpoint_dir)
+    local_dir = snapshot_download(
+        repo_id=model_name,
+        cache_dir=cache_dir,
+        **token_kwargs,
+    )
+    return local_dir
+
+
 @dataclass
 class Detection:
     box: np.ndarray  # [x1, y1, x2, y2] in pixels
@@ -52,24 +70,53 @@ class GroundingDinoModel:
         self._processor = None
         self._model = None
 
+    def ensure_downloaded(self) -> str:
+        """
+        Ensure the Grounding DINO checkpoint is on disk.  Returns the snapshot
+        directory path for ``from_pretrained`` with ``local_files_only=True``.
+        """
+        print(f"[GroundingDINO] Ensuring {self.model_name} is on disk ...")
+        path = _snapshot_download_hf(self.model_name)
+        print(f"[GroundingDINO] Snapshot ready: {path}")
+        return path
+
     def load(self):
-        """Load model from local cache (offline-first)."""
-        print(f"[GroundingDINO] Loading {self.model_name} on {self.device} (local only)...")
+        """Load model. Tries online download first, falls back to local cache."""
+        print(f"[GroundingDINO] Loading {self.model_name} on {self.device}...")
         token_kwargs = auth_kwargs(settings.hf_token)
-        self._processor = AutoProcessor.from_pretrained(
-            self.model_name,
-            trust_remote_code=True,
-            local_files_only=True,
-            **token_kwargs,
-        )
-        self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            self.model_name,
-            trust_remote_code=True,
-            local_files_only=True,
-            **token_kwargs,
-        )
-        self._model.to(self.device)
-        self._model.eval()
+        loaded = False
+
+        for phase, local_only in enumerate(["online (auto-download)", "local cache"], 1):
+            try:
+                print(f"[GroundingDINO]   phase {phase}: {local_only}...")
+                self._processor = AutoProcessor.from_pretrained(
+                    self.model_name,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    **token_kwargs,
+                )
+                self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
+                    self.model_name,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    **token_kwargs,
+                )
+                self._model.to(self.device)
+                self._model.eval()
+                print(f"[GroundingDINO]   ✓ loaded from {local_only}")
+                loaded = True
+                break
+            except FileNotFoundError:
+                print(f"[GroundingDINO]   ✗ not found in {local_only}, trying next...")
+                self._processor = None
+                self._model = None
+                continue
+
+        if not loaded:
+            raise FileNotFoundError(
+                f"Grounding DINO '{self.model_name}' not found locally and could not be "
+                f"downloaded. Check network / HF_TOKEN / proxy settings."
+            )
         print("[GroundingDINO] Loaded.")
 
     def detect(
@@ -125,10 +172,12 @@ class GroundingDinoModel:
         w, h = image.size
         detections = []
         # scores/boxes are GPU tensors — move to CPU before Python iteration.
-        # labels may be strings (old transformers) or tensor-of-ints (new >=4.51) — normalize to strings.
+        # labels may be strings (old transformers <4.51) or tensor-of-ints (new >=4.51).
+        # For v4.51+, transformers changed `labels` to return integer IDs and added
+        # `text_labels` for string names. We prefer `text_labels` when available.
         scores = results["scores"].cpu()
         boxes = results["boxes"].cpu()
-        raw_labels = results["labels"]
+        raw_labels = results.get("text_labels", results.get("labels"))
         if hasattr(raw_labels, "cpu"):
             raw_labels = raw_labels.cpu()
         if hasattr(raw_labels, "tolist"):

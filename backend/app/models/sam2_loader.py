@@ -40,25 +40,39 @@ class SAM2Model:
     """
 
     SAM2_CONFIGS = {
+        # IMPORTANT: ultralytics expects specific checkpoint names that differ from
+        # Meta's official filenames. The "checkpoint" key here MUST match what
+        # ultralytics SAM() expects (e.g. 'sam2.1_l.pt', not 'sam2.1_hiera_large.pt').
+        # Download URLs point to Meta CDN (dl.fbaipublicfiles.com) with the official names.
         "vit_l": {
             "model_cfg": "sam2.1_hiera_l.yaml",
-            "checkpoint": "sam2.1_l.pt",
+            "checkpoint": "sam2.1_l.pt",           # ultralytics naming
+            "official_name": "sam2.1_hiera_large.pt", # Meta's actual filename for download
+            "repo_id": "facebook/sam2.1-hiera-large",
         },
         "vit_h": {
             "model_cfg": "sam2.1_hiera_l.yaml",
             "checkpoint": "sam2.1_l.pt",
+            "official_name": "sam2.1_hiera_large.pt",
+            "repo_id": "facebook/sam2.1-hiera-large",
         },
         "vit_b": {
             "model_cfg": "sam2.1_hiera_b+.yaml",
             "checkpoint": "sam2.1_b.pt",
+            "official_name": "sam2.1_hiera_base_plus.pt",
+            "repo_id": "facebook/sam2.1-hiera-base-plus",
         },
         "vit_s": {
             "model_cfg": "sam2.1_hiera_s.yaml",
             "checkpoint": "sam2.1_s.pt",
+            "official_name": "sam2.1_hiera_small.pt",
+            "repo_id": "facebook/sam2.1-hiera-small",
         },
         "vit_t": {
             "model_cfg": "sam2.1_hiera_t.yaml",
             "checkpoint": "sam2.1_t.pt",
+            "official_name": "sam2.1_hiera_tiny.pt",
+            "repo_id": "facebook/sam2.1-hiera-tiny",
         },
     }
 
@@ -76,6 +90,171 @@ class SAM2Model:
         self._predictor: Optional[object] = None
         self._automatic_generator: Optional[object] = None
 
+    def _sam2_repo_id(self) -> str:
+        """Return the HuggingFace repo_id for the configured model size."""
+        cfg = self.SAM2_CONFIGS.get(self.model_size, self.SAM2_CONFIGS["vit_l"])
+        return cfg["repo_id"]
+
+    def ensure_downloaded(self) -> str:
+        """
+        Ensure the SAM2 checkpoint is on disk. Returns the local file path.
+
+        Download strategy (in order):
+          1. HuggingFace Hub (via ``snapshot_download``) — relies on
+             ``HF_ENDPOINT=https://hf-mirror.com`` being set in config.py
+             so it goes through the China mirror.  Works for vit_l / vit_b.
+          2. Meta CDN fallback — ``https://dl.fbaipublicfiles.com/``
+             for vit_s / vit_t (hf-mirror doesn't have those) and as a
+             universal fallback when HF Hub is unreachable.
+          3. Each strategy retries up to 3 times with exponential back-off.
+
+        The download timeout is read from ``HF_HUB_DOWNLOAD_TIMEOUT``
+        (defaulting to 600 s if unset).  We always set it here to 600 s
+        because ``huggingface_hub``'s hard-coded default is 10 s — far
+        too short for the ~375 MB SAM2 checkpoint on slow networks and the
+        cause of the ``WinError 10060`` ConnectTimeout seen by users.
+        """
+        import glob
+        import time as _time
+        import requests as _requests
+
+        # Defensive: re-set env vars config.py may not have applied yet (e.g.
+        # if someone ran this loader directly from a script outside FastAPI).
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+        sam2_cfg = self.SAM2_CONFIGS.get(self.model_size, self.SAM2_CONFIGS["vit_l"])
+        ultralytics_name = sam2_cfg["checkpoint"]      # e.g. 'sam2.1_l.pt'
+        official_name = sam2_cfg.get("official_name", ultralytics_name)  # e.g. 'sam2.1_hiera_large.pt'
+        repo_id = self._sam2_repo_id()
+        cache_dir = str(self.checkpoint_dir)
+        max_retries = int(os.environ.get("HF_DOWNLOAD_RETRIES", "3"))
+
+        timeout_s = int(os.environ["HF_HUB_DOWNLOAD_TIMEOUT"])
+        ultralytics_target = os.path.join(cache_dir, ultralytics_name)
+
+        # Already downloaded with ultralytics name? Done.
+        if os.path.exists(ultralytics_target):
+            print(f"[SAM2] Found cached checkpoint: {ultralytics_target}")
+            return ultralytics_target
+
+        # Check if we have the official name already — rename it to ultralytics name
+        official_target = os.path.join(cache_dir, official_name)
+        if os.path.exists(official_target):
+            try:
+                os.rename(official_target, ultralytics_target)
+                print(f"[SAM2] Renamed {official_name} -> {ultralytics_name}")
+                return ultralytics_target
+            except OSError:
+                # Cross-device or other rename failure — use official name as-is
+                print(f"[SAM2] Could not rename {official_name}, using directly")
+                return official_target
+
+        os.makedirs(cache_dir, exist_ok=True)
+
+        def _log(msg: str):
+            print(f"[SAM2] {msg}")
+
+        last_exc: Exception | None = None
+
+        # ── Strategy 1: HuggingFace Hub (through hf-mirror.com) ───────────────
+        # Download the official file, then rename to ultralytics name.
+        _log(f"Downloading {repo_id}/{official_name} via HF Hub (timeout={timeout_s}s, retries={max_retries}) ...")
+        try:
+            from huggingface_hub import snapshot_download
+
+            for attempt in range(1, max_retries + 1):
+                if attempt > 1:
+                    _log(f"  Retry {attempt}/{max_retries} ...")
+                    _time.sleep(2 ** attempt)
+                try:
+                    local_dir = snapshot_download(
+                        repo_id=repo_id,
+                        cache_dir=cache_dir,
+                        allow_patterns=[f"*{official_name}*", "*.yaml"],
+                        ignore_patterns=["*.msgpack", "*.gitattributes"],
+                    )
+                    pattern = os.path.join(local_dir, "**", official_name)
+                    matches = glob.glob(pattern, recursive=True)
+                    if matches:
+                        official_downloaded = matches[0]
+                        _log(f"Downloaded: {official_downloaded}")
+                        # Rename to ultralytics name
+                        try:
+                            os.rename(official_downloaded, ultralytics_target)
+                            _log(f"Renamed {official_name} -> {ultralytics_name}")
+                            return ultralytics_target
+                        except OSError:
+                            _log(f"Rename failed, using {official_downloaded} directly")
+                            return official_downloaded
+                    raise FileNotFoundError(
+                        f"'{official_name}' not found in {local_dir} after snapshot_download"
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    _log(f"  Attempt {attempt} failed: {type(exc).__name__}: {exc}")
+
+        except ImportError:
+            _log("huggingface_hub not installed — skipping HF Hub strategy.")
+
+        # ── Strategy 2: Meta CDN (always public, no auth required) ───────────
+        # Download the official file (Meta uses official naming).
+        meta_url = (
+            f"https://dl.fbaipublicfiles.com/segment_anything_2/092824/{official_name}"
+        )
+        _log(f"Downloading {official_name} via Meta CDN: {meta_url} (timeout={timeout_s}s, retries={max_retries}) ...")
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                _log(f"  Retry {attempt}/{max_retries} ...")
+                _time.sleep(2 ** attempt)
+            try:
+                with _requests.get(meta_url, timeout=timeout_s, stream=True,
+                                   allow_redirects=True) as resp:
+                    resp.raise_for_status()
+                    total = int(resp.headers.get("Content-Length", 0))
+                    written = 0
+                    last_pct = -1
+                    part_file = official_target + ".part"
+                    with open(part_file, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            written += len(chunk)
+                            if total > 0:
+                                pct = int(written * 100 / total)
+                                if pct - last_pct >= 10:
+                                    last_pct = pct
+                                    mb_w = written // (1024 * 1024)
+                                    mb_t = total // (1024 * 1024)
+                                    _log(f"  {pct}%  ({mb_w}/{mb_t} MB)")
+                    os.replace(part_file, official_target)
+                    size_mb = os.path.getsize(official_target) // (1024 * 1024)
+                    _log(f"Downloaded: {official_target} ({size_mb} MB)")
+                    # Rename to ultralytics name
+                    try:
+                        os.rename(official_target, ultralytics_target)
+                        _log(f"Renamed {official_name} -> {ultralytics_name}")
+                        return ultralytics_target
+                    except OSError:
+                        _log(f"Rename failed, using {official_target} directly")
+                        return official_target
+            except Exception as exc:
+                last_exc = exc
+                _log(f"  Attempt {attempt} failed: {type(exc).__name__}: {exc}")
+                if os.path.exists(official_target + ".part"):
+                    try:
+                        os.remove(official_target + ".part")
+                    except OSError:
+                        pass
+
+        raise RuntimeError(
+            f"SAM2 checkpoint download failed after {max_retries} attempts "
+            f"for {ultralytics_name} (official: {official_name}). Tried: HF Hub ({repo_id}), Meta CDN ({meta_url}). "
+            f"Check network / HF_ENDPOINT / HF_HUB_DOWNLOAD_TIMEOUT."
+        ) from last_exc
+
     def load(self):
         """Load SAM2 model. Downloads checkpoint on first run."""
         print(f"[SAM2] Loading SAM2 ({self.model_size}) on {self.device}...")
@@ -88,21 +267,74 @@ class SAM2Model:
 
     def _load_sam2_ultralytics(self):
         """Load via ultralytics — simplest installation path."""
+        # Hygiene: point ultralytics at the project cache so SAM2 weights
+        # land in the same place as the rest of AICSS, not in the cwd or
+        # whatever weights_dir the user has set globally (e.g. for
+        # stable-diffusion-webui).  This must run *before* ``SAM(...)`` is
+        # constructed since ``SAM`` triggers the download at __init__.
+        try:
+            from ultralytics import settings as _u_settings
+            _u_settings.update({"weights_dir": str(self.checkpoint_dir)})
+        except Exception:
+            pass
+
         from ultralytics import SAM
 
-        # Map config names to ultralytics model names
-        # "vit_l" / "vit_h" -> "sam2.1_l.pt" (large), "vit_b" -> "sam2.1_b.pt" (base), etc.
-        model_map = {
-            "vit_l": "sam2.1_l.pt",
-            "vit_h": "sam2.1_l.pt",
-            "vit_b": "sam2.1_b.pt",
-            "vit_s": "sam2.1_s.pt",
-            "vit_t": "sam2.1_t.pt",
-        }
-        model_name = model_map.get(self.model_size, "sam2.1_l.pt")
-        predictor = SAM(model_name)
+        sam2_cfg = self.SAM2_CONFIGS.get(self.model_size, self.SAM2_CONFIGS["vit_l"])
+        ultralytics_name = sam2_cfg["checkpoint"]      # e.g. 'sam2.1_l.pt'
+        official_name = sam2_cfg.get("official_name", ultralytics_name)  # e.g. 'sam2.1_hiera_large.pt'
+
+        # Search order:
+        # 1. ultralytics name in project cache
+        # 2. official name in project cache
+        # 3. Any .pt file in project cache (fallback)
+        # 4. Let ultralytics auto-download
+        import os as _os
+        import glob as _glob
+
+        weight_arg = None
+
+        # Check ultralytics name first
+        candidate1 = _os.path.join(self.checkpoint_dir, ultralytics_name)
+        if _os.path.exists(candidate1):
+            weight_arg = candidate1
+            print(f"[SAM2] Found checkpoint: {ultralytics_name}")
+
+        # Check official name
+        if weight_arg is None and official_name != ultralytics_name:
+            candidate2 = _os.path.join(self.checkpoint_dir, official_name)
+            if _os.path.exists(candidate2):
+                # Rename to ultralytics name
+                try:
+                    _os.rename(candidate2, candidate1)
+                    weight_arg = candidate1
+                    print(f"[SAM2] Renamed {official_name} -> {ultralytics_name}")
+                except OSError:
+                    # Cross-device rename fails; just use the official name
+                    weight_arg = candidate2
+                    print(f"[SAM2] Using checkpoint: {official_name} (rename failed)")
+
+        # Scan for any .pt file as last resort
+        if weight_arg is None:
+            for pt_file in _glob.glob(_os.path.join(self.checkpoint_dir, "*.pt")):
+                if _os.path.basename(pt_file) != ultralytics_name:
+                    print(f"[SAM2] Found alternative checkpoint: {pt_file}, using for {ultralytics_name}")
+                    # Copy to expected location for ultralytics
+                    import shutil
+                    try:
+                        shutil.copy2(pt_file, candidate1)
+                        weight_arg = candidate1
+                    except Exception:
+                        weight_arg = pt_file
+                    break
+
+        # Fall back to auto-download
+        if weight_arg is None:
+            weight_arg = ultralytics_name
+
+        predictor = SAM(weight_arg)
         self._predictor = predictor
-        print(f"[SAM2] Loaded via ultralytics: {model_name}")
+        print(f"[SAM2] Loaded via ultralytics: {predictor.model_name if hasattr(predictor, 'model_name') else weight_arg}")
 
     def _resolve_ckpt_path(self, checkpoint_name: str) -> Optional[str]:
         """
@@ -133,15 +365,11 @@ class SAM2Model:
         sam2_cfg = self.SAM2_CONFIGS.get(self.model_size, self.SAM2_CONFIGS["vit_h"])
         ckpt_name = sam2_cfg["checkpoint"]
 
-        # Resolve the checkpoint path — look in huggingface hub cache
+        # Try to resolve from cache first, otherwise auto-download.
         ckpt_path = self._resolve_ckpt_path(ckpt_name)
         if ckpt_path is None:
-            raise FileNotFoundError(
-                f"SAM2 checkpoint '{ckpt_name}' not found in {self.checkpoint_dir}. "
-                f"Please download it first by running 'huggingface-cli download "
-                f"facebook/sam2.1_hiera_{self.model_size.replace('vit_', '')} {ckpt_name}' "
-                f"or use ultralytics (pip install ultralytics)."
-            )
+            print(f"[SAM2] Checkpoint '{ckpt_name}' not found in cache — downloading...")
+            ckpt_path = self.ensure_downloaded()
 
         try:
             sam2_model = build_sam2(

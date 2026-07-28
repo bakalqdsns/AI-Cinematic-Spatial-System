@@ -17,7 +17,7 @@ const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:
 
 const client = axios.create({
   baseURL: DEFAULT_BACKEND,
-  timeout: 300_000,  // 5 minutes — sequence processing is time-intensive
+  timeout: 30 * 60 * 1000,  // 30 minutes — covers Z-Image + LLM pipelines
 });
 
 // ─── Sequence Analysis ─────────────────────────────────────────────────────────

@@ -699,6 +699,76 @@ class ProjectStore:
     def _motions_dir(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "motions"
 
+    def _scenes_dir(self, project_id: str) -> Path:
+        return self._project_dir(project_id) / "scenes"
+
+    async def save_scene_asset(
+        self,
+        project_id: str,
+        scene_id: str,
+        payload: Optional[dict] = None,
+        *,
+        asset_type: Optional[str] = None,
+        file_data=None,
+        extension: str = "json",
+    ) -> dict:
+        """
+        Save a scene asset bundle to disk.
+
+        Preferred call: ``save_scene_asset(project_id, scene_id, payload=dict)``
+        writes ``<scene_id>_asset.json``.
+
+        Legacy call: ``save_scene_asset(project_id, scene_id, asset_type, file_data, extension)``
+        writes ``<scene_id>_<asset_type>.<ext>`` (single file).
+        """
+        lock = self._get_lock(project_id)
+        async with lock:
+            scenes_dir = self._scenes_dir(project_id)
+            scenes_dir.mkdir(parents=True, exist_ok=True)
+
+            if payload is None and file_data is None and isinstance(asset_type, dict):
+                # Convention 1: payload-only call.
+                payload = asset_type
+                rel_path = scenes_dir / f"{scene_id}_asset.json"
+                abs_path = self._workspace_dir / rel_path
+                import json as _json
+                abs_path.write_text(
+                    _json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            else:
+                rel_path = scenes_dir / f"{scene_id}_{asset_type}.{extension}"
+                abs_path = self._workspace_dir / rel_path
+                if isinstance(file_data, (bytes, bytearray)):
+                    abs_path.write_bytes(bytes(file_data))
+                else:
+                    abs_path.write_text(str(file_data), encoding="utf-8")
+
+            manifest = self._read_manifest(project_id)
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+            return {"success": True, "url": str(rel_path)}
+
+    async def list_scene_assets(self, project_id: str) -> list[dict]:
+        """List every persisted scene asset bundle for a project."""
+        scenes_dir = self._scenes_dir(project_id)
+        if not scenes_dir.is_dir():
+            return []
+        return [
+            {"name": p.name, "url": str(p.relative_to(self._workspace_dir))}
+            for p in sorted(scenes_dir.iterdir())
+            if p.is_file()
+        ]
+
+    async def get_scene_asset(self, project_id: str, scene_id: str) -> Optional[dict]:
+        """Load a single scene asset bundle. Returns None when not found."""
+        scenes_dir = self._scenes_dir(project_id)
+        asset_path = scenes_dir / f"{scene_id}_asset.json"
+        if not asset_path.is_file():
+            return None
+        import json as _json
+        return _json.loads(asset_path.read_text(encoding="utf-8"))
+
     async def create_shot(
         self,
         project_id: str,
@@ -1067,6 +1137,7 @@ class ProjectStore:
     def _write_manifest(self, project_id: str, manifest: ProjectManifest) -> None:
         """原子写入 manifest.json（写临时文件再 rename）。"""
         manifest_path = self._manifest_path(project_id)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = manifest_path.with_suffix(".json.tmp")
         tmp_path.write_text(
             json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
@@ -1078,9 +1149,29 @@ class ProjectStore:
         _os.replace(tmp_path, manifest_path)
 
     def _read_manifest(self, project_id: str) -> ProjectManifest:
-        return self._read_manifest_from_path(self._manifest_path(project_id))
+        # Ensure project directory exists before reading manifest
+        proj_dir = self._project_dir(project_id)
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self._manifest_path(project_id)
+        if manifest_path.is_file():
+            return self._read_manifest_from_path(manifest_path)
+        # If manifest doesn't exist, create a default one
+        manifest = ProjectManifest(
+            project_id=project_id,
+            shot_id="unknown",
+            created_at=_now_iso(),
+            updated_at=_now_iso(),
+            image_width=0,
+            image_height=0,
+            input_hash="",
+            artifacts={},
+        )
+        self._write_manifest(project_id, manifest)
+        return manifest
 
     def _read_manifest_from_path(self, path: Path) -> ProjectManifest:
+        # Ensure parent directory exists before reading
+        path.parent.mkdir(parents=True, exist_ok=True)
         d = json.loads(path.read_text(encoding="utf-8"))
         return ProjectManifest.from_dict(d)
 
@@ -1091,6 +1182,7 @@ class ProjectStore:
     ) -> None:
         """原子写入 shots/<shot_id>/manifest.json（写临时文件再 rename）。"""
         manifest_path = self._shot_manifest_path(project_id, shot_id)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = manifest_path.with_suffix(".json.tmp")
         tmp_path.write_text(
             json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),

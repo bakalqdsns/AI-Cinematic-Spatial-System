@@ -78,10 +78,27 @@ class DashScopeFilmProvider(VideoProvider):
     """
     DashScope wan2.7-i2v API via dashscope.Film.
 
-    Requires DASHSCOPE_API_KEY environment variable.
+    API key resolution order (matches dashscope_client):
+      1. ``dashscope_video_api_key`` setting (set via Settings UI)
+      2. ``DASHSCOPE_VIDEO_API_KEY`` env var
+      3. ``DASHSCOPE_API_KEY`` env var (legacy single-key deployments)
     """
 
     name = "dashscope"
+
+    @staticmethod
+    def _resolve_api_key() -> str:
+        """Resolve the DashScope API key for video calls."""
+        try:
+            from app.config import settings
+            if settings.dashscope_video_api_key:
+                return settings.dashscope_video_api_key
+        except Exception:
+            pass
+        return (
+            os.getenv("DASHSCOPE_VIDEO_API_KEY", "")
+            or os.getenv("DASHSCOPE_API_KEY", "")
+        )
 
     async def generate(
         self,
@@ -104,7 +121,7 @@ class DashScopeFilmProvider(VideoProvider):
 
             task_resp = dashscope.Film.call(
                 request=request,
-                api_key=os.getenv("DASHSCOPE_API_KEY", ""),
+                api_key=self._resolve_api_key(),
             )
             if task_resp.status != 200:
                 logger.warning("[VideoAdapter:DashScope] task creation failed: %s", task_resp.message)

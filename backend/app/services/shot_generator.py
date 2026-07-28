@@ -5,7 +5,7 @@ LLM-powered shot storyboard generation from parsed ScriptData.
 Generates per-scene shot lists with camera movement, shot size, English
 visual prompts, keyframe prompts, and character assignments.
 
-Uses local llama.cpp server (Qwen3.5-9B-GGUF) when available; falls back to
+Uses local llama.cpp server (Qwen2.5-7B-Instruct Q4_K_M GGUF) when available; falls back to
 heuristic generation.
 """
 
@@ -592,12 +592,42 @@ def _fallback_shots(script_data: ScriptData) -> list[Shot]:
                     camera_movement = CameraMovement.TRACKING
                     duration = 3.0
 
+            # Infer emotion from paragraph type and content when LLM didn't set it
+            inferred_emotion = para.emotion or ""
+            if not inferred_emotion:
+                if para.paragraph_type == ParagraphType.DIALOGUE:
+                    if "！" in para.text or "!" in para.text or any(
+                        kw in para.text for kw in ["猛地", "突然", "惊叫", "喊道", "大喊"]
+                    ):
+                        inferred_emotion = "tense"
+                    elif any(
+                        kw in para.text for kw in ["低声", "叹息", "沉默", "轻声", "低声说"]
+                    ):
+                        inferred_emotion = "sad"
+                    else:
+                        inferred_emotion = "calm"
+                elif para.paragraph_type == ParagraphType.NARRATION:
+                    if para.text.startswith("...") or para.text.startswith("……"):
+                        inferred_emotion = "mysterious"
+                    elif any(
+                        kw in para.text for kw in ["回忆", "记得", "曾经", "过去"]
+                    ):
+                        inferred_emotion = "sad"
+                    else:
+                        inferred_emotion = "calm"
+                elif para.paragraph_type == ParagraphType.INNER:
+                    inferred_emotion = "dramatic"
+                elif para.paragraph_type == ParagraphType.ATMOSPHERE:
+                    inferred_emotion = "calm"
+                else:
+                    inferred_emotion = "calm"
+
             # Emotion-based duration override
-            if para.emotion in ("tense", "angry"):
+            if inferred_emotion in ("tense", "angry"):
                 duration = min(duration, 2.5)
-            elif para.emotion in ("sad", "mysterious"):
+            elif inferred_emotion in ("sad", "mysterious"):
                 duration = max(duration, 4.0)
-            elif para.emotion in ("romantic",):
+            elif inferred_emotion in ("romantic",):
                 duration = max(duration, 3.5)
 
             scene_prompt = (
@@ -688,9 +718,22 @@ def generate_scene_transitions(shots: list[Shot]) -> list[SceneTransition]:
     return transitions
 
 
+def _smooth_curve(values: list[float], window: int = 3) -> list[float]:
+    """Apply a sliding average to smooth the intensity curve."""
+    if len(values) <= 1:
+        return values
+    result = []
+    for i in range(len(values)):
+        start = max(0, i - window // 2)
+        end = min(len(values), i + window // 2 + 1)
+        result.append(round(sum(values[start:end]) / (end - start), 3))
+    return result
+
+
 def generate_character_action_sequences(
     shots: list[Shot],
     characters: list[Character],
+    paragraphs: list[StoryParagraph] | None = None,
 ) -> list[CharacterActionSequence]:
     """
     Build per-character action sequences across the shot list.
@@ -698,9 +741,27 @@ def generate_character_action_sequences(
     Each sequence includes:
       - shots: list of shot IDs the character appears in
       - action_sequence_prompt: concatenated English action prompts
-      - intensity_curve: oscillating 0-1 energy values per shot
+      - intensity_curve: 0-1 energy values derived from paragraph emotions,
+        smoothed with a 3-point sliding average
+
+    When paragraphs are not provided (backwards-compatible), falls back to the
+    original oscillating pattern.
     """
+    EMOTION_INTENSITY: dict[str, float] = {
+        "tense": 1.0,
+        "suspenseful": 0.9,
+        "dramatic": 0.85,
+        "exciting": 0.8,
+        "mysterious": 0.6,
+        "romantic": 0.4,
+        "joyful": 0.5,
+        "sad": 0.3,
+        "calm": 0.2,
+        "peaceful": 0.15,
+    }
+
     sequences: list[CharacterActionSequence] = []
+    para_map: dict[str, StoryParagraph] = {p.scene_id: p for p in (paragraphs or [])}
 
     for char in characters:
         char_shots = [s for s in shots if char.id in s.characters]
@@ -713,11 +774,22 @@ def generate_character_action_sequences(
         ]
         combined = " then ".join(actions)
 
-        # Simple oscillating intensity curve
-        intensity = [
-            round(0.3 + 0.7 * abs((j % 6) / 5 - 0.5), 3)
-            for j in range(len(char_shots))
-        ]
+        if paragraphs:
+            # Build curve from paragraph emotions
+            raw_curve = [
+                EMOTION_INTENSITY.get(
+                    para_map.get(s.scene_id, StoryParagraph("", "", "", "", "", "action", "", "", False)).emotion,
+                    0.5,
+                )
+                for s in char_shots
+            ]
+            intensity = _smooth_curve(raw_curve)
+        else:
+            # Fallback: original oscillating pattern
+            intensity = [
+                round(0.3 + 0.7 * abs((j % 6) / 5 - 0.5), 3)
+                for j in range(len(char_shots))
+            ]
 
         sequences.append(CharacterActionSequence(
             character_id=char.id,

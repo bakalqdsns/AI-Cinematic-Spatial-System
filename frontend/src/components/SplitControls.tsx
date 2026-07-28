@@ -1,15 +1,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SplitControls — split image, generate 3D, reset, inpaint
 // ─────────────────────────────────────────────────────────────────────────────
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import type { DepthSplitThresholds } from '../types';
-import { generateBillboard, inpaintImage } from '../services/aicssService';
+import { generateBillboard, inpaintImage, extractRegionBillboard } from '../services/aicssService';
 import { DEFAULT_DEPTH_SPLIT_THRESHOLDS, splitDepthLayers } from '../utils/depthSplit';
 import { InpaintPreviewDialog } from './InpaintPreviewDialog';
 import { DepthSplitPanel } from './DepthSplitPanel';
 import { DioramaSettingsPanel } from './DioramaSettingsPanel';
-import { Scissors, Wand2, RotateCcw, Loader2, CheckCircle, AlertCircle, Layers3 } from 'lucide-react';
+import { Scissors, Wand2, RotateCcw, Loader2, CheckCircle, AlertCircle, Layers3, Pencil, MousePointer2, Trash2, Undo2, Sparkles } from 'lucide-react';
 
 export function SplitControls() {
   const analysisResult = useAppStore((s) => s.analysisResult);
@@ -17,6 +17,7 @@ export function SplitControls() {
   const originalImageBase64 = useAppStore((s) => s.originalImageBase64);
   const originalImageUrl = useAppStore((s) => s.originalImageUrl);
   const assignments = useAppStore((s) => s.assignments);
+  const selectedLayerIndex = useAppStore((s) => s.selectedLayerIndex);
   const billboardAssets = useAppStore((s) => s.billboardAssets);
   const setBillboardAsset = useAppStore((s) => s.setBillboardAsset);
   const setDepthLayerBillboardAsset = useAppStore((s) => s.setDepthLayerBillboardAsset);
@@ -44,6 +45,26 @@ export function SplitControls() {
   const inpaintError = useAppStore((s) => s.inpaintError);
   const setInpaintError = useAppStore((s) => s.setInpaintError);
   const dashscopeApiKey = useAppStore((s) => s.dashscopeApiKey);
+  const regions = useAppStore((s) => s.regions);
+  const drawMode = useAppStore((s) => s.drawMode);
+  const drawPoints = useAppStore((s) => s.drawPoints);
+  const clearDrawPoints = useAppStore((s) => s.clearDrawPoints);
+  const imageWidth = useAppStore((s) => s.imageWidth);
+  const imageHeight = useAppStore((s) => s.imageHeight);
+  const startDrawing = useAppStore((s) => s.startDrawing);
+  const cancelDrawing = useAppStore((s) => s.cancelDrawing);
+  const removeRegion = useAppStore((s) => s.removeRegion);
+  const setRegions = useAppStore((s) => s.setRegions);
+  // Strip pipeline state — read for the "strip next layer" button row.
+  const stripStack = useAppStore((s) => s.stripStack);
+  const currentImageUrl = useAppStore((s) => s.currentImageUrl);
+  const isStripping = useAppStore((s) => s.isStripping);
+  const stripError = useAppStore((s) => s.stripError);
+  const pushStripStep = useAppStore((s) => s.pushStripStep);
+  const undoLastStripStep = useAppStore((s) => s.undoLastStripStep);
+  const resetStripStack = useAppStore((s) => s.resetStripStack);
+  const setStripping = useAppStore((s) => s.setStripping);
+  const setStripError = useAppStore((s) => s.setStripError);
 
   const [splitting, setSplitting] = useState(false);
   const [splitProgress, setSplitProgress] = useState(0);
@@ -53,6 +74,17 @@ export function SplitControls() {
 
   const objects = analysisResult?.objects ?? [];
   const assignedObjects = objects.filter((o) => assignments[o.id] !== undefined);
+  // 当前选中图层（色块）上分配的物体集合。
+  // 这是"补全背景"按钮要抹掉的集合——与 assignedObjects 语义相反：
+  //   - assignedObjects: 所有被分配的物体，handleSplit（抠取 billboard）需要
+  //   - currentLayerObjects: 当前选中图层的物体，inpaint 反向 mask 需要
+  const currentLayerObjects = useMemo(
+    () =>
+      selectedLayerIndex === null
+        ? []
+        : objects.filter((o) => assignments[o.id] === selectedLayerIndex),
+    [objects, assignments, selectedLayerIndex],
+  );
 
   const updateDepthThreshold = (key: keyof DepthSplitThresholds, value: number) => {
     const clamped = Math.max(0, Math.min(255, value));
@@ -86,10 +118,14 @@ export function SplitControls() {
     originalImageUrl ||
     (originalImageBase64 ? `data:image/png;base64,${originalImageBase64}` : '');
 
-  // ─── Compute inverse mask from assigned object polygons ───────────────────
-  // Mask 语义（与 DashScope API 约定一致）：
-  //   - 白色区域（alpha=255）→ 需要被 inpaint 填充的区域（编辑区）
-  //   - 黑色区域（alpha=0）  → 保留原样不动（物体遮罩）
+  // ─── Compute inverse mask from the currently-selected layer ───────────────
+  // Mask 语义（与 LaMa/后端约定一致）：
+  //   - 白色区域（alpha=255）→ 保留原样（其他图层 + 背景）
+  //   - 黑色区域（alpha=0）  → 需要被 inpaint 替换（当前选中图层上的物体）
+  //
+  // 关键反转：原实现把"所有已分配物体"涂黑（keep），与用户心智模型相反。
+  // 现在只把"当前选中图层（selectedLayerIndex）"的物体涂黑（inpaint 区），
+  // 其他图层和未分配的物体 + 背景一律视为保留。
   //
   // 双通道处理的原因：
   //   Canvas 2D 的 fillRect 默认为不透明，getImageData 只能读到 R/G/B，没有 alpha。
@@ -104,15 +140,15 @@ export function SplitControls() {
         canvas.height = img.naturalHeight;
         const ctx = canvas.getContext('2d')!;
 
-        // White background = entire image is edit area by default
+        // White background = entire image is keep area by default
         ctx.fillStyle = 'white';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Draw assigned object polygons in black = keep area
+        // Draw CURRENT-layer object polygons in black = area to inpaint
         ctx.fillStyle = 'black';
         ctx.globalCompositeOperation = 'source-over';
 
-        for (const obj of assignedObjects) {
+        for (const obj of currentLayerObjects) {
           const poly = obj.polygon;
           if (poly.length < 3) continue;
           ctx.beginPath();
@@ -126,16 +162,27 @@ export function SplitControls() {
           ctx.fill();
         }
 
-        // Create RGBA canvas: alpha channel = canvas luminance
-        // black (keep) -> alpha=0, white (edit) -> alpha=255
+        // Create RGBA canvas: alpha channel carries the inpaint mask.
+        // LaMa semantics: alpha=255 = inpaint target, alpha=0 = preserve.
+        //
+        // In our grayscale canvas:
+        //   - black (polygon interior) = area to inpaint (we want to erase these objects)
+        //   - white (rest of image)    = area to keep
+        //
+        // So map: black -> alpha=255 (inpaint), white -> alpha=0 (preserve).
+        // (Previous version had this inverted, which told LaMa to repaint
+        //  the *whole* image and explain why the inpaint result looked like
+        //  the whole scene was hallucinated.)
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const rgba = ctx.createImageData(canvas.width, canvas.height);
         for (let i = 0; i < imageData.data.length; i += 4) {
           const gray = imageData.data[i]; // R channel (all same: 0 or 255)
-          rgba.data[i] = 255;       // R
-          rgba.data[i + 1] = 255;   // G
-          rgba.data[i + 2] = 255;   // B
-          rgba.data[i + 3] = gray;  // A: 255=white=edit, 0=black=keep
+          rgba.data[i] = 255;     // R
+          rgba.data[i + 1] = 255; // G
+          rgba.data[i + 2] = 255; // B
+          // Invert: gray=0 (black polygon → inpaint target) → alpha=255
+          //         gray=255 (white background → preserve)         → alpha=0
+          rgba.data[i + 3] = 255 - gray;
         }
         ctx.putImageData(rgba, 0, 0);
 
@@ -145,14 +192,14 @@ export function SplitControls() {
       img.onerror = () => reject(new Error('Failed to load image for mask generation'));
       img.src = effectiveImageUrl;
     });
-  }, [effectiveImageUrl, assignedObjects]);
+  }, [effectiveImageUrl, currentLayerObjects]);
 
-  // ─── Generate auto-prompt from scene graph ────────────────────────────────
+  // ─── Generate auto-prompt for the current layer being inpainted ───────────
   const generatePrompt = useCallback((): string => {
-    if (!analysisResult) return '保持主体结构，自然填补背景区域';
-    const labels = assignedObjects.map((o) => o.classLabel).join('、');
-    return `保留${labels || '主体'}，自然填补背景区域`;
-  }, [analysisResult, assignedObjects]);
+    if (currentLayerObjects.length === 0) return '自然填补空白区域';
+    const labels = currentLayerObjects.map((o) => o.classLabel).join('、');
+    return `结合周围环境，自然替换/补全 ${labels || '当前图层物体'} 的区域`;
+  }, [currentLayerObjects]);
 
   // ─── Split Image ─────────────────────────────────────────────────────────
   const handleSplit = async () => {
@@ -185,7 +232,12 @@ export function SplitControls() {
   // API Key 检查放在最前面：在 UI 交互触发时就尽早失败，避免走到网络请求才发现问题
   // 注意：检查的是 dashscopeApiKey store 状态，若用户从未设置或未保存，此处直接拦截
   const handleSplitAndInpaint = async () => {
-    if (!effectiveImageUrl || assignedObjects.length === 0) return;
+    // 防御性：UI 已禁用按钮，但函数本身也要拦截 selectedLayerIndex === null，
+    // 避免误传空 mask 给 LaMa。
+    if (!effectiveImageUrl || selectedLayerIndex === null || currentLayerObjects.length === 0) {
+      setInpaintError('请先在左侧分组里选择目标图层，并把至少一个物体分配到该图层');
+      return;
+    }
 
     if (!dashscopeApiKey) {
       setInpaintError('请先在顶部输入 DashScope API Key');
@@ -210,6 +262,205 @@ export function SplitControls() {
       setInpaintLoading(false);
     }
   };
+
+  // ─── Region-based inpaint ─────────────────────────────────────────────────
+  // Inpaint all regions: each region uses its own polygon as the mask.
+  // For occlusion-aware inpaint, we need the depth map — loaded here inline.
+  const handleRegionInpaint = useCallback(async () => {
+    if (!effectiveImageUrl || regions.length === 0) return;
+    if (!dashscopeApiKey) {
+      setInpaintError('请先在顶部输入 DashScope API Key');
+      return;
+    }
+
+    setInpaintLoading(true);
+    setInpaintError(null);
+    setInpaintPreview(null);
+
+    try {
+      const { loadDepthMapImageData } = await import('../utils/depthUtils');
+      const { computeSimpleMask } = await import('../utils/inpaintMask');
+
+      const depthMapUrl = analysisResult?.depthMapUrl;
+      const depthData = depthMapUrl
+        ? await loadDepthMapImageData(depthMapUrl)
+        : null;
+
+      // Inpaint each region one by one
+      for (let i = 0; i < regions.length; i++) {
+        const region = regions[i];
+        if (depthData) {
+          const maskUrl = computeOcclusionAwareMask(region, depthData, imageWidth, imageHeight);
+          const prompt = `结合周围环境，自然替换/补全 ${region.depthLayer} 区域的细节`;
+          const result = await inpaintImage(effectiveImageUrl, maskUrl, prompt);
+          setInpaintPreview(result);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setInpaintError(msg);
+      console.error('Region inpaint failed:', err);
+    } finally {
+      setInpaintLoading(false);
+    }
+  }, [effectiveImageUrl, regions, dashscopeApiKey, analysisResult, imageWidth, imageHeight]);
+
+  // ─── Strip pipeline: peel one layer ──────────────────────────────────────
+  // Each invocation:
+  //   1. Samples the depth of the current polygon (kept as the depthValue for this layer).
+  //   2. Calls extractRegionBillboard on currentImageUrl + the polygon → layer's RGBA billboard.
+  //   3. Builds an occlusion-aware inpaint mask (keeps the target's foreground pixels,
+  //      inpaint only the occluded interior).
+  //   4. Calls inpaintImage on currentImageUrl + mask → result.
+  //   5. Pushes a StripStep and replaces currentImageUrl with the inpaint result.
+  // After this completes, the canvas displays the image with this layer erased,
+  // and the user can draw the next polygon (typically picking pixels of the next
+  // depth layer that are now visible).
+  const handleStripNextStep = useCallback(async () => {
+    // Strip pipeline: the currently drawn polygon IS the layer to peel.
+    // We don't require drawMode === 'drawing' so that the user can either:
+    //   - click points → click "剥离下一步" directly (no Enter needed), or
+    //   - click points → press Enter to lock the polygon visually → click "剥离下一步"
+    // Previously this checked drawMode, which left the button grey after
+    // Enter cleared the draw points via completeDrawing.
+    if (drawPoints.length < 3) {
+      setStripError('请先在画布上画一个多边形（至少 3 个点）');
+      return;
+    }
+    if (!currentImageUrl) {
+      setStripError('没有可剥离的图片');
+      return;
+    }
+    if (!dashscopeApiKey) {
+      setStripError('请先在顶部输入 DashScope API Key');
+      return;
+    }
+
+    setStripping(true);
+    setStripError(null);
+
+    // Snapshot the current image — this is what we'll inpaint on.
+    const baseImageUrl = currentImageUrl;
+
+    try {
+      // Lazy-load because these are only needed while stripping.
+      const { loadDepthMapImageData, sampleDepthAtPolygon, autoAssignDepthLayer } =
+        await import('../utils/depthUtils');
+      const { computeSimpleMask } = await import('../utils/inpaintMask');
+
+      // 1. Sample depth (+ auto layer) from the analysis depth map.
+      //    Note: depthMapUrl is from the ORIGINAL analysis — we keep it across
+      //    steps because each layer's Z position is determined by the original
+      //    image's depth, not the inpainting result.
+      const depthMapUrl = analysisResult?.depthMapUrl;
+      let depthValue = 128;
+      let depthLayer: import('../types').DepthLayerKey = 'foreground';
+      if (depthMapUrl) {
+        const depthData = await loadDepthMapImageData(depthMapUrl);
+        depthValue = sampleDepthAtPolygon(depthData, drawPoints, imageWidth, imageHeight);
+        depthLayer = autoAssignDepthLayer(depthValue);
+      }
+
+      // 2. Build a LayerRegion for this polygon (used for billboard extraction too).
+      const regionId = `strip-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const region: import('../types').LayerRegion = {
+        id: regionId,
+        polygon: drawPoints,
+        depthLayer,
+        colorIndex: stripStack.length,
+        source: 'manual',
+        depthValue,
+      };
+
+      // 3. Extract the billboard (RGBA PNG) for this layer against the current image.
+      //    This is the texture that will be mounted on the 3D plane later.
+      const billboardUrl = await extractRegionBillboard(baseImageUrl, region);
+
+      // 4. Build the inpaint mask: polygon interior = inpaint target.
+      //
+      //    Semantics for "peel a layer off the image":
+      //      - The polygon outlines the area we want to remove (the layer).
+      //      - LaMa fills the polygon interior with surrounding context (i.e.
+      //        replaces the layer with what should be behind it).
+      //      - The layer itself is preserved separately via extractRegionBillboard
+      //        (server cuts out the polygon region with alpha).
+      //
+      //    We do NOT use depth-aware masking here: the previous implementation
+      //    tried to keep foreground pixels (depth >= layerLow) and only inpaint
+      //    the occluded interior (depth < layerLow). For a foreground polygon
+      //    that is mostly at foreground depth, this produced an empty mask
+      //    (0% non-zero pixels) and the server rejected it. The correct path is
+      //    to paint the polygon interior entirely white so LaMa replaces it
+      //    with background texture; the foreground is recovered via billboard.
+      const maskUrl = computeSimpleMask(
+        drawPoints,
+        imageWidth || 1920,
+        imageHeight || 1080,
+      );
+
+      // 5. Inpaint to produce the next image.
+      const prompt = `基于周围自然环境，合成/补全 ${depthLayer} 区域被遮挡部分的逼真内容`;
+      const inpaintResultUrl = await inpaintImage(baseImageUrl, maskUrl, prompt);
+
+      // 6. Persist the billboard and push the strip step.
+      setBillboardAsset(regionId, billboardUrl);
+      pushStripStep({
+        regionId,
+        baseImageDataUrl: baseImageUrl,
+        inpaintResultUrl,
+        billboardUrl,
+        layerPolygon: drawPoints,
+        depthLayer,
+        depthValue,
+        colorIndex: stripStack.length,
+      });
+
+      // 7. Clear the in-flight polygon so the next strip step starts fresh.
+      //    Done only on success path (after pushStripStep) so the user can
+      //    retry with the same polygon if inpainting failed.
+      clearDrawPoints();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStripError(msg);
+      console.error('Strip step failed:', err);
+    } finally {
+      setStripping(false);
+    }
+  }, [
+    drawPoints,
+    currentImageUrl,
+    dashscopeApiKey,
+    analysisResult,
+    imageWidth,
+    imageHeight,
+    stripStack.length,
+    pushStripStep,
+    setStripping,
+    setStripError,
+    setBillboardAsset,
+    clearDrawPoints,
+  ]);
+
+  // Wrappers around strip-stack actions that also surface errors via setStripError.
+  const handleUndoStripStep = useCallback(() => {
+    try {
+      undoLastStripStep();
+      setStripError(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStripError(msg);
+    }
+  }, [undoLastStripStep, setStripError]);
+
+  const handleResetStripStack = useCallback(() => {
+    try {
+      resetStripStack();
+      setStripError(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setStripError(msg);
+    }
+  }, [resetStripStack, setStripError]);
 
   const handleDepthSplit = useCallback(async (options?: { keepCurrentLayer?: boolean; switchToLayerView?: boolean }) => {
     const keepCurrentLayer = options?.keepCurrentLayer ?? true;
@@ -346,9 +597,11 @@ export function SplitControls() {
   };
 
   const assignedCount = assignedObjects.length;
+  const currentLayerCount = currentLayerObjects.length;
   const hasImage = !!effectiveImageUrl;
   const canSplit = hasImage && assignedCount > 0;
-  const canInpaint = hasImage && assignedCount > 0;
+  // Inpaint 反转语义：必须先在 LayerSelector 选一个图层，并且该图层上有物体
+  const canInpaint = hasImage && selectedLayerIndex !== null && currentLayerCount > 0;
 
   return (
     <>
@@ -512,6 +765,126 @@ export function SplitControls() {
             {depthSplitLoading ? '分层中...' : '按深度分层'}
           </button>
 
+          {/* Freehand polygon draw button */}
+          {analysisResult && (
+            <button
+              onClick={drawMode === 'idle' ? startDrawing : cancelDrawing}
+              className={`
+                flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
+                ${drawMode === 'drawing'
+                  ? 'bg-amber-600 hover:bg-amber-500 text-white active:scale-95'
+                  : 'bg-gray-700 hover:bg-gray-600 text-gray-200 active:scale-95'}
+              `}
+            >
+              {drawMode === 'drawing' ? <MousePointer2 size={16} /> : <Pencil size={16} />}
+              {drawMode === 'drawing'
+                ? `取消绘制${drawPoints.length > 0 ? ` (${drawPoints.length} 点)` : ''}`
+                : '自由选区'}
+            </button>
+          )}
+
+          {/* Inpaint all drawn regions */}
+          {regions.length > 0 && (
+            <button
+              onClick={() => { void handleRegionInpaint(); }}
+              disabled={inpaintLoading || !dashscopeApiKey}
+              className={`
+                flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
+                ${inpaintLoading || !dashscopeApiKey
+                  ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                  : 'bg-orange-600 hover:bg-orange-500 text-white active:scale-95'}
+              `}
+            >
+              {inpaintLoading ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
+              {inpaintLoading ? '补全中...' : '补全选区'}
+              <span className="ml-1 bg-orange-700 rounded px-1.5 py-0.5 text-xs">{regions.length}</span>
+            </button>
+          )}
+
+          {/* Strip pipeline: peel the next layer (near → far). Each press
+              turns the currently drawn polygon into a 3D billboard and
+              replaces the canvas image with the inpainting result, so the
+              next layer's pixels are now visible for the user to outline. */}
+          <div className="flex items-center gap-2 ml-2 pl-2 border-l border-gray-700">
+            <button
+              onClick={() => { void handleStripNextStep(); }}
+              disabled={
+                isStripping ||
+                drawPoints.length < 3 ||
+                !currentImageUrl ||
+                !dashscopeApiKey
+              }
+              data-testid="strip-next-step"
+              className={`
+                flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
+                ${isStripping ||
+                drawPoints.length < 3 ||
+                !currentImageUrl ||
+                !dashscopeApiKey
+                  ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white active:scale-95'}
+              `}
+              title={drawPoints.length < 3
+                ? '请先在画布上画一个多边形（至少 3 个点）'
+                : '使用当前 polygon 剥离一层'}
+            >
+              {isStripping ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+              {isStripping ? '剥离中...' : '剥离下一步'}
+              {drawPoints.length >= 3 && (
+                <span className="ml-1 bg-emerald-700 rounded px-1.5 py-0.5 text-xs">
+                  {drawPoints.length} 点
+                </span>
+              )}
+            </button>
+
+            {drawMode === 'drawing' && drawPoints.length >= 3 && (
+              <span className="text-xs text-emerald-300/80">
+                画完直接点「剥离下一步」即可（无需按 Enter）
+              </span>
+            )}
+
+            <button
+              onClick={handleUndoStripStep}
+              disabled={isStripping || stripStack.length === 0}
+              className={`
+                flex items-center gap-2 px-3 py-2 rounded-lg font-medium text-sm transition-all
+                ${isStripping || stripStack.length === 0
+                  ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                  : 'bg-gray-700 hover:bg-gray-600 text-gray-200 active:scale-95'}
+              `}
+            >
+              <Undo2 size={14} />
+              撤销
+            </button>
+
+            <button
+              onClick={handleResetStripStack}
+              disabled={isStripping || stripStack.length === 0}
+              className={`
+                flex items-center gap-2 px-3 py-2 rounded-lg font-medium text-sm transition-all
+                ${isStripping || stripStack.length === 0
+                  ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                  : 'bg-gray-700 hover:bg-gray-600 text-gray-200 active:scale-95'}
+              `}
+            >
+              <Trash2 size={14} />
+              重置
+            </button>
+
+            {stripStack.length > 0 && (
+              <span className="ml-1 text-xs text-emerald-400 self-center">
+                已剥离 {stripStack.length} 层
+              </span>
+            )}
+          </div>
+
+          {stripError && (
+            <div className="flex items-center gap-2 text-red-400">
+              <AlertCircle size={16} />
+              <span className="text-sm">{stripError}</span>
+            </div>
+          )}
+
           <button
             onClick={handleSplitAndInpaint}
             disabled={splitting || inpaintLoading || !canInpaint}
@@ -524,8 +897,8 @@ export function SplitControls() {
           >
             {inpaintLoading ? <Loader2 size={16} className="animate-spin" /> : <Wand2 size={16} />}
             {inpaintLoading ? '补全中...' : '补全背景'}
-            {assignedCount > 0 && !inpaintLoading && (
-              <span className="ml-1 bg-purple-700 rounded px-1.5 py-0.5 text-xs">{assignedCount}</span>
+            {selectedLayerIndex !== null && currentLayerCount > 0 && !inpaintLoading && (
+              <span className="ml-1 bg-purple-700 rounded px-1.5 py-0.5 text-xs">{currentLayerCount}</span>
             )}
           </button>
 
@@ -547,6 +920,27 @@ export function SplitControls() {
           {analysisResult && assignedCount === 0 && (
             <span className="ml-auto text-xs text-gray-500 self-center">
               Assign objects to layers first
+            </span>
+          )}
+          {analysisResult && selectedLayerIndex === null && assignedCount > 0 && (
+            <span className="ml-auto text-xs text-amber-400 self-center">
+              请先在左侧分组里选择要补全的目标图层
+            </span>
+          )}
+          {analysisResult && selectedLayerIndex !== null && currentLayerCount === 0 && (
+            <span className="ml-auto text-xs text-amber-400 self-center">
+              当前图层（第 {selectedLayerIndex + 1} 组）暂未分配物体，请先点击物体分配到此图层
+            </span>
+          )}
+          {regions.length > 0 && (
+            <span className="ml-2 text-xs text-cyan-400 self-center">
+              {regions.length} 个自由选区
+              <button
+                onClick={() => { if (confirm('清除所有自由选区？')) setRegions([]); }}
+                className="ml-2 text-red-400 hover:text-red-300 underline"
+              >
+                清除
+              </button>
             </span>
           )}
         </div>

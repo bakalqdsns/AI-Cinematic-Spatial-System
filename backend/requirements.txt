@@ -23,7 +23,10 @@ llama-cpp-python>=0.2.0
 # Local Image Generation (Stable Diffusion XL / Z-Image)
 # Diffusers loads Z-Image / SDXL automatically from HuggingFace Hub.
 # Requires: ~6-8GB VRAM (fp16) or ~10GB (bfloat16).
-diffusers>=0.30.0
+# Z-Image support requires a recent diffusers (>=0.35.dev0). We install
+# straight from source so the ZImagePipeline / ZImageImg2ImgPipeline
+# classes are available without waiting for a PyPI release.
+diffusers @ git+https://github.com/huggingface/diffusers.git
 accelerate>=0.25.0
 safetensors>=0.4.0
 

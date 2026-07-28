@@ -6,7 +6,7 @@ Two-pass pipeline:
   Pass 1 — normalize:  raw text  → standard screenplay format
   Pass 2 — parse:       normalized text → structured ScriptData dataclasses
 
-Uses local llama.cpp server (Qwen3.5-9B-GGUF) when available, falls back to heuristics.
+Uses local llama.cpp server (Qwen2.5-7B-Instruct Q4_K_M GGUF) when available, falls back to heuristics.
 """
 
 from __future__ import annotations
@@ -165,6 +165,7 @@ class Scene:
     time: str = "Day"  # "Day", "Night", "Dawn", "Dusk", "Morning", "Evening"
     atmosphere: str = ""  # mood
     estimated_shots: int = 0  # set after paragraph parsing
+    visual_prompt: str = ""  # English prompt used to generate the scene's keyframes
 
     def to_dict(self) -> dict:
         return {
@@ -173,6 +174,7 @@ class Scene:
             "time": self.time,
             "atmosphere": self.atmosphere,
             "estimated_shots": self.estimated_shots,
+            "visual_prompt": self.visual_prompt,
         }
 
     @classmethod
@@ -183,6 +185,7 @@ class Scene:
             time=d.get("time", "Day"),
             atmosphere=d.get("atmosphere", ""),
             estimated_shots=int(d.get("estimated_shots", 0)),
+            visual_prompt=d.get("visual_prompt", "") or "",
         )
 
 
@@ -970,7 +973,7 @@ async def normalize_script(
     """
     Pass 1 — Normalize raw script text into standard screenplay format.
 
-    Uses local llama.cpp server (Qwen3.5-9B-GGUF) when available; falls back to
+    Uses local llama.cpp server (Qwen2.5-7B-Instruct Q4_K_M GGUF) when available; falls back to
     minimal formatting if the call fails.
     """
     system_prompt, user_template = _build_normalize_prompt(language)

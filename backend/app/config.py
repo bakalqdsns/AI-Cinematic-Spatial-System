@@ -17,6 +17,22 @@ CACHE_DIR.mkdir(exist_ok=True)
 os.environ.setdefault("HF_HOME", str(CACHE_DIR / "huggingface"))
 os.environ.setdefault("HF_HUB_CACHE", str(CACHE_DIR / "huggingface" / "hub"))
 os.environ.setdefault("TRANSFORMERS_CACHE", str(CACHE_DIR / "huggingface" / "transformers"))
+# Bump the per-request timeout — huggingface_hub's hard-coded default is 10 s
+# which is too short for multi-hundred-MB checkpoints on slow / proxied
+# networks (manifests as ``WinError 10060``).  Override via HF_HUB_DOWNLOAD_TIMEOUT.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+# Bypass the Xet/CAS (cas-server.xethub.hf.co) reconstruction path.  The CAS
+# service requires auth and cannot be proxied through hf-mirror.com, which is
+# why downloads otherwise return ``401 Unauthorized`` for any LFS-backed
+# repo even when ``HF_ENDPOINT`` is set.  With Xet disabled, huggingface_hub
+# falls back to plain HTTP redirects to ``cdn-lfs-*.hf.co`` (or the mirror
+# equivalent) and downloads succeed.  Must be set BEFORE huggingface_hub is
+# imported anywhere.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+# Use the China HF mirror so downloads don't go through huggingface.co directly
+# (your network blocks huggingface.co; hf-mirror.com and dl.fbaipublicfiles.com are reachable).
+# Override via HF_ENDPOINT env var.
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 # ── CUDA diagnostics ──────────────────────────────────────────────────────────
 _cuda_available = torch.cuda.is_available()
@@ -54,7 +70,7 @@ class Settings(BaseSettings):
     depth_model: str = "depth-anything/Depth-Anything-V2-Large-hf"
     # Grounding DINO model
     grounding_dino_model: str = "IDEA-Research/grounding-dino-base"
-    # SAM2 model size: vit_l (large, -> sam2.1_l.pt), vit_b (base, -> sam2.1_b.pt), vit_s, vit_t
+    # SAM2 model size: vit_l (large, -> sam2.1_hiera_large.pt), vit_b (base, -> sam2.1_hiera_base_plus.pt), vit_s, vit_t
     sam2_model_size: str = "vit_l"
 
     # SAM2 checkpoint paths
@@ -94,22 +110,53 @@ class Settings(BaseSettings):
     dashscope_function: str = "description_edit_with_mask"
     inpaint_timeout: int = 120
 
+    # DashScope API keys — per-component. Each component can have its own key
+    # so users can mix vendors / accounts. Empty string means "fall back to
+    # the DASHSCOPE_API_KEY env var if set, otherwise the call will fail".
+    dashscope_llm_api_key: str = ""
+    dashscope_vlm_api_key: str = ""
+    dashscope_image_api_key: str = ""
+    dashscope_video_api_key: str = ""
+
     # LaMa inpainting model (local, replaces DashScope API)
     lama_checkpoint_dir: Path = CACHE_DIR / "lama"
 
-    # ── Local LLM (llama.cpp Qwen3.5-9B-GGUF) ─────────────────────────────────
-    # Start with: llama-server -hf lmstudio-community/Qwen3.5-9B-GGUF:Q4_K_M
-    #             -c 8192 --host 0.0.0.0 --port 8080
-    llm_base_url: str = "http://localhost:8080/v1"
-    llm_model: str = "qwen3.5-9b"
-    llm_timeout: float = 180.0
+    # ── Model Mode ────────────────────────────────────────────────────────────────
+    # "cloud" (default): use DashScope API for LLM, VLM, image generation
+    # "local": use local models (llama-server, Qwen3-VL, Z-Image-Turbo, etc.)
+    model_mode: str = "cloud"
 
-    # ── Local Image Generation (Stable Diffusion XL / Z-Image) ─────────────────
+    # Per-component mode: overrides model_mode for each category
+    vlm_mode: str = "cloud"      # "cloud" | "local" - controls VLM (scene analysis)
+    image_mode: str = "cloud"    # "cloud" | "local" - controls image generation
+    video_mode: str = "cloud"    # "cloud" | "local" - controls video generation
+
+    # Cloud mode — DashScope model IDs
+    dashscope_llm_model: str = "qwen3.7-plus"
+    dashscope_vlm_model: str = "qwen3-vl-flash-2026-01-22"
+    dashscope_image_model: str = "wan2.7-image-pro"
+
+    # ── Local LLM (llama.cpp Qwen2.5-7B-Instruct Q4_K_M GGUF) ──────────────────
+    # Actual model on disk: Qwen/Qwen2.5-7B-Instruct-GGUF
+    #   qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf + -00002-of-00002.gguf
+    # llama-server is launched with --alias qwen2.5-7b-q4_k_m (server_manager.py)
+    # Start with: llama-server -m <path> -c 8192 -ngl 99 --host 0.0.0.0 --port 8080
+    llm_base_url: str = "http://localhost:8080/v1"
+    llm_model: str = "qwen2.5-7b-q4_k_m"
+    # Generous timeout to cover slow CPU inference / long prompts.
+    # Qwen2.5-7B Q4_K_M GGUF on CPU can take 5+ minutes per request.
+    llm_timeout: float = 600.0
+
+    # ── Local Image Generation (Z-Image-Turbo / Stable Diffusion XL) ────────────
     # Model candidates (tried in order; first available is used):
-    #   Tongyi-MAI/Z-Image  — Z-Image (primary, when available)
+    #   Tongyi-MAI/Z-Image-Turbo  — Z-Image distilled (primary, fast, 9 steps, cfg=0.0)
+    #   Tongyi-MAI/Z-Image         — Z-Image base (slower, higher quality)
     #   stabilityai/stable-diffusion-xl-base-1.0  — SDXL (fallback)
-    image_model_id: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    image_model_id: str = "Tongyi-MAI/Z-Image-Turbo"
     image_dtype: str = "bfloat16"  # "float16" | "bfloat16" | "float32"
+    # Where Z-Image-Turbo / SDXL weights live on disk.  The loader writes
+    # there so HF Hub cache + ModelScope mirror both end up at the same path.
+    image_checkpoint_dir: Path = CACHE_DIR / "z-image"
 
     # ── Video Generation Provider ────────────────────────────────────────────────
     # Options:
@@ -140,6 +187,8 @@ settings = Settings()
 # Convenience
 DEVICE = settings.device
 print(f"[AICSS Config] Device: {DEVICE}")
+print(f"[AICSS Config] Model mode: {settings.model_mode} (cloud={settings.dashscope_llm_model} | local={settings.llm_model})")
+print(f"[AICSS Config] VLM mode: {settings.vlm_mode} | Image mode: {settings.image_mode} | Video mode: {settings.video_mode}")
 print(f"[AICSS Config] Depth model: {settings.depth_model}")
 print(f"[AICSS Config] SAM2 size: {settings.sam2_model_size}")
 print(f"[AICSS Config] VLM model: {settings.vlm_model}")

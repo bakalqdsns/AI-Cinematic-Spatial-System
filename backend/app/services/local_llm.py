@@ -1,7 +1,10 @@
 """
-Local LLM Client — llama.cpp Qwen3.5-9B-GGUF
+Local LLM Client — llama.cpp Qwen2.5-7B-Instruct Q4_K_M GGUF
 
 Uses llama.cpp's OpenAI-compatible /chat/completions endpoint served by llama-server.
+
+In cloud mode (use_cloud=True), this client is not used; instead DashScope API
+handles LLM requests via DashScopeClient.
 
 Usage:
     client = LocalLLMClient()
@@ -29,7 +32,7 @@ def _record_llm_usage():
 
 # ── Default config ──────────────────────────────────────────────────────────────
 DEFAULT_BASE_URL = "http://localhost:8080/v1"
-DEFAULT_MODEL = "qwen3.5-9b"
+DEFAULT_MODEL = "qwen2.5-7b-q4_k_m"
 
 # ── Global concurrency limiter ────────────────────────────────────────────────
 # llama.cpp server is single-threaded by default — concurrent /v1/chat
@@ -190,18 +193,126 @@ class LocalLLMClient:
 # ── Module-level singleton (used by services) ──────────────────────────────────
 
 _llm_client: Optional[LocalLLMClient] = None
+_use_cloud: bool = False  # Set to True in cloud mode to route through DashScopeClient
 
 
-def get_llm_client() -> LocalLLMClient:
-    """Return the shared LocalLLMClient singleton."""
-    global _llm_client
+def get_llm_client() -> "LocalLLMClient | DashScopeProxy":
+    """Return the shared LLM client singleton.
+
+    When use_cloud=True, returns a proxy that delegates to DashScopeClient;
+    otherwise returns the local llama-server LocalLLMClient.
+    """
+    global _llm_client, _use_cloud
+    if _use_cloud:
+        from app.services.dashscope_client import get_dashscope_client
+        return DashScopeProxy(get_dashscope_client())
     if _llm_client is None:
-        _llm_client = LocalLLMClient()
+        # Lazy import to avoid circular dependency at module load time.
+        from app.config import settings as _settings
+        _llm_client = LocalLLMClient(
+            base_url=_settings.llm_base_url,
+            model=_settings.llm_model,
+            timeout=_settings.llm_timeout,
+        )
     return _llm_client
 
 
-def configure_llm(base_url: str, model: str) -> None:
-    """Reconfigure the shared client (e.g. from Settings)."""
+def set_use_cloud(enabled: bool) -> None:
+    """Toggle cloud mode. When enabled, LLM calls route through DashScopeClient."""
+    global _use_cloud
+    _use_cloud = enabled
+
+
+def configure_llm(base_url: str, model: str, timeout: float = 600.0) -> None:
+    """Reconfigure the shared local LLM client (e.g. from Settings)."""
     global _llm_client
-    _llm_client = LocalLLMClient(base_url=base_url, model=model)
-    logger.info("[LocalLLM] Configured: base_url=%s model=%s", base_url, model)
+    _llm_client = LocalLLMClient(base_url=base_url, model=model, timeout=timeout)
+    logger.info("[LocalLLM] Configured: base_url=%s model=%s timeout=%.1fs", base_url, model, timeout)
+
+
+class DashScopeProxy:
+    """
+    Drop-in proxy that wraps DashScopeClient with the same interface as LocalLLMClient.
+
+    Allows callers that expect LocalLLMClient to transparently switch to DashScope
+    by replacing the client without changing their code.
+
+    Auto-fallback: if DashScope raises an HTTP error, switches to the local
+    llama.cpp client for this request (and future requests in this process).
+    """
+
+    def __init__(self, client):
+        self._client = client
+        self._local_client: Optional[LocalLLMClient] = None
+
+    def _get_local_client(self) -> LocalLLMClient:
+        """Lazily build a local LLM client from current settings."""
+        if self._local_client is None:
+            from app.config import settings as _settings
+
+            self._local_client = LocalLLMClient(
+                base_url=_settings.llm_base_url,
+                model=_settings.llm_model,
+                timeout=_settings.llm_timeout,
+            )
+            logger.info("[DashScopeProxy] Auto-fallback: local client configured for %s/%s",
+                         _settings.llm_base_url, _settings.llm_model)
+        return self._local_client
+
+    async def chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+        stop: Optional[list[str]] = None,
+    ) -> str:
+        try:
+            return self._client.chat(messages, temperature=temperature, max_tokens=max_tokens)
+        except Exception as exc:
+            # Only attempt fallback while still in cloud mode to avoid
+            # cascading switches if local also fails.
+            global _use_cloud
+            if not _use_cloud:
+                raise
+
+            logger.warning(
+                "[DashScopeProxy] DashScope failed (%s: %s). Falling back to local LLM.",
+                type(exc).__name__, exc,
+            )
+            # Prevent other concurrent requests from also triggering fallback.
+            set_use_cloud(False)
+            return await self._get_local_client().chat(
+                messages, temperature=temperature, max_tokens=max_tokens,
+            )
+
+    async def complete(
+        self,
+        prompt: str,
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+        stop: Optional[list[str]] = None,
+    ) -> str:
+        try:
+            return await self.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            global _use_cloud
+            if not _use_cloud:
+                raise
+
+            logger.warning(
+                "[DashScopeProxy] DashScope complete failed (%s: %s). Falling back to local LLM.",
+                type(exc).__name__, exc,
+            )
+            set_use_cloud(False)
+            return await self._get_local_client().complete(
+                prompt, temperature=temperature, max_tokens=max_tokens,
+            )
+
+    async def is_alive(self) -> bool:
+        if self._local_client is not None:
+            return await self._local_client.is_alive()
+        return True  # DashScope API available when no fallback has occurred

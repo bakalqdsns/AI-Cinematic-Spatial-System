@@ -14,6 +14,27 @@ from app.config import settings
 from app.models.hf_compat import auth_kwargs
 
 
+def _snapshot_download_hf(model_name: str) -> str:
+    """
+    Download a HuggingFace model via snapshot_download (through hf-mirror.com)
+    and return the local snapshot directory.  Raises on failure.
+    """
+    import os as _os
+    _os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+    _os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+    from huggingface_hub import snapshot_download
+    token_kwargs = auth_kwargs(settings.hf_token)
+    cache_dir = str(settings.depth_checkpoint_dir)
+    local_dir = snapshot_download(
+        repo_id=model_name,
+        cache_dir=cache_dir,
+        **token_kwargs,
+    )
+    return local_dir
+
+
 class DepthModel:
     """
     Depth Anything V2 Large via HuggingFace Transformers.
@@ -37,26 +58,53 @@ class DepthModel:
         self._processor = None
         self._model = None
 
+    def ensure_downloaded(self) -> str:
+        """
+        Ensure the DepthAnything V2 checkpoint is on disk.  Returns the
+        snapshot directory path that ``from_pretrained`` can use with
+        ``local_files_only=True``.
+        """
+        print(f"[DepthModel] Ensuring {self.model_name} is on disk ...")
+        path = _snapshot_download_hf(self.model_name)
+        print(f"[DepthModel] Snapshot ready: {path}")
+        return path
+
     def load(self):
-        """Load model and processor from local cache (offline-first)."""
-        print(f"[DepthModel] Loading {self.model_name} on {self.device} (local only)...")
-        # transformers >= 4.43 renamed `use_auth_token` -> `token`; some model
-        # classes (e.g. DepthAnythingForDepthEstimation) don't forward unknown
-        # kwargs into __init__, so we must only pass the kwarg the installed
-        # version understands.
+        """Load model and processor. Tries online download first, falls back to local cache."""
+        print(f"[DepthModel] Loading {self.model_name} on {self.device}...")
         token_kwargs = auth_kwargs(settings.hf_token)
-        self._processor = AutoImageProcessor.from_pretrained(
-            self.model_name,
-            local_files_only=True,
-            **token_kwargs,
-        )
-        self._model = AutoModelForDepthEstimation.from_pretrained(
-            self.model_name,
-            local_files_only=True,
-            **token_kwargs,
-        )
-        self._model.to(self.device)
-        self._model.eval()
+        loaded = False
+
+        # Phase 1: try online download (enables auto-download on first run)
+        for phase, local_only in enumerate(["online (auto-download)", "local cache"], 1):
+            try:
+                print(f"[DepthModel]   phase {phase}: {local_only}...")
+                self._processor = AutoImageProcessor.from_pretrained(
+                    self.model_name,
+                    local_files_only=local_only,
+                    **token_kwargs,
+                )
+                self._model = AutoModelForDepthEstimation.from_pretrained(
+                    self.model_name,
+                    local_files_only=local_only,
+                    **token_kwargs,
+                )
+                self._model.to(self.device)
+                self._model.eval()
+                print(f"[DepthModel]   ✓ loaded from {local_only}")
+                loaded = True
+                break
+            except FileNotFoundError:
+                print(f"[DepthModel]   ✗ not found in {local_only}, trying next...")
+                self._processor = None
+                self._model = None
+                continue
+
+        if not loaded:
+            raise FileNotFoundError(
+                f"Depth model '{self.model_name}' not found locally and could not be "
+                f"downloaded. Check network / HF_TOKEN / proxy settings."
+            )
         print("[DepthModel] Loaded.")
 
     def predict(self, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
