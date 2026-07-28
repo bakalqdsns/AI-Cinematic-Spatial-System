@@ -306,7 +306,7 @@ async def generate_image(
 
 async def generate_video(
     prompt: str,
-    model: str = "wan2.7-i2v",
+    model: str = "wanx-i2v",
     first_frame_b64: Optional[str] = None,
     last_frame_b64: Optional[str] = None,
     duration: float = 5.0,

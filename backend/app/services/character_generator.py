@@ -151,6 +151,8 @@ async def generate_character_reference(
     character: Character,
     visual_prompt: Optional[str] = None,
     provider: str = "local",
+    *,
+    size: Optional[str] = None,
 ) -> Optional[str]:
     """
     Generate character reference image.
@@ -162,11 +164,12 @@ async def generate_character_reference(
         prompt = await generate_visual_prompt(character)
 
     image_mode = _get_image_mode()
+    out_size = size or _default_character_size()
 
     if image_mode == "cloud":
-        return await _generate_via_cloud(prompt)
+        return await _generate_via_cloud(prompt, size=out_size)
     else:
-        return await _generate_via_local(prompt)
+        return await _generate_via_local(prompt, size=out_size)
 
 
 # ── Image: three-view ──────────────────────────────────────────────────────────
@@ -178,6 +181,7 @@ async def generate_character_three_view(
     reference_image: Optional[str] = None,
     seed: Optional[int] = None,
     max_retries: int = 2,
+    size: Optional[str] = None,
 ) -> dict[str, Optional[str]]:
     """
     Generate three-view (front/side/back) character reference images.
@@ -199,6 +203,7 @@ async def generate_character_three_view(
         base_prompt = await generate_visual_prompt(character)
 
     results: dict[str, Optional[str]] = {"front": None, "side": None, "back": None}
+    out_size = size or _default_character_size()
 
     # ── Step 1: anchor with reference image (front view) ─────────────────────
     if reference_image:
@@ -210,7 +215,9 @@ async def generate_character_three_view(
             f"{base_prompt}, character sheet, front view, facing camera, neutral pose, "
             f"full body, white background, concept art, anime style, high detail"
         )
-        anchor_b64 = await _generate_with_retry(anchor_prompt, label=f"{character.id}:anchor", seed=seed)
+        anchor_b64 = await _generate_with_retry(
+            anchor_prompt, label=f"{character.id}:anchor", seed=seed, size=out_size,
+        )
         results["front"] = anchor_b64
 
     # ── Step 2: side / back views via img2img of the anchor ──────────────────
@@ -239,17 +246,19 @@ async def _generate_with_retry(
     label: str,
     seed: Optional[int] = None,
     max_retries: int = 2,
+    size: Optional[str] = None,
 ) -> Optional[str]:
     """Generate via txt2img with retry/backoff."""
     last_exc = None
     image_mode = _get_image_mode()
+    out_size = size or _default_character_size()
 
     for attempt in range(max_retries + 1):
         try:
             if image_mode == "cloud":
-                return await _generate_via_cloud(prompt)
+                return await _generate_via_cloud(prompt, size=out_size)
             else:
-                return await _generate_via_local(prompt, seed=seed)
+                return await _generate_via_local(prompt, seed=seed, size=out_size)
         except Exception as e:
             last_exc = e
             logger.warning(
@@ -299,6 +308,8 @@ async def generate_character_variation(
     character: Character,
     variation_prompt: str,
     reference_image_b64: Optional[str] = None,
+    *,
+    size: Optional[str] = None,
 ) -> Optional[str]:
     """
     Generate character wardrobe/outfit variation.
@@ -306,28 +317,56 @@ async def generate_character_variation(
     Returns base64 image.
     """
     image_mode = _get_image_mode()
+    size = size or _default_character_size()
 
     if image_mode == "cloud":
-        return await _generate_via_cloud(variation_prompt)
+        return await _generate_via_cloud(variation_prompt, size=size)
 
     if reference_image_b64:
         return await _generate_via_local_with_reference(variation_prompt, reference_image_b64)
     else:
-        return await _generate_via_local(variation_prompt)
+        return await _generate_via_local(variation_prompt, size=size)
 
 
 # ── Internal image generation helpers ────────────────────────────────────────────
+
+def _default_character_size() -> str:
+    """Default portrait size for character generation (e.g. '720*1280' → 9:16)."""
+    from app.config import settings
+    return getattr(settings, "image_size_character", "720*1280") or "720*1280"
+
+
+def _default_scene_size() -> str:
+    """Default landscape size for scene / keyframe generation (e.g. '1280*720')."""
+    from app.config import settings
+    return getattr(settings, "image_size_scene", "1280*720") or "1280*720"
+
+
+def _parse_size_to_tuple(size: str) -> tuple[int, int]:
+    """Convert "WIDTH*HEIGHT" → (W, H) tuple. Falls back to (1024, 1024)."""
+    if not size or "*" not in str(size):
+        return (1024, 1024)
+    try:
+        w_str, h_str = str(size).split("*", 1)
+        return (max(1, int(w_str)), max(1, int(h_str)))
+    except (ValueError, TypeError):
+        return (1024, 1024)
+
 
 async def _generate_via_local(
     prompt: str,
     *,
     seed: Optional[int] = None,
+    size: Optional[str] = None,
 ) -> Optional[str]:
     """Generate image via local Diffusers pipeline (SDXL / Z-Image)."""
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
-        image = await asyncio.to_thread(generator.generate, prompt, seed=seed)
+        size_tuple = _parse_size_to_tuple(size) if size else None
+        image = await asyncio.to_thread(
+            generator.generate, prompt, seed=seed, size=size_tuple,
+        )
         if image is not None:
             return generator.pil_to_base64(image)
     except Exception as e:
@@ -356,7 +395,7 @@ async def _generate_via_local_with_reference(
     return None
 
 
-async def _generate_via_cloud(prompt: str) -> Optional[str]:
+async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Optional[str]:
     """
     Generate image via DashScope ImageSynthesis API.
 
@@ -365,8 +404,9 @@ async def _generate_via_cloud(prompt: str) -> Optional[str]:
     try:
         from app.services.dashscope_client import get_dashscope_client
         client = get_dashscope_client()
+        out_size = size or _default_character_size()
         urls = await asyncio.to_thread(
-            client.generate_image, prompt, size="1024*1024", n=1,
+            client.generate_image, prompt, size=out_size, n=1,
         )
         if not urls:
             return None

@@ -42,9 +42,9 @@ class SettingsUpdate(BaseModel):
     dashscope_vlm_api_key: str | None = Field(None, description="DashScope API key for VLM (vision) calls")
     dashscope_image_api_key: str | None = Field(None, description="DashScope API key for image generation")
     dashscope_video_api_key: str | None = Field(None, description="DashScope API key for video generation")
-    dashscope_llm_model: str | None = Field(None, description="DashScope LLM model ID (e.g. 'qwen3.7-plus')")
-    dashscope_vlm_model: str | None = Field(None, description="DashScope VLM model ID (e.g. 'qwen3-vl-flash-2026-01-22')")
-    dashscope_image_model: str | None = Field(None, description="DashScope image model ID (e.g. 'wan2.7-image-pro')")
+    dashscope_llm_model: str | None = Field(None, description="DashScope LLM model ID (e.g. 'qwen-plus')")
+    dashscope_vlm_model: str | None = Field(None, description="DashScope VLM model ID (e.g. 'qwen-vl-chat-v1')")
+    dashscope_image_model: str | None = Field(None, description="DashScope image model ID (e.g. 'wanx-v1')")
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

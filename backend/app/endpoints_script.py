@@ -16,6 +16,7 @@ Provides:
 
 Reference: docs/API_PROTOCOL_v2.md Section 8 (Script & Motion workflow)
 """
+import base64
 import logging
 import uuid
 from typing import Optional
@@ -81,6 +82,22 @@ from app.services.project_store import project_store
 logger = logging.getLogger("aicss")
 
 router = APIRouter(prefix="/v2/scripts", tags=["Script & Motion"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _strip_data_url(b64: str) -> str:
+    """
+    去掉 base64 字符串开头的 ``data:image/png;base64,`` 前缀。
+    """
+    if not b64:
+        return b64 or ""
+    if "," in b64 and b64.startswith("data:"):
+        return b64.split(",", 1)[1]
+    return b64
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,8 +318,20 @@ async def api_normalize_and_parse(request: ParseScriptRequest):
     # Pass 2: Parallel parse (4 LLM calls fired concurrently)
     script_data = await parse_script(normalized, lang)
 
-    project_id = request.project_id
     serialized = serialize_script_data(script_data)
+
+    # If no project_id was supplied, auto-derive one from the script title:
+    # <timestamp>_<slugified_title>. This keeps the workspace folder
+    # human-readable while remaining unique.
+    project_id = request.project_id
+    if not project_id:
+        try:
+            from app.services.project_store import make_project_id
+            project_id = make_project_id(script_data.title or None)
+            logger.info(f"[script] auto-derived project_id: {project_id}")
+        except Exception as e:
+            logger.warning(f"[script] failed to auto-derive project_id: {e}")
+            project_id = None
 
     # Save to project store if project_id provided
     if project_id:
@@ -609,6 +638,9 @@ async def api_generate_three_view(request: GenerateThreeViewRequest):
                 project_id,
                 request.character_id,
                 payload=serialize_character_asset(asset),
+                character_name=request.character_name or request.character_id,
+                action_name="three_view",
+                frame_index=0,
             )
         except Exception as e:
             logger.warning(f"[script] Failed to persist character asset: {e}")
@@ -644,12 +676,11 @@ async def api_generate_variation(request: GenerateVariationRequest):
             await project_store.add_character_variation(
                 project_id,
                 request.character_id,
-                {
-                    "id": variation_id,
-                    "name": request.variation_prompt[:50],
-                    "visual_prompt": request.variation_prompt,
-                    "image": image,
-                },
+                variation_id,
+                base64.b64decode(_strip_data_url(image)),
+                extension="png",
+                character_name=request.character_name or None,
+                action_name="variation",
             )
         except Exception as e:
             logger.warning(f"[script] Failed to persist variation: {e}")
@@ -771,6 +802,7 @@ async def api_generate_scene_asset(request: GenerateSceneAssetRequest):
             await project_store.save_scene_asset(
                 request.project_id, scene.id,
                 payload=serialize_scene_asset(asset),
+                scene_name=request.location or scene.id,
             )
         except Exception as e:
             logger.warning(f"[script] Failed to persist scene asset: {e}")
@@ -849,8 +881,12 @@ async def api_generate_motion(request: GenerateMotionRequest):
         try:
             await project_store.save_motion_sequence(
                 project_id,
+                request.character_id,
                 request.shot_id,
                 serialize_motion_sequence(motion),
+                character_name=request.character_name or request.character_id,
+                action_name=request.action_prompt or "motion",
+                frame_index=0,
             )
         except Exception as e:
             logger.warning(f"[script] Failed to persist motion sequence: {e}")

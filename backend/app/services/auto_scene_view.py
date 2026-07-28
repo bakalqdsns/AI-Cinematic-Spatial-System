@@ -104,6 +104,7 @@ async def auto_generate_scene_assets_for_project(
                 try:
                     await project_store.save_scene_asset(
                         project_id, scene.id, payload=serialised,
+                        scene_name=scene.location or scene.id,
                     )
                 except Exception as e:
                     logger.warning(

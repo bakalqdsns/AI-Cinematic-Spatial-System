@@ -57,6 +57,13 @@ else:
     print("=" * 60)
 
 class Settings(BaseSettings):
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+        "env_prefix": "AICSS_",
+    }
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
@@ -132,9 +139,9 @@ class Settings(BaseSettings):
     video_mode: str = "cloud"    # "cloud" | "local" - controls video generation
 
     # Cloud mode — DashScope model IDs
-    dashscope_llm_model: str = "qwen3.7-plus"
-    dashscope_vlm_model: str = "qwen3-vl-flash-2026-01-22"
-    dashscope_image_model: str = "wan2.7-image-pro"
+    dashscope_llm_model: str = "qwen-plus"
+    dashscope_vlm_model: str = "qwen-vl-chat-v1"
+    dashscope_image_model: str = "wanx-v1"
 
     # ── Local LLM (llama.cpp Qwen2.5-7B-Instruct Q4_K_M GGUF) ──────────────────
     # Actual model on disk: Qwen/Qwen2.5-7B-Instruct-GGUF
@@ -158,9 +165,16 @@ class Settings(BaseSettings):
     # there so HF Hub cache + ModelScope mirror both end up at the same path.
     image_checkpoint_dir: Path = CACHE_DIR / "z-image"
 
+    # ── Default output sizes per asset type ──────────────────────────────────────
+    # DashScope wanx supports (with full coverage): 1024*1024, 720*1280,
+    # 1280*720. Other models (qwen-image, dalle, local SDXL) typically accept
+    # arbitrary W*H. Both fields accept "WIDTH*HEIGHT" e.g. "1280*720".
+    image_size_scene: str = "1280*720"    # landscape 16:9 — for environment shots
+    image_size_character: str = "720*1280"  # portrait  9:16 — for character ref
+
     # ── Video Generation Provider ────────────────────────────────────────────────
     # Options:
-    #   "dashscope"  — wan2.7-i2v via DashScope API (cloud, high quality)
+    #   "dashscope"  — wanx-i2v via DashScope API (cloud, high quality)
     #   "local_wan"  — wan2.1-i2v local inference (28GB+ VRAM, requires Modelscope)
     #   "svd"        — Stable Video Diffusion (8GB VRAM, degraded quality)
     video_provider: str = "dashscope"
@@ -174,10 +188,6 @@ class Settings(BaseSettings):
     workspace_dir: Path = BASE_DIR / ".workspace"
     project_id_format: str = "{timestamp}_{shot_id}"
 
-    class Config:
-        env_prefix = "AICSS_"
-        extra = "ignore"
-
 
 settings = Settings()
 
@@ -187,7 +197,7 @@ settings = Settings()
 # Convenience
 DEVICE = settings.device
 print(f"[AICSS Config] Device: {DEVICE}")
-print(f"[AICSS Config] Model mode: {settings.model_mode} (cloud={settings.dashscope_llm_model} | local={settings.llm_model})")
+print(f"[AICSS Config] Model mode: {settings.model_mode} (cloud=qwen-plus | local={settings.llm_model})")
 print(f"[AICSS Config] VLM mode: {settings.vlm_mode} | Image mode: {settings.image_mode} | Video mode: {settings.video_mode}")
 print(f"[AICSS Config] Depth model: {settings.depth_model}")
 print(f"[AICSS Config] SAM2 size: {settings.sam2_model_size}")

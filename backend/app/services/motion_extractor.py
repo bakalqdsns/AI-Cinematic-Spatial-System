@@ -3,7 +3,7 @@ Motion Extractor Service
 Generates action videos and extracts character motion as PNG sequences.
 
 Video generation is delegated to VideoProvider backends via video_adapter:
-  - "dashscope"  — DashScope wan2.7-i2v (cloud, high quality)
+  - "dashscope"  — DashScope VideoSynthesis API (wanx_2_1_i2v_plus, cloud, high quality)
   - "local_wan"  — wan2.1-i2v local inference (28GB+ VRAM)
   - "svd"        — Stable Video Diffusion (8GB VRAM, degraded quality)
 

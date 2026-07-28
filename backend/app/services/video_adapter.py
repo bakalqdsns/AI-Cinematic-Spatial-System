@@ -4,7 +4,7 @@ Video Generation Adapter — Pluggable provider layer.
 Provides a unified `VideoProvider` interface for action video generation, with
 multiple backends:
 
-  - "dashscope"  — DashScope wan2.7-i2v API (current production implementation)
+  - "dashscope"  — DashScope VideoSynthesis API (wanx_2_1_i2v_plus, cloud)
   - "local_wan"  — wan2.1-i2v local inference via Modelscope (28GB+ VRAM)
   - "svd"        — Stable Video Diffusion local (8GB VRAM, degraded quality)
 
@@ -76,7 +76,9 @@ class VideoProvider(ABC):
 
 class DashScopeFilmProvider(VideoProvider):
     """
-    DashScope wan2.7-i2v API via dashscope.Film.
+    DashScope VideoSynthesis API via dashscope.VideoSynthesis.
+
+    Uses wanx_2_1_i2v_plus for image-to-video generation (cloud, high quality).
 
     API key resolution order (matches dashscope_client):
       1. ``dashscope_video_api_key`` setting (set via Settings UI)
@@ -85,6 +87,7 @@ class DashScopeFilmProvider(VideoProvider):
     """
 
     name = "dashscope"
+    _model = "wanx_2_1_i2v_plus"
 
     @staticmethod
     def _resolve_api_key() -> str:
@@ -108,36 +111,42 @@ class DashScopeFilmProvider(VideoProvider):
         duration: float = 5.0,
     ) -> Optional[str]:
         try:
-            import dashscope
-            from dashscope.api.entities.dashscope import FilmConcurrentRequest
+            from dashscope import VideoSynthesis
+            import httpx
 
-            request = FilmConcurrentRequest(model="wan2.7-i2v", prompt=prompt)
+            # Convert base64 to data URI for URL parameter
+            def b64_to_data_uri(b64: str) -> str:
+                if b64.startswith("data:"):
+                    return b64
+                return f"data:image/png;base64,{b64}"
+
+            api_key = self._resolve_api_key()
+            call_kwargs: dict = {
+                "model": self._model,
+                "prompt": prompt,
+                "api_key": api_key,
+            }
 
             if start_image_b64:
-                request.add_clip_first_frame(image=start_image_b64, duration=duration)
-
+                call_kwargs["first_frame_url"] = b64_to_data_uri(start_image_b64)
             if end_image_b64:
-                request.add_clip_last_frame(image=end_image_b64, duration=1.0)
+                call_kwargs["last_frame_url"] = b64_to_data_uri(end_image_b64)
 
-            task_resp = dashscope.Film.call(
-                request=request,
-                api_key=self._resolve_api_key(),
-            )
-            if task_resp.status != 200:
+            task_resp = VideoSynthesis.call(**call_kwargs)
+            if task_resp.status_code != 200:
                 logger.warning("[VideoAdapter:DashScope] task creation failed: %s", task_resp.message)
                 return None
 
             task_id = task_resp.output.task_id
             logger.info("[VideoAdapter:DashScope] task created: %s", task_id)
 
-            # 指数退避轮询策略：开始时频繁检查，成功后快速确认
-            # 间隔序列：[5, 10, 15, 20, 30, 30, 30, ...] 最多等待 300s
+            # Poll with exponential backoff
             poll_intervals = [5, 10, 15, 20, 30]
             elapsed = 0
             poll_idx = 0
 
             while elapsed < 300:
-                status_resp = dashscope.Film.fetch(task_id=task_id)
+                status_resp = VideoSynthesis.fetch(task_id=task_id, api_key=api_key)
                 task_status = status_resp.output.task_status
                 if task_status == "succeed":
                     video_url = status_resp.output.video.video_url
@@ -147,7 +156,6 @@ class DashScopeFilmProvider(VideoProvider):
                     logger.warning("[VideoAdapter:DashScope] task failed: %s", status_resp.output)
                     return None
 
-                # 获取当前轮询间隔（指数退避）
                 interval = poll_intervals[min(poll_idx, len(poll_intervals) - 1)]
                 time.sleep(interval)
                 elapsed += interval

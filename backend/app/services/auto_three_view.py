@@ -142,6 +142,9 @@ async def auto_generate_three_views_for_project(
                 try:
                     await project_store.save_character_asset(
                         project_id, char.id, payload=serialised,
+                        character_name=char.name or char.id,
+                        action_name="three_view",
+                        frame_index=0,
                     )
                 except Exception as e:
                     logger.warning(

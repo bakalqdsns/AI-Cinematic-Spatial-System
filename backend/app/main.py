@@ -7,6 +7,16 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 
+# Load .env file before anything else
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path)
+        print(f"[AICSS] Loaded environment from .env")
+except ImportError:
+    pass
+
 # Enable Python's faulthandler at process start so that native crashes
 # (CUDA OOM kill, segfault inside a C extension, …) leave a useful
 # traceback in stderr instead of silently killing the process.  This

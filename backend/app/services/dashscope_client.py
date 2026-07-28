@@ -4,9 +4,9 @@ DashScope API Client — unified LLM + VLM + Image generation.
 This module provides cloud-side model inference via DashScope, as an alternative
 to local models. In "cloud" mode (the default), AICSS uses:
 
-  - LLM:        qwen3.7-plus (via Generation)
-  - VLM:        qwen3-vl-flash-2026-01-22 (via MultiModalConversation)
-  - Image Gen:  wan2.7-image-pro (via ImageSynthesis)
+  - LLM:        qwen-plus (via Generation)
+  - VLM:        qwen-vl-chat-v1 (via MultiModalConversation)
+  - Image Gen:  wanx-v1 (via ImageSynthesis)
 
 Cloud mode avoids launching llama-server and loading local checkpoints, saving
 ~16-22 GB of GPU/CPU memory on machines that don't need local inference.
@@ -42,9 +42,9 @@ import io
 logger = logging.getLogger(__name__)
 
 # Default model IDs (can be overridden at construction or via config)
-DEFAULT_LLM_MODEL = "qwen3.7-plus"
-DEFAULT_VLM_MODEL = "qwen3-vl-flash-2026-01-22"
-DEFAULT_IMAGE_MODEL = "wan2.7-image-pro"
+DEFAULT_LLM_MODEL = "qwen-plus"
+DEFAULT_VLM_MODEL = "qwen-vl-chat-v1"
+DEFAULT_IMAGE_MODEL = "wanx-v1"
 
 
 def _resolve_llm_key() -> str:
@@ -135,8 +135,14 @@ class DashScopeClient:
                     f"DashScope Generation API error {response.status_code}: "
                     f"{getattr(response, 'message', response)}"
                 )
-            choice = response.output.choices[0]
-            return choice.message.content or ""
+            # Handle both response formats
+            output = response.output
+            if hasattr(output, 'choices') and output.choices:
+                return output.choices[0].message.content or ""
+            elif hasattr(output, 'text') and output.text:
+                return output.text
+            else:
+                return str(output)
         except Exception as e:
             logger.error("[DashScopeClient.chat] Error: %s", e)
             raise RuntimeError(f"DashScope chat failed: {e}") from e
@@ -198,7 +204,7 @@ class DashScopeClient:
         n: int = 1,
     ) -> list[str]:
         """
-        Generate images from a text prompt using wan2.7-image-pro.
+        Generate images from a text prompt using wanx-v1 (ImageSynthesis API).
 
         Args:
             prompt: Text description of the desired image.
@@ -229,8 +235,9 @@ class DashScopeClient:
                     f"DashScope ImageSynthesis API error {response.status_code}: "
                     f"{getattr(response, 'message', response)}"
                 )
-            images = response.output.images
-            return [img.url for img in images] if images else []
+            # New API format uses output.results, old uses output.images
+            images = response.output.get("results") or response.output.get("images") or []
+            return [img.get("url") or (img.url if hasattr(img, 'url') else str(img)) for img in images] if images else []
         except Exception as e:
             logger.error("[DashScopeClient.generate_image] Error: %s", e)
             raise RuntimeError(f"DashScope image generation failed: {e}") from e

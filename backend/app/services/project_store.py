@@ -60,6 +60,159 @@ from app.config import settings
 WORKSPACE_DIR: Path = settings.workspace_dir / "projects"
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
+
+# ─── Slug helpers (剧本标题 / 角色名 / 场景名 / 动作名 → 文件夹名) ─────────────
+#
+# 文件夹命名新约定（v3）：
+#
+#   .workspace/projects/<timestamp>_<script_title>/
+#       characters/<character_name>/<action_or_view>/<frame_or_file>
+#       scenes/<scene_name>/<frame_or_kind>_<idx>.<ext>
+#       motions/<character_name>/<action_slug>/frame_<idx>.<ext>
+#       sequences/<sequence_id>.json
+#       shots/<shot_id>/manifest.json
+#
+# 这些 slug 函数会保留 CJK 字符，只剔除跨平台文件系统不允许的字符（< > : " / \ | ? *）。
+# 控制字符与首尾空白会折叠为单下划线，连续 _ 会合并。
+import re as _re_slug
+
+_INVALID_PATH_CHARS = _re_slug.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_COLLAPSE_RE = _re_slug.compile(r"_+")
+_RESERVED_WIN_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def slugify(name: str, *, fallback: str = "unnamed", max_len: int = 80) -> str:
+    """
+    把任意字符串（剧本标题、角色名、场景名、动作名）转换为安全的文件夹名。
+
+    - 保留中英文字符、数字、点、连字符
+    - 剔除文件系统禁用字符 (< > : " / \\ | ? *) 与控制字符
+    - 折叠连续空白与下划线
+    - 长度截断到 max_len（按字符而非字节）
+    - Windows 保留名 (CON/PRN/...) 追加 '_'
+    """
+    if name is None:
+        return fallback
+    s = str(name).strip()
+    if not s:
+        return fallback
+    s = _INVALID_PATH_CHARS.sub("_", s)
+    s = s.replace(" ", "_")
+    s = _COLLAPSE_RE.sub("_", s)
+    s = s.strip("._-")
+    if not s:
+        return fallback
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("._-")
+    if s.upper().split(".")[0] in _RESERVED_WIN_NAMES:
+        s = s + "_"
+    return s
+
+
+def slugify_action(action: str | None, *, default: str = "default") -> str:
+    """
+    动作名（"three_view"、"walking"、"眨眼"）的 slug：
+    全部小写、仅保留 [a-z0-9_\-] 与 CJK，便于作为目录名。
+    """
+    if not action:
+        return default
+    s = _INVALID_PATH_CHARS.sub("_", action.strip())
+    s = _re_slug.sub(r"\s+", "_", s)
+    s = _COLLAPSE_RE.sub("_", s).strip("._-")
+    return s or default
+
+
+def make_project_id(script_title: str | None = None) -> str:
+    """
+    生成项目文件夹名：<timestamp>_<slugified_title>
+
+    title 为空时退化为纯 timestamp；同样保证路径安全。
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if script_title:
+        return f"{ts}_{slugify(script_title)}"
+    return ts
+
+
+def frame_filename(index: int, kind: str | None = None, extension: str = "png") -> str:
+    """
+    帧文件命名：<kind>_<idx:03d>.<ext>  or  frame_<idx:03d>.<ext>
+    """
+    idx = max(0, int(index))
+    if kind:
+        return f"{slugify(kind, fallback='frame')}_{idx:03d}.{extension}"
+    return f"frame_{idx:03d}.{extension}"
+
+
+def _strip_data_url(b64: str) -> str:
+    """去掉 ``data:image/png;base64,`` 前缀，返回纯 base64。"""
+    if not b64:
+        return ""
+    if "," in b64 and b64.startswith("data:"):
+        return b64.split(",", 1)[1]
+    return b64
+
+
+def _decode_base64_png(b64: str) -> bytes | None:
+    """
+    把 base64 字符串解码为 PNG bytes；空串或解码失败时返回 None。
+
+    接受 ``data:image/png;base64,XXX`` 形式或纯 base64。
+    """
+    import base64 as _b64
+    if not b64:
+        return None
+    raw = _strip_data_url(b64)
+    try:
+        return _b64.b64decode(raw, validate=False)
+    except Exception:
+        return None
+
+
+# Asset payload 中可能含图片 base64 的字段名（顶层 + 字典容器内的 key）
+_TOP_LEVEL_IMAGE_KEYS = {
+    "reference_image", "image", "thumbnail", "anchor_image",
+    "start_image", "end_image", "frame_image",
+}
+_IMAGE_DICT_CONTAINER_KEYS = {
+    "three_view_images", "keyframe_images", "frames", "view_images",
+    "keyframes",
+}
+
+
+def _looks_like_base64_png(s: object) -> bool:
+    """
+    启发式判断字符串是否是 base64 PNG：长度 > 100 且不含 ``<`` 等 XML 字符。
+    """
+    if not isinstance(s, str):
+        return False
+    raw = _strip_data_url(s)
+    if len(raw) < 100:
+        return False
+    if "<" in raw or "{" in raw:
+        return False
+    return True
+
+
+# 放在 ProjectStore 类之外的模块函数；ProjectStore 内的 _extract_and_save_images
+# 会调用它。
+def _make_image_filename(
+    slot: str,
+    idx: int | None = None,
+    extension: str = "png",
+) -> str:
+    """
+    生成 PNG 文件名（仅文件名，不含目录）：
+
+    - 顶层 slot（如 ``reference_image``）： ``reference.png``
+    - dict 容器内的子键（如 ``front``）： ``front.png``
+    - 带 frame_index 的帧： ``front_001.png``
+    """
+    slot_part = slugify(slot, fallback="frame")
+    if idx is not None and idx >= 0:
+        return f"{slot_part}_{idx:03d}.{extension}"
+    return f"{slot_part}.{extension}"
+
 # ─── Pydantic-like dataclasses (no external deps) ───────────────────────────────
 
 
@@ -98,7 +251,7 @@ class ProjectManifest:
     artifacts: dict[str, PhaseEntry] = field(default_factory=dict)
     timeline: list[TimelineEvent] = field(default_factory=list)
     script_data: Optional[dict] = field(default=None)
-    shot_list: Optional[list] = field(default_factory=None)
+    shot_list: Optional[list] = field(default=None)
 
     def to_dict(self) -> dict:
         return {
@@ -694,13 +847,60 @@ class ProjectStore:
         return self._shot_dir(project_id, shot_id) / "artifacts"
 
     def _characters_dir(self, project_id: str) -> Path:
+        """
+        characters/ 根目录。新布局: characters/<character_name>/<action>/<frame>。
+        """
         return self._project_dir(project_id) / "characters"
 
+    def _character_dir(
+        self,
+        project_id: str,
+        character_name: str | None,
+        action_name: str | None = None,
+    ) -> Path:
+        """
+        角色资产目录：characters/<character_name>/<action_name>/。
+
+        - character_name 为空时退化为 characters/_misc/<action_name>/（旧布局兼容）。
+        - action_name 为空时返回 characters/<character_name>/。
+        """
+        chars_root = self._characters_dir(project_id)
+        if not character_name:
+            return chars_root / "_misc" / (slugify_action(action_name) if action_name else "")
+        char_part = slugify(character_name, fallback="unnamed_character")
+        if action_name:
+            return chars_root / char_part / slugify_action(action_name)
+        return chars_root / char_part
+
     def _motions_dir(self, project_id: str) -> Path:
+        """
+        motions/ 根目录。新布局: motions/<character_name>/<action_slug>/<frame>。
+        """
         return self._project_dir(project_id) / "motions"
 
+    def _motion_dir(
+        self,
+        project_id: str,
+        character_name: str | None,
+        action_name: str | None,
+    ) -> Path:
+        char_part = slugify(character_name, fallback="unnamed_character") if character_name else "_misc"
+        action_part = slugify_action(action_name)
+        return self._motions_dir(project_id) / char_part / action_part
+
     def _scenes_dir(self, project_id: str) -> Path:
+        """
+        scenes/ 根目录。新布局: scenes/<scene_name>/<frame>_<kind>.<ext>。
+        """
         return self._project_dir(project_id) / "scenes"
+
+    def _scene_dir(self, project_id: str, scene_name: str | None) -> Path:
+        """
+        场景目录：scenes/<scene_name>/。scene_name 为空时退化到 scenes/_misc/。
+        """
+        if not scene_name:
+            return self._scenes_dir(project_id) / "_misc"
+        return self._scenes_dir(project_id) / slugify(scene_name, fallback="unnamed_scene")
 
     async def save_scene_asset(
         self,
@@ -711,38 +911,113 @@ class ProjectStore:
         asset_type: Optional[str] = None,
         file_data=None,
         extension: str = "json",
+        scene_name: str | None = None,
     ) -> dict:
         """
         Save a scene asset bundle to disk.
 
-        Preferred call: ``save_scene_asset(project_id, scene_id, payload=dict)``
-        writes ``<scene_id>_asset.json``.
+        Calling conventions:
 
-        Legacy call: ``save_scene_asset(project_id, scene_id, asset_type, file_data, extension)``
-        writes ``<scene_id>_<asset_type>.<ext>`` (single file).
+        1. New v3 layout (preferred):
+           ``save_scene_asset(project_id, scene_id, payload=dict,
+                              scene_name=...)``
+           Writes ``scenes/<scene_name>/asset_<scene_id>.json``.
+
+        2. Legacy payload-only call:
+           ``save_scene_asset(project_id, scene_id, payload=dict)``
+           Writes ``scenes/<scene_id>_asset.json`` (flat layout).
+
+        3. Legacy single-file call:
+           ``save_scene_asset(project_id, scene_id, asset_type,
+                              file_data, extension)``
+           Writes ``scenes/<scene_id>_<asset_type>.<ext>``.
         """
         lock = self._get_lock(project_id)
         async with lock:
-            scenes_dir = self._scenes_dir(project_id)
-            scenes_dir.mkdir(parents=True, exist_ok=True)
+            use_v3 = bool(scene_name)
 
-            if payload is None and file_data is None and isinstance(asset_type, dict):
-                # Convention 1: payload-only call.
-                payload = asset_type
-                rel_path = scenes_dir / f"{scene_id}_asset.json"
+            # ── Payload-only path (legacy or v3) ───────────────────────────────
+            if payload is not None or (
+                asset_type is not None
+                and isinstance(asset_type, dict)
+                and file_data is None
+                and payload is None
+            ):
+                if payload is None:
+                    payload = asset_type  # type: ignore[assignment]
+
+                # 解码 payload 内的 base64 PNG → 写入独立文件，JSON 内仅存路径
+                base_dir = (
+                    self._scene_dir(project_id, scene_name) if use_v3 else None
+                )
+                payload_to_persist, _ = self._extract_and_save_images(
+                    project_id, payload, base_dir=base_dir,
+                )
+
+                if use_v3:
+                    scene_dir = self._scene_dir(project_id, scene_name)
+                    scene_dir.mkdir(parents=True, exist_ok=True)
+                    rel_path = scene_dir / f"asset_{slugify(scene_id, fallback='scene')}.json"
+                else:
+                    scenes_dir = self._scenes_dir(project_id)
+                    scenes_dir.mkdir(parents=True, exist_ok=True)
+                    rel_path = scenes_dir / f"{scene_id}_asset.json"
+
                 abs_path = self._workspace_dir / rel_path
                 import json as _json
                 abs_path.write_text(
-                    _json.dumps(payload, ensure_ascii=False, indent=2),
+                    _json.dumps(payload_to_persist, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
             else:
-                rel_path = scenes_dir / f"{scene_id}_{asset_type}.{extension}"
+                # ── Single-file path ────────────────────────────────────────
+                if use_v3:
+                    scene_dir = self._scene_dir(project_id, scene_name)
+                    scene_dir.mkdir(parents=True, exist_ok=True)
+                    fname = (
+                        f"{slugify(scene_id, fallback='scene')}_"
+                        f"{slugify(asset_type or 'frame', fallback='frame')}.{extension}"
+                    )
+                    rel_path = scene_dir / fname
+                else:
+                    scenes_dir = self._scenes_dir(project_id)
+                    scenes_dir.mkdir(parents=True, exist_ok=True)
+                    rel_path = scenes_dir / f"{scene_id}_{asset_type}.{extension}"
+
                 abs_path = self._workspace_dir / rel_path
                 if isinstance(file_data, (bytes, bytearray)):
                     abs_path.write_bytes(bytes(file_data))
-                else:
+                elif file_data is not None:
                     abs_path.write_text(str(file_data), encoding="utf-8")
+                else:
+                    pass  # nothing to write
+
+            manifest = self._read_manifest(project_id)
+            manifest.updated_at = _now_iso()
+            self._write_manifest(project_id, manifest)
+            return {"success": True, "url": str(rel_path)}
+
+    async def save_scene_keyframe(
+        self,
+        project_id: str,
+        scene_id: str,
+        scene_name: str | None,
+        kind: str,
+        file_bytes: bytes,
+        extension: str = "png",
+    ) -> dict:
+        """
+        把单个场景关键帧 (wide/closeup/mood) 写入
+        scenes/<scene_name>/<scene_id>_<kind>.<ext>。
+        """
+        lock = self._get_lock(project_id)
+        async with lock:
+            scene_dir = self._scene_dir(project_id, scene_name)
+            scene_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"{slugify(scene_id, fallback='scene')}_{slugify(kind, fallback='frame')}.{extension}"
+            rel_path = scene_dir / fname
+            abs_path = self._workspace_dir / rel_path
+            abs_path.write_bytes(bytes(file_bytes))
 
             manifest = self._read_manifest(project_id)
             manifest.updated_at = _now_iso()
@@ -1023,47 +1298,118 @@ class ProjectStore:
         file_data=None,
         extension: str = "json",
         payload: Optional[dict] = None,
+        *,
+        character_name: str | None = None,
+        action_name: str | None = None,
+        frame_index: int | None = None,
     ) -> dict:
         """
         Save a character asset bundle to disk.
 
-        Two calling conventions are supported for backwards compatibility:
+        Three calling conventions are supported:
 
-        1. ``save_character_asset(project_id, character_id, payload_dict)``
-           — the canonical one used by the auto three-view worker.
-           Writes ``<char_id>_asset.json`` with the serialised CharacterAsset.
+        1. New v3 layout (preferred for /characters/generate-three-view and
+           /characters/generate-variation):
+           ``save_character_asset(project_id, character_id, payload_dict,
+                                  character_name=..., action_name=...,
+                                  frame_index=...)``
+           Writes to ``characters/<character_name>/<action_name>/frame_<idx>.png``
+           (or ``<asset_type>.json`` when payload is a dict).
 
-        2. ``save_character_asset(project_id, character_id, asset_type, file_data, extension)``
-           — legacy call writing a single PNG/JSON file under ``<char_id>_<asset_type>.<ext>``.
+        2. Legacy payload-only call:
+           ``save_character_asset(project_id, character_id, payload_dict)``
+           Writes to ``characters/<character_id>_asset.json`` (flat layout,
+           kept for back-compat with previously persisted projects).
+
+        3. Legacy single-file call:
+           ``save_character_asset(project_id, character_id, asset_type,
+                                  file_data, extension)``
+           Writes ``<character_id>_<asset_type>.<ext>`` (flat layout).
         """
         lock = self._get_lock(project_id)
         async with lock:
-            characters_dir = self._characters_dir(project_id)
-            characters_dir.mkdir(parents=True, exist_ok=True)
+            use_v3 = bool(character_name or action_name or frame_index is not None)
 
-            # Convention 1: payload-only call (preferred).
-            if payload is None and file_data is None:
-                if not isinstance(asset_type, dict):
-                    raise TypeError(
-                        "save_character_asset requires payload= or file_data="
+            # ── Payload-only call (covers both legacy and v3) ────────────────
+            if payload is not None:
+                # Extract any base64 PNGs inside the payload and write them as
+                # standalone files; replace the base64 string in the persisted
+                # manifest with the relative path so the JSON stays small.
+                payload_to_persist, _extracted = self._extract_and_save_images(
+                    project_id,
+                    payload,
+                    base_dir=self._character_dir(
+                        project_id, character_name, action_name or "asset",
+                    ) if use_v3 else None,
+                )
+
+                if use_v3:
+                    char_dir = self._character_dir(
+                        project_id, character_name, action_name or "asset",
                     )
-                payload = asset_type
-                rel_path = characters_dir / f"{character_id}_asset.json"
+                    char_dir.mkdir(parents=True, exist_ok=True)
+                    fname = frame_filename(
+                        frame_index or 0, kind="asset", extension="json",
+                    )
+                    rel_path = char_dir / fname
+                else:
+                    characters_dir = self._characters_dir(project_id)
+                    characters_dir.mkdir(parents=True, exist_ok=True)
+                    rel_path = characters_dir / f"{character_id}_asset.json"
+
                 abs_path = self._workspace_dir / rel_path
                 import json as _json
-                abs_path.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                abs_path.write_text(
+                    _json.dumps(payload_to_persist, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                manifest = self._read_manifest(project_id)
+                manifest.updated_at = _now_iso()
+                self._write_manifest(project_id, manifest)
+                return {"success": True, "url": str(rel_path)}
+
+            # Backward-compat: ``save_character_asset(pid, cid, dict)``
+            if file_data is None and isinstance(asset_type, dict):
+                return await self.save_character_asset(
+                    project_id,
+                    character_id,
+                    asset_type="asset",
+                    payload=asset_type,
+                    character_name=character_name,
+                    action_name=action_name,
+                    frame_index=frame_index,
+                )
+
+            # ── Single-file write (legacy convention) ────────────────────────
+            if use_v3:
+                char_dir = self._character_dir(
+                    project_id, character_name, action_name or asset_type,
+                )
+                char_dir.mkdir(parents=True, exist_ok=True)
+                fname = frame_filename(
+                    frame_index or 0,
+                    kind=asset_type,
+                    extension=extension,
+                )
+                rel_path = char_dir / fname
             else:
+                characters_dir = self._characters_dir(project_id)
+                characters_dir.mkdir(parents=True, exist_ok=True)
                 rel_path = characters_dir / f"{character_id}_{asset_type}.{extension}"
-                abs_path = self._workspace_dir / rel_path
-                if isinstance(file_data, (bytes, bytearray)):
-                    abs_path.write_bytes(bytes(file_data))
-                else:
-                    abs_path.write_text(str(file_data), encoding="utf-8")
+
+            abs_path = self._workspace_dir / rel_path
+            if isinstance(file_data, (bytes, bytearray)):
+                abs_path.write_bytes(bytes(file_data))
+            elif file_data is not None:
+                abs_path.write_text(str(file_data), encoding="utf-8")
+            else:
+                # No-op: nothing to write but path was reserved.
+                pass
 
             manifest = self._read_manifest(project_id)
             manifest.updated_at = _now_iso()
             self._write_manifest(project_id, manifest)
-
             return {"success": True, "url": str(rel_path)}
 
     async def add_character_variation(
@@ -1073,13 +1419,29 @@ class ProjectStore:
         variation_id: str,
         file_data: bytes,
         extension: str = "png",
+        *,
+        character_name: str | None = None,
+        action_name: str | None = None,
     ) -> dict:
-        """追加角色变体到现有角色资产目录。"""
+        """
+        追加角色变体。
+
+        新布局：characters/<character_name>/variation_<variation_id>.<ext>
+        旧布局（向后兼容）：characters/<character_id>_variation_<variation_id>.<ext>
+        """
         lock = self._get_lock(project_id)
         async with lock:
-            characters_dir = self._characters_dir(project_id)
-            characters_dir.mkdir(parents=True, exist_ok=True)
-            rel_path = characters_dir / f"{character_id}_variation_{variation_id}.{extension}"
+            if character_name or action_name:
+                char_dir = self._character_dir(
+                    project_id, character_name, action_name or "variation",
+                )
+                char_dir.mkdir(parents=True, exist_ok=True)
+                rel_path = char_dir / f"variation_{slugify(variation_id, fallback='var')}.{extension}"
+            else:
+                characters_dir = self._characters_dir(project_id)
+                characters_dir.mkdir(parents=True, exist_ok=True)
+                rel_path = characters_dir / f"{character_id}_variation_{variation_id}.{extension}"
+
             abs_path = self._workspace_dir / rel_path
             abs_path.write_bytes(file_data)
 
@@ -1095,44 +1457,210 @@ class ProjectStore:
         character_id: str,
         sequence_id: str,
         motion_data: dict,
+        *,
+        character_name: str | None = None,
+        action_name: str | None = None,
+        frame_index: int | None = None,
     ) -> dict:
-        """保存角色动作序列到 JSON 文件。"""
+        """
+        保存角色动作序列。
+
+        新布局：motions/<character_name>/<action_slug>/frame_<idx>.json
+        旧布局（向后兼容）：motions/<character_id>_<sequence_id>.json
+        """
         lock = self._get_lock(project_id)
         async with lock:
-            motions_dir = self._motions_dir(project_id)
-            motions_dir.mkdir(parents=True, exist_ok=True)
-            seq_path = motions_dir / f"{character_id}_{sequence_id}.json"
-            seq_path.write_text(json.dumps(motion_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            use_v3 = bool(character_name or action_name)
+            if use_v3:
+                motion_dir = self._motion_dir(project_id, character_name, action_name or sequence_id)
+                motion_dir.mkdir(parents=True, exist_ok=True)
+                idx = frame_index if frame_index is not None else 0
+                rel_path = motion_dir / f"frame_{idx:03d}.json"
+            else:
+                motions_dir = self._motions_dir(project_id)
+                motions_dir.mkdir(parents=True, exist_ok=True)
+                rel_path = motions_dir / f"{character_id}_{sequence_id}.json"
+
+            seq_path = self._workspace_dir / rel_path
+            seq_path.write_text(
+                json.dumps(motion_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
             manifest = self._read_manifest(project_id)
             manifest.updated_at = _now_iso()
             self._write_manifest(project_id, manifest)
 
-            return {"success": True, "path": str(seq_path.relative_to(self._workspace_dir))}
+            return {"success": True, "path": str(rel_path.relative_to(self._workspace_dir))}
 
     async def list_character_assets(self, project_id: str, character_id: str) -> list[dict]:
-        """列出某角色的所有资产文件路径。"""
+        """
+        列出某角色的所有资产文件路径。
+
+        同时扫描 v3 新布局 (characters/<character_name>/...) 与 v1/v2 旧布局
+        (characters/<character_id>_*.*)。结果按相对路径升序返回。
+        """
         characters_dir = self._characters_dir(project_id)
         if not characters_dir.is_dir():
             return []
-        return [
-            {"name": p.name, "url": str(p.relative_to(self._workspace_dir))}
-            for p in characters_dir.iterdir()
-            if character_id in p.name
-        ]
+
+        results: list[dict] = []
+        # 1) 新布局：characters/**/<file>
+        for p in sorted(characters_dir.rglob("*")):
+            if p.is_file():
+                # 匹配 character_id（id 或 name）作为子目录名
+                parts = p.relative_to(characters_dir).parts
+                if any(character_id in part for part in parts):
+                    results.append({
+                        "name": p.name,
+                        "url": str(p.relative_to(self._workspace_dir)),
+                    })
+        # 2) 旧布局：characters/<character_id>_*.*
+        for p in sorted(characters_dir.iterdir()):
+            if p.is_file() and character_id in p.name:
+                results.append({
+                    "name": p.name,
+                    "url": str(p.relative_to(self._workspace_dir)),
+                })
+        # 去重（按 url）
+        seen: set[str] = set()
+        unique: list[dict] = []
+        for r in results:
+            if r["url"] not in seen:
+                seen.add(r["url"])
+                unique.append(r)
+        return unique
 
     async def list_motion_sequences(self, project_id: str, character_id: str) -> list[dict]:
-        """列出某角色的所有动作序列 JSON。"""
+        """
+        列出某角色的所有动作序列 JSON。
+
+        同时扫描 v3 新布局 (motions/<character_name>/.../*.json) 与 v1/v2 旧布局
+        (motions/<character_id>_*.json)。
+        """
         motions_dir = self._motions_dir(project_id)
         if not motions_dir.is_dir():
             return []
-        return [
-            {"name": p.name, "path": str(p.relative_to(self._workspace_dir))}
-            for p in motions_dir.iterdir()
-            if character_id in p.name
-        ]
+
+        results: list[dict] = []
+        # 1) 新布局
+        for p in sorted(motions_dir.rglob("*.json")):
+            parts = p.relative_to(motions_dir).parts
+            if any(character_id in part for part in parts):
+                results.append({
+                    "name": p.name,
+                    "path": str(p.relative_to(self._workspace_dir)),
+                })
+        # 2) 旧布局
+        for p in sorted(motions_dir.iterdir()):
+            if p.is_file() and character_id in p.name:
+                results.append({
+                    "name": p.name,
+                    "path": str(p.relative_to(self._workspace_dir)),
+                })
+        seen: set[str] = set()
+        unique: list[dict] = []
+        for r in results:
+            if r["path"] not in seen:
+                seen.add(r["path"])
+                unique.append(r)
+        return unique
 
     # ── internal sync helpers (called from within lock) ─────────────────────────
+
+    def _extract_and_save_images(
+        self,
+        project_id: str,
+        payload: dict,
+        *,
+        base_dir: Path | None = None,
+    ) -> tuple[dict, list[str]]:
+        """
+        在 payload dict 中查找 base64 PNG 字段（顶层与 ``three_view_images`` /
+        ``keyframe_images`` 等子字典容器），解码后写入独立 .png 文件，
+        并把原字符串替换为相对工作区的路径。
+
+        返回 ``(mutated_payload, list_of_relative_paths)``。
+
+        base_dir 为空时（仅 legacy 路径），落到 ``.workspace/projects/<project_id>/_extracted/``。
+        """
+        if not isinstance(payload, dict):
+            return payload, []
+
+        out_dir = base_dir if base_dir is not None else self._project_dir(project_id) / "_extracted"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        extracted: list[str] = []
+        used_filenames: set[str] = set()
+
+        def _decode_and_write(value: str, slot: str, idx: int | None) -> str | None:
+            raw_bytes = _decode_base64_png(value)
+            if not raw_bytes:
+                return None
+            fname = _make_image_filename(slot, idx)
+            counter = 1
+            while fname in used_filenames:
+                stem, dot, ext = fname.rpartition(".")
+                fname = f"{stem}_{counter}.{ext}"
+                counter += 1
+            used_filenames.add(fname)
+            abs_path = out_dir / fname
+            abs_path.write_bytes(raw_bytes)
+            rel = str((out_dir / fname).relative_to(self._workspace_dir))
+            extracted.append(rel)
+            return rel
+
+        def _walk(node: dict, container: str | None = None) -> None:
+            for key, val in list(node.items()):
+                if isinstance(val, str) and _looks_like_base64_png(val):
+                    if container is None:
+                        # 顶层字段
+                        if key in _TOP_LEVEL_IMAGE_KEYS:
+                            rel = _decode_and_write(val, key, None)
+                            if rel is not None:
+                                node[key] = rel
+                    else:
+                        # dict 容器内的键作为 slot 名（front/side/back、wide/closeup/mood…）
+                        rel = _decode_and_write(val, key, None)
+                        if rel is not None:
+                            node[key] = rel
+                elif isinstance(val, dict) and (container is None) and key in _IMAGE_DICT_CONTAINER_KEYS:
+                    # 进入容器，按子键生成 filename
+                    for sub_key, sub_val in list(val.items()):
+                        if isinstance(sub_val, str) and _looks_like_base64_png(sub_val):
+                            rel = _decode_and_write(sub_val, sub_key, None)
+                            if rel is not None:
+                                val[sub_key] = rel
+                        elif isinstance(sub_val, list):
+                            # 列表内的 frame：[{"frame_index": N, "image": b64}, ...]
+                            for j, frame in enumerate(sub_val):
+                                if isinstance(frame, dict):
+                                    for fk, fv in list(frame.items()):
+                                        if isinstance(fv, str) and _looks_like_base64_png(fv):
+                                            rel = _decode_and_write(
+                                                fv, sub_key, frame.get("frame_index", j),
+                                            )
+                                            if rel is not None:
+                                                frame[fk] = rel
+                elif isinstance(val, list) and container is None:
+                    # 顶层 list（如 variations / frames）
+                    for j, item in enumerate(val):
+                        if isinstance(item, dict):
+                            for fk, fv in list(item.items()):
+                                if isinstance(fv, str) and _looks_like_base64_png(fv):
+                                    rel = _decode_and_write(fv, key, item.get("frame_index", j))
+                                    if rel is not None:
+                                        item[fk] = rel
+                                elif isinstance(fv, dict):
+                                    # list 元素里的 dict 容器（少见，但支持）
+                                    for sk, sv in list(fv.items()):
+                                        if isinstance(sv, str) and _looks_like_base64_png(sv):
+                                            rel = _decode_and_write(sv, sk, item.get("frame_index", j))
+                                            if rel is not None:
+                                                fv[sk] = rel
+
+        _walk(payload)
+        return payload, extracted
 
     def _write_manifest(self, project_id: str, manifest: ProjectManifest) -> None:
         """原子写入 manifest.json（写临时文件再 rename）。"""
@@ -1202,3 +1730,166 @@ class ProjectStore:
 # ─── Singleton ────────────────────────────────────────────────────────────────
 
 project_store = ProjectStore(WORKSPACE_DIR)
+
+
+# ─── Legacy migration ─────────────────────────────────────────────────────────
+
+
+def migrate_legacy_layout(project_id: str, *, dry_run: bool = False) -> dict:
+    """
+    将旧版 (v1/v2) 项目目录结构迁移到 v3 (角色/动作/帧号 层级)。
+
+    旧布局：
+        characters/<char_id>_asset.json
+        characters/<char_id>_variation_<vid>.png
+        motions/<char_id>_<seq_id>.json
+        scenes/<scene_id>_asset.json
+
+    新布局：
+        characters/<char_name>/three_view/frame_000.json
+        characters/<char_name>/variation_<vid>.png
+        motions/<char_name>/<action_slug>/frame_000.json
+        scenes/<scene_name>/asset_<scene_id>.json
+
+    旧布局的文件名以 ``<id>_<...>.ext`` 开头；我们把 id 段当作目录名的 fallback，
+    并优先从 manifest.script_data.characters 中按 id → name 映射。
+
+    Returns: {"moved": int, "skipped": int, "errors": [str]}
+    """
+    result = {"moved": 0, "skipped": 0, "errors": []}
+    # 在模块作用域中使用 ``project_store`` 单例（就是 ``project_store.py`` 文件尾部的
+    # ``project_store = ProjectStore(WORKSPACE_DIR)``）。注意：函数体之外已经有
+    # ``from __future__ import annotations``，所以这里的引用就是模块级单例本身。
+    store = project_store
+
+    # Build id → name map from script_data
+    name_map: dict[str, str] = {}
+    try:
+        manifest = store._read_manifest(project_id)
+        if manifest.script_data:
+            for ch in manifest.script_data.get("characters", []) or []:
+                cid = ch.get("id") or ch.get("character_id")
+                cname = ch.get("name") or ch.get("character_name")
+                if cid and cname:
+                    name_map[str(cid)] = str(cname)
+    except Exception as e:  # pragma: no cover
+        result["errors"].append(f"manifest read failed: {e}")
+
+    def _move(src: Path, dst: Path) -> None:
+        if dry_run:
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            return  # already migrated
+        src.rename(dst)
+
+    # ── characters/ ────────────────────────────────────────────────────────────
+    chars_dir = store._characters_dir(project_id)
+    if chars_dir.is_dir():
+        for f in list(chars_dir.iterdir()):
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            stem, dot, ext = f.name.partition(".")
+            if not stem:
+                continue
+            # <char_id>_asset.json
+            if stem.endswith("_asset"):
+                cid = stem[:-len("_asset")]
+                name = name_map.get(cid, cid)
+                dst_dir = store._character_dir(project_id, name, "three_view")
+                dst = dst_dir / f"asset_000.{ext or 'json'}"
+                _move(f, dst)
+                result["moved"] += 1
+                continue
+            # <char_id>_variation_<vid>.png
+            if "_variation_" in stem:
+                cid, vid = stem.split("_variation_", 1)
+                name = name_map.get(cid, cid)
+                dst_dir = store._character_dir(project_id, name, "variation")
+                dst = dst_dir / f"variation_{slugify(vid, fallback='var')}.{ext or 'png'}"
+                _move(f, dst)
+                result["moved"] += 1
+                continue
+            # <char_id>_<asset_type>.<ext> — generic
+            if "_" in stem:
+                cid, asset = stem.split("_", 1)
+                name = name_map.get(cid, cid)
+                dst_dir = store._character_dir(project_id, name, slugify_action(asset))
+                dst = dst_dir / f"asset_000.{ext}"
+                _move(f, dst)
+                result["moved"] += 1
+                continue
+            result["skipped"] += 1
+
+    # ── motions/ ───────────────────────────────────────────────────────────────
+    motions_dir = store._motions_dir(project_id)
+    if motions_dir.is_dir():
+        for f in list(motions_dir.iterdir()):
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            stem, dot, ext = f.name.partition(".")
+            if "_" in stem:
+                cid, seq = stem.split("_", 1)
+                name = name_map.get(cid, cid)
+                dst_dir = store._motion_dir(project_id, name, seq)
+                dst = dst_dir / f"frame_000.{ext or 'json'}"
+                _move(f, dst)
+                result["moved"] += 1
+                continue
+            result["skipped"] += 1
+
+    # ── scenes/ ────────────────────────────────────────────────────────────────
+    scenes_dir = store._scenes_dir(project_id)
+    if scenes_dir.is_dir():
+        # Try to read scene_id → location mapping from manifest
+        scene_loc_map: dict[str, str] = {}
+        try:
+            manifest = store._read_manifest(project_id)
+            if manifest.script_data:
+                for sc in manifest.script_data.get("scenes", []) or []:
+                    sid = sc.get("id") or sc.get("scene_id")
+                    loc = sc.get("location") or sc.get("scene_name")
+                    if sid and loc:
+                        scene_loc_map[str(sid)] = str(loc)
+        except Exception:
+            pass
+
+        for f in list(scenes_dir.iterdir()):
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            stem, dot, ext = f.name.partition(".")
+            if stem.endswith("_asset"):
+                sid = stem[:-len("_asset")]
+                loc = scene_loc_map.get(sid, sid)
+                dst_dir = store._scene_dir(project_id, loc)
+                dst = dst_dir / f"asset_{slugify(sid, fallback='scene')}.{ext or 'json'}"
+                _move(f, dst)
+                result["moved"] += 1
+                continue
+            if "_" in stem:
+                sid, asset = stem.split("_", 1)
+                loc = scene_loc_map.get(sid, sid)
+                dst_dir = store._scene_dir(project_id, loc)
+                dst = dst_dir / f"{slugify(sid, fallback='scene')}_{slugify(asset, fallback='frame')}.{ext}"
+                _move(f, dst)
+                result["moved"] += 1
+                continue
+            result["skipped"] += 1
+
+    return result
+
+
+def migrate_all_legacy_projects(*, dry_run: bool = False) -> dict:
+    """
+    扫描 workspace/projects 下所有项目，对每个跑一次 migrate_legacy_layout。
+
+    Returns: {project_id: migration_result}
+    """
+    results: dict[str, dict] = {}
+    if not WORKSPACE_DIR.is_dir():
+        return results
+    for proj in sorted(WORKSPACE_DIR.iterdir()):
+        if not proj.is_dir():
+            continue
+        results[proj.name] = migrate_legacy_layout(proj.name, dry_run=dry_run)
+    return results

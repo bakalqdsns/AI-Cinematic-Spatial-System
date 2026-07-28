@@ -178,6 +178,7 @@ async def generate_scene_keyframes(
     anchor_image: Optional[str] = None,
     seed: Optional[int] = None,
     max_retries: int = 2,
+    size: Optional[str] = None,
 ) -> dict[str, Optional[str]]:
     """
     Generate three keyframe images for a scene: wide / closeup / mood.
@@ -195,6 +196,7 @@ async def generate_scene_keyframes(
         base_prompt = await generate_scene_visual_prompt(scene)
 
     results: dict[str, Optional[str]] = {"wide": None, "closeup": None, "mood": None}
+    out_size = size or _default_scene_size()
 
     # ── Step 1: wide establishing shot ────────────────────────────────────────
     if anchor_image:
@@ -207,7 +209,7 @@ async def generate_scene_keyframes(
             f"concept art background, high detail, dramatic lighting"
         )
         anchor_b64 = await _generate_with_retry(
-            wide_prompt, label=f"{scene.id}:wide", seed=seed,
+            wide_prompt, label=f"{scene.id}:wide", seed=seed, size=out_size,
         )
         results["wide"] = anchor_b64
 
@@ -243,16 +245,18 @@ async def _generate_with_retry(
     label: str,
     seed: Optional[int] = None,
     max_retries: int = 2,
+    size: Optional[str] = None,
 ) -> Optional[str]:
     last_exc = None
     image_mode = _get_image_mode()
+    out_size = size or _default_scene_size()
 
     for attempt in range(max_retries + 1):
         try:
             if image_mode == "cloud":
-                return await _generate_via_cloud(prompt)
+                return await _generate_via_cloud(prompt, size=out_size)
             else:
-                return await _generate_via_local(prompt, seed=seed)
+                return await _generate_via_local(prompt, seed=seed, size=out_size)
         except Exception as e:
             last_exc = e
             logger.warning(
@@ -300,16 +304,38 @@ async def _img2img_with_retry(
 
 # ── Internal image generation helpers ───────────────────────────────────────────
 
+def _default_scene_size() -> str:
+    """Default landscape size for scene / keyframe generation (e.g. '1280*720')."""
+    from app.config import settings
+    return getattr(settings, "image_size_scene", "1280*720") or "1280*720"
+
+
+def _parse_size_to_tuple(size: str) -> tuple[int, int]:
+    """Convert "WIDTH*HEIGHT" → (W, H) tuple. Falls back to (1024, 1024)."""
+    if not size or "*" not in str(size):
+        return (1024, 1024)
+    try:
+        w_str, h_str = str(size).split("*", 1)
+        return (max(1, int(w_str)), max(1, int(h_str)))
+    except (ValueError, TypeError):
+        return (1024, 1024)
+
+
 async def _generate_via_local(
     prompt: str,
     *,
     seed: Optional[int] = None,
+    size: Optional[str] = None,
 ) -> Optional[str]:
     """Generate image via local Diffusers pipeline (SDXL / Z-Image)."""
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
-        image = await asyncio.to_thread(generator.generate, prompt, seed=seed)
+        out_size = size or _default_scene_size()
+        size_tuple = _parse_size_to_tuple(out_size)
+        image = await asyncio.to_thread(
+            generator.generate, prompt, seed=seed, size=size_tuple,
+        )
         if image is not None:
             return generator.pil_to_base64(image)
     except Exception as e:
@@ -337,7 +363,7 @@ async def _generate_via_local_with_reference(
     return None
 
 
-async def _generate_via_cloud(prompt: str) -> Optional[str]:
+async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Optional[str]:
     """
     Generate image via DashScope ImageSynthesis API.
 
@@ -346,8 +372,9 @@ async def _generate_via_cloud(prompt: str) -> Optional[str]:
     try:
         from app.services.dashscope_client import get_dashscope_client
         client = get_dashscope_client()
+        out_size = size or _default_scene_size()
         urls = await asyncio.to_thread(
-            client.generate_image, prompt, size="1024*1024", n=1,
+            client.generate_image, prompt, size=out_size, n=1,
         )
         if not urls:
             return None
