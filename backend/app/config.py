@@ -202,3 +202,26 @@ print(f"[AICSS Config] VLM mode: {settings.vlm_mode} | Image mode: {settings.ima
 print(f"[AICSS Config] Depth model: {settings.depth_model}")
 print(f"[AICSS Config] SAM2 size: {settings.sam2_model_size}")
 print(f"[AICSS Config] VLM model: {settings.vlm_model}")
+
+# ── Startup health checks ──────────────────────────────────────────────────
+def _check_dashscope_key(env_name: str, config_val: str, component: str) -> None:
+    val = config_val or os.getenv(env_name, "")
+    if not val:
+        print(
+            f"[AICSS WARNING] {component} mode is 'cloud' but no API key is configured. "
+            f"Set {env_name} in your .env file. "
+            f"Auto batch generation will fail silently without an error visible to the user."
+        )
+
+if settings.image_mode == "cloud":
+    _check_dashscope_key(
+        "DASHSCOPE_API_KEY",
+        settings.dashscope_image_api_key,
+        "Image generation (wanx-v1)",
+    )
+if settings.model_mode == "cloud":
+    _check_dashscope_key(
+        "DASHSCOPE_API_KEY",
+        settings.dashscope_llm_api_key,
+        "LLM visual prompt generation (qwen-plus)",
+    )

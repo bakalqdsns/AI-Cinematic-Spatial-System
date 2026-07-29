@@ -132,13 +132,26 @@ async def auto_generate_three_views_for_project(
                     char, visual_prompt=visual_prompt,
                 )
 
-                # ── 3. build asset ───────────────────────────────────────────
+                # ── 3. detect silent failures ────────────────────────────────
+                # When every view is None the generation provider (DashScope or
+                # local) failed silently. Surface this as a failed entry instead
+                # of "done" so the UI can show an error badge.
+                failed_views = [k for k, v in three_view.items() if not v]
+                if failed_views:
+                    raise RuntimeError(
+                        f"Image generation returned no data for {failed_views} views. "
+                        f"Check: (1) DashScope API key is set, (2) wanx-v1 quota "
+                        f"is not exhausted, (3) network connectivity to "
+                        f"dashscope.aliyuncs.com."
+                    )
+
+                # ── 4. build asset ───────────────────────────────────────────
                 ref_b64 = three_view.get("front")
                 asset = build_character_asset(char, ref_b64, three_view)
                 asset.visual_prompt = visual_prompt
                 serialised = serialize_character_asset(asset)
 
-                # ── 4. persist to project store ──────────────────────────────
+                # ── 5. persist to project store ──────────────────────────────
                 try:
                     await project_store.save_character_asset(
                         project_id, char.id, payload=serialised,

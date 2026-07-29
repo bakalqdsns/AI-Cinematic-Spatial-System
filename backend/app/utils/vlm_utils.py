@@ -141,16 +141,68 @@ def get_fallback_prompt(scene_type: str) -> list[str]:
 
 async def vlm_detect(image: Image.Image) -> tuple[list[str], str]:
     """
-    Full VLM detection pipeline (local Qwen3-VL).
+    Full VLM detection pipeline — routes to local Qwen3-VL or DashScope VLM
+    depending on ``settings.vlm_mode``.
 
-    1. Classify scene type
-    2. Generate object class list
-    3. Parse and deduplicate
-    4. Fall back to scene-specific template on any error
+    Local path (vlm_mode="local"):
+      1. Classify scene type
+      2. Generate object class list
+      3. Parse and deduplicate
+      4. Fall back to scene-specific template on any error
+
+    Cloud path (vlm_mode="cloud"):
+      1. Ask DashScope VLM for scene type + all visible object classes in one call
+      2. Parse and deduplicate
+      3. Fall back to scene-specific template on any error
 
     Inference is run on a worker thread to avoid blocking the event loop.
     Always returns a non-empty result — fallback is guaranteed.
     """
+    # ── Cloud path ────────────────────────────────────────────────────────────
+    from app.config import settings as _cfg
+
+    if _cfg.vlm_mode == "cloud":
+        cloud_prompt = (
+            "Analyze this image and respond with exactly TWO lines:\n"
+            "Line 1: Scene type — choose exactly one from: outdoor, indoor, night, nature\n"
+            "Line 2: All visible object classes as dot-separated lowercase English nouns\n"
+            "(e.g. person.building.car.tree.sky.road.grass)\n"
+            "Do NOT add explanations or extra text."
+        )
+        try:
+            raw = await asyncio.to_thread(
+                model_manager.cloud_vlm_analyze, image, cloud_prompt,
+            )
+            _log.info("[VLM] cloud raw -> '%s'", raw)
+            lines = [l.strip() for l in raw.splitlines() if l.strip()]
+            scene_type = "outdoor"
+            classes: list[str] = []
+            for line in lines:
+                # Try to identify the scene type line
+                lowered = line.lower()
+                if lowered in {"outdoor", "indoor", "night", "nature"}:
+                    scene_type = lowered
+                else:
+                    parsed = parse_detection_result(line)
+                    if parsed:
+                        classes = parsed
+                        break
+            if not classes and len(lines) >= 2:
+                # Fallback: second non-scene-type line is the class list
+                for line in lines:
+                    if line.lower() not in {"outdoor", "indoor", "night", "nature"}:
+                        classes = parse_detection_result(line)
+                        if classes:
+                            break
+            if classes:
+                _log.info("[VLM] cloud success -> scene=%s classes=%s", scene_type, classes)
+                return classes, scene_type
+            _log.warning("[VLM] cloud returned empty, triggering fallback")
+        except Exception as e:
+            _log.warning("[VLM] cloud_vlm_analyze failed (%s: %s) -> falling back to local", type(e).__name__, e)
+            # Fall through to local path
+
+    # ── Local path ───────────────────────────────────────────────────────────
     try:
         scene_type = await asyncio.to_thread(classify_scene, image)
     except Exception as e:

@@ -486,15 +486,38 @@ class ModelManager:
             "model": f"facebook/sam2.1_{settings.sam2_model_size}",
         }
 
-        # Qwen3-VL
+        # Qwen3-VL — check both the local checkpoint_dir (if explicitly set)
+        # AND the HF Hub cache where snapshot_download lands by default.
+        # HuggingFace Hub stores downloads at HF_HOME/hub/models--<org>--<name>/.
         qwen_path = settings.vlm_checkpoint_dir
+        qwen_hf_path = hf_cache / "hub" / f"models--{settings.vlm_model.replace('/', '--')}"
+
+        def _qwen_has_snapshot(p: Path) -> bool:
+            """
+            Check if a HF Hub cache directory has a complete snapshot.
+            HF Hub stores files under snapshots/<revision>/. We look there because
+            that's what ``from_pretrained(local_files_only=True)`` actually loads.
+            """
+            if not p.exists():
+                return False
+            snap_dir = p / "snapshots"
+            if not snap_dir.is_dir():
+                return False
+            for rev in snap_dir.iterdir():
+                if rev.is_dir() and any(rev.glob("*.safetensors")):
+                    return True
+            return False
+
         qwen_available = (
-            (qwen_path and qwen_path.exists() and list(qwen_path.glob("*.safetensors")))
+            (qwen_path and qwen_path.exists() and any(qwen_path.rglob("*.safetensors")))
+            or _qwen_has_snapshot(qwen_hf_path)
             or self._qwen3vl is not None
         )
+        # Prefer the HF Hub path as it is the canonical download target
+        qwen_display_path = qwen_hf_path if qwen_hf_path.exists() else (qwen_path if qwen_path else Path("N/A"))
         status["qwen3vl"] = {
             "available": qwen_available,
-            "path": str(qwen_path) if qwen_path else "N/A",
+            "path": str(qwen_display_path),
             "model": settings.vlm_model,
             "download_script": "python download_qwen3vl.py",
         }

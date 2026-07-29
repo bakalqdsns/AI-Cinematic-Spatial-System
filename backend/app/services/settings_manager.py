@@ -126,6 +126,33 @@ def update_settings(updates: dict) -> dict:
         except Exception as exc:
             _log.warning("[settings] Model mode switch failed: %s", exc)
 
+        # ── Auto-start/stop llama-server when switching to/from local ───────
+        if not cloud:
+            # User selected local LLM — start llama-server if not already running
+            try:
+                from app.services.llama_server_manager import start_server, health_check
+                import asyncio
+                import threading
+
+                async def _start_async():
+                    if not await health_check():
+                        result = await start_server()
+                        if result["success"]:
+                            _log.info("[settings] llama-server auto-started for local LLM: %s", result["message"])
+                        else:
+                            _log.warning("[settings] llama-server auto-start failed: %s", result["message"])
+                    else:
+                        _log.info("[settings] llama-server already running, skipping start")
+
+                # Run async start in background thread so we don't block the sync
+                # settings endpoint response.  The thread starts its own event loop.
+                def _run_start():
+                    asyncio.run(_start_async())
+
+                threading.Thread(target=_run_start, daemon=True, name="llama-auto-start").start()
+            except Exception as exc:
+                _log.warning("[settings] Failed to trigger llama-server auto-start: %s", exc)
+
     # ── Hot-reload per-component modes (vlm, image, video) ──────────────────
     for mode_key in ("vlm_mode", "image_mode", "video_mode"):
         if mode_key in changes:
@@ -133,6 +160,19 @@ def update_settings(updates: dict) -> dict:
             _log.info("[settings] %s switched to: %s", mode_key, new_mode)
             # Per-component mode switches can be handled by respective services
             # as needed (e.g., configure_vlm, configure_image_gen, configure_video)
+
+    # ── video_mode → defaults video_provider ─────────────────────────────────
+    # When the user toggles video_mode, auto-set a sensible video_provider default
+    # so the dropdown always shows a valid selected value.
+    if "video_mode" in changes:
+        _mode = changes["video_mode"]
+        _cur_provider = getattr(_cfg, "video_provider", "dashscope")
+        if _mode == "cloud" and _cur_provider not in ("dashscope", "local_wan", "svd"):
+            _cfg.video_provider = "dashscope"
+            _log.info("[settings] video_provider auto-set to 'dashscope' (video_mode=cloud)")
+        elif _mode == "local" and _cur_provider == "dashscope":
+            _cfg.video_provider = "local_wan"
+            _log.info("[settings] video_provider auto-set to 'local_wan' (video_mode=local)")
 
     # ── Hot-reload DashScope client ─────────────────────────────────────────
     if "dashscope_llm_model" in changes or "dashscope_vlm_model" in changes or "dashscope_image_model" in changes:

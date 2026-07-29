@@ -1,12 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SettingsPanel — top-right toolbar gear button + dropdown panel.
 //
-// Redesigned with Cloud/Local tabs for per-component mode switching.
-// Each tab contains settings for LLM, VLM, Image, and Video independently,
-// allowing mixed configurations (e.g. Cloud LLM + Local VLM).
+// Single-page layout: each module (LLM, VLM, Image, Video) has its own
+// Cloud/Local ModeToggle, allowing fully mixed configurations without tabs.
 // ─────────────────────────────────────────────────────────────────────────────
 import { useEffect, useRef, useState } from 'react';
-import { Settings, X, Image as ImageIcon, Video, Key, RefreshCw, Check, AlertCircle, Cpu, Cloud, HardDrive, Download, ChevronDown } from 'lucide-react';
+import { Settings, X, Image as ImageIcon, Video, RefreshCw, Check, AlertCircle, Cpu, Cloud, HardDrive, Download } from 'lucide-react';
 import { useSettingsStore } from '../store/useSettingsStore';
 import type { ModelDownloadState, ModelDownloadStatus } from '../store/useSettingsStore';
 import type { RuntimeSettings } from '../services/settingsService';
@@ -73,33 +72,6 @@ export function SettingsPanel() {
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
-
-  // Sync active tab with current model_mode setting
-  const activeTab = settings.model_mode === 'local' ? 'local' : 'cloud';
-
-  const handleTabChange = (tab: 'cloud' | 'local') => {
-    const mode = tab === 'cloud' ? 'cloud' : 'local';
-    setLocalField('vlm_mode', mode);
-    setLocalField('image_mode', mode);
-    setLocalField('video_mode', mode);
-    setLocalField('model_mode', mode);
-  };
-
-  // Preset buttons — "Pure Cloud" forces every component to cloud.
-  // "Pure Local" forces every component to local. "Custom" lets the user mix.
-  const applyPureCloud = () => {
-    setLocalField('vlm_mode', 'cloud');
-    setLocalField('image_mode', 'cloud');
-    setLocalField('video_mode', 'cloud');
-    setLocalField('model_mode', 'cloud');
-  };
-
-  const applyPureLocal = () => {
-    setLocalField('vlm_mode', 'local');
-    setLocalField('image_mode', 'local');
-    setLocalField('video_mode', 'local');
-    setLocalField('model_mode', 'local');
-  };
 
   // First open: hydrate from server and model download status
   useEffect(() => {
@@ -216,56 +188,259 @@ export function SettingsPanel() {
             </div>
           )}
 
-          {/* Tab bar */}
-          <div className="flex items-center justify-between border-b border-gray-700 px-2 pt-2">
-            <div className="flex">
-              <TabButton
-                active={activeTab === 'cloud'}
-                onClick={() => handleTabChange('cloud')}
-                icon={<Cloud size={12} />}
-                label="Cloud"
-              />
-              <TabButton
-                active={activeTab === 'local'}
-                onClick={() => handleTabChange('local')}
-                icon={<HardDrive size={12} />}
-                label="Local"
-              />
-            </div>
-            <div className="flex items-center gap-1 pr-2">
-              <PresetButton
-                label="纯云端"
-                onClick={applyPureCloud}
-                active={
-                  settings.vlm_mode === 'cloud' &&
-                  settings.image_mode === 'cloud' &&
-                  settings.video_mode === 'cloud'
-                }
-              />
-              <PresetButton
-                label="全本地"
-                onClick={applyPureLocal}
-                active={
-                  settings.vlm_mode === 'local' &&
-                  settings.image_mode === 'local' &&
-                  settings.video_mode === 'local'
-                }
-              />
-            </div>
-          </div>
+          {/* Single-page content: all modules listed vertically, each with its own mode toggle */}
+          <div className="p-4 flex flex-col gap-3">
+            {/* Always-local notice */}
+            <SettingsGroup icon={<HardDrive size={14} className="text-amber-400" />} title="必本地组件">
+              <p className="text-[10px] text-gray-500 leading-relaxed -mt-1">
+                以下模型始终在本地运行，无云端替代：Depth / SAM2 / Grounding DINO / LaMa。
+              </p>
+            </SettingsGroup>
 
-          {/* Tab content */}
-          <div className="p-4">
-            {activeTab === 'cloud' && (
-              <CloudTabContent settings={settings} setLocalField={setLocalField} />
-            )}
-            {activeTab === 'local' && (
-              <LocalTabContent
-                settings={settings}
-                setLocalField={setLocalField}
-                modelDownloads={modelDownloads}
+            {/* LLM Settings */}
+            <SettingsGroup icon={<Cpu size={14} className="text-indigo-400" />} title="LLM">
+              <ModeToggle
+                label="模式"
+                value={settings.model_mode}
+                onChange={(v) => setLocalField('model_mode', v)}
               />
-            )}
+              {settings.model_mode === 'cloud' ? (
+                <>
+                  <Field label="Model">
+                    <select
+                      value={settings.dashscope_llm_model}
+                      onChange={(e) => setLocalField('dashscope_llm_model', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {DASHSCOPE_LLM_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="API Key">
+                    <input
+                      type="password"
+                      value={settings.dashscope_llm_api_key ?? ''}
+                      onChange={(e) => setLocalField('dashscope_llm_api_key', e.target.value)}
+                      placeholder="sk-..."
+                      spellCheck={false}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                  </Field>
+                </>
+              ) : (
+                <>
+                  <Field label="Server URL">
+                    <input
+                      type="text"
+                      value={settings.llm_base_url}
+                      onChange={(e) => setLocalField('llm_base_url', e.target.value)}
+                      placeholder="http://localhost:8080/v1"
+                      spellCheck={false}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                  </Field>
+                  <Field label="Model">
+                    <select
+                      value={settings.llm_model}
+                      onChange={(e) => setLocalField('llm_model', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {LOCAL_LLM_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                </>
+              )}
+            </SettingsGroup>
+
+            {/* VLM Settings */}
+            <SettingsGroup icon={<Video size={14} className="text-cyan-400" />} title="VLM (场景分析)">
+              <ModeToggle
+                label="模式"
+                value={settings.vlm_mode}
+                onChange={(v) => setLocalField('vlm_mode', v)}
+              />
+              {settings.vlm_mode === 'cloud' ? (
+                <>
+                  <Field label="Model">
+                    <select
+                      value={settings.dashscope_vlm_model}
+                      onChange={(e) => setLocalField('dashscope_vlm_model', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {DASHSCOPE_VLM_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="API Key">
+                    <input
+                      type="password"
+                      value={settings.dashscope_vlm_api_key ?? ''}
+                      onChange={(e) => setLocalField('dashscope_vlm_api_key', e.target.value)}
+                      placeholder="sk-..."
+                      spellCheck={false}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                  </Field>
+                </>
+              ) : (
+                <>
+                  <ModelDownloadItem
+                    modelKey="qwen3vl"
+                    label="Qwen3-VL"
+                    hint="场景分析 VLM"
+                    status={modelDownloads.qwen3vl}
+                  />
+                </>
+              )}
+            </SettingsGroup>
+
+            {/* Image Settings */}
+            <SettingsGroup icon={<ImageIcon size={14} className="text-emerald-400" />} title="Image (图像生成)">
+              <ModeToggle
+                label="模式"
+                value={settings.image_mode}
+                onChange={(v) => setLocalField('image_mode', v)}
+              />
+              {settings.image_mode === 'cloud' ? (
+                <>
+                  <Field label="Model">
+                    <select
+                      value={settings.dashscope_image_model}
+                      onChange={(e) => setLocalField('dashscope_image_model', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {DASHSCOPE_IMAGE_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="API Key">
+                    <input
+                      type="password"
+                      value={settings.dashscope_image_api_key ?? ''}
+                      onChange={(e) => setLocalField('dashscope_image_api_key', e.target.value)}
+                      placeholder="sk-..."
+                      spellCheck={false}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                  </Field>
+                </>
+              ) : (
+                <>
+                  <Field label="Model ID">
+                    <input
+                      type="text"
+                      value={settings.image_model_id}
+                      onChange={(e) => setLocalField('image_model_id', e.target.value)}
+                      placeholder="Tongyi-MAI/Z-Image-Turbo"
+                      list="local-image-presets"
+                      spellCheck={false}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                    <datalist id="local-image-presets">
+                      {IMAGE_MODEL_PRESETS.map((p) => (
+                        <option key={p} value={p} />
+                      ))}
+                    </datalist>
+                  </Field>
+                  <Field label="Dtype">
+                    <select
+                      value={settings.image_dtype}
+                      onChange={(e) => setLocalField('image_dtype', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {DTYPE_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <ModelDownloadItem
+                    modelKey="image"
+                    label="Z-Image-Turbo"
+                    hint="图生图 (~33 GB)"
+                    status={modelDownloads.image}
+                  />
+                </>
+              )}
+            </SettingsGroup>
+
+            {/* Video Settings */}
+            <SettingsGroup icon={<Video size={14} className="text-orange-400" />} title="Video (视频生成)">
+              <ModeToggle
+                label="模式"
+                value={settings.video_mode}
+                onChange={(v) => setLocalField('video_mode', v)}
+              />
+              {settings.video_mode === 'cloud' ? (
+                <>
+                  <Field label="Provider">
+                    <select
+                      value={settings.video_provider}
+                      onChange={(e) => setLocalField('video_provider', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {VIDEO_PROVIDER_OPTIONS.filter((o) => o.value === 'dashscope').map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="API Key">
+                    <input
+                      type="password"
+                      value={settings.dashscope_video_api_key ?? ''}
+                      onChange={(e) => setLocalField('dashscope_video_api_key', e.target.value)}
+                      placeholder="sk-..."
+                      spellCheck={false}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                    />
+                  </Field>
+                </>
+              ) : (
+                <>
+                  <Field label="Provider">
+                    <select
+                      value={VIDEO_PROVIDER_OPTIONS.filter((o) => o.value !== 'dashscope').some((o) => o.value === settings.video_provider)
+                        ? settings.video_provider
+                        : 'local_wan'}
+                      onChange={(e) => setLocalField('video_provider', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {VIDEO_PROVIDER_OPTIONS.filter((o) => o.value !== 'dashscope').map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                </>
+              )}
+            </SettingsGroup>
+
+            {/* Always-local models */}
+            <SettingsGroup icon={<Download size={14} className="text-amber-400" />} title="Always-Local Models">
+              <p className="text-[10px] text-gray-500 leading-relaxed -mt-1">
+                以下模型没有云端替代品，始终在本地运行。请提前下载。
+              </p>
+              <ModelDownloadItem modelKey="depth" label="Depth (DepthAnything V2)" hint="深度估计" status={modelDownloads.depth} />
+              <ModelDownloadItem modelKey="sam2" label="SAM2" hint="图像分割" status={modelDownloads.sam2} />
+              <ModelDownloadItem modelKey="grounding_dino" label="Grounding DINO" hint="目标检测" status={modelDownloads.grounding_dino} />
+              <ModelDownloadItem modelKey="lama" label="LaMa Inpaint" hint="图像修复" status={modelDownloads.lama} />
+            </SettingsGroup>
           </div>
 
           {/* Footer */}
@@ -310,62 +485,6 @@ export function SettingsPanel() {
   );
 }
 
-// ── Tab button ────────────────────────────────────────────────────────────────
-
-function TabButton({
-  active,
-  onClick,
-  icon,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors
-        ${active
-          ? 'border-blue-500 text-blue-400 bg-blue-950/30'
-          : 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-800'
-        }`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-// ── Preset button (compact, in tab bar) ────────────────────────────────────────
-
-function PresetButton({
-  label,
-  onClick,
-  active,
-}: {
-  label: string;
-  onClick: () => void;
-  active: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={`应用 ${label} 预设`}
-      className={`px-2 py-1 rounded text-[10px] font-medium border transition-colors
-        ${active
-          ? 'bg-blue-600 border-blue-500 text-white'
-          : 'bg-gray-800/60 border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700/80 hover:border-gray-600'
-        }`}
-    >
-      {label}
-    </button>
-  );
-}
-
 // ── Mode toggle (cloud/local segmented control) ────────────────────────────────
 
 function ModeToggle({
@@ -374,7 +493,7 @@ function ModeToggle({
   onChange,
 }: {
   label: string;
-  value: 'cloud' | 'local';
+  value: string;
   onChange: (v: 'cloud' | 'local') => void;
 }) {
   return (
@@ -406,350 +525,6 @@ function ModeToggle({
           Local
         </button>
       </div>
-    </div>
-  );
-}
-
-// ── Cloud tab content ──────────────────────────────────────────────────────────
-
-function CloudTabContent({
-  settings,
-  setLocalField,
-}: {
-  settings: RuntimeSettings;
-  setLocalField: <K extends keyof RuntimeSettings>(key: K, value: RuntimeSettings[K]) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-3">
-      {/* Per-component mode toggles — explicit, so users can mix */}
-      <SettingsGroup
-        icon={<Cloud size={14} className="text-blue-400" />}
-        title="Per-Component Mode"
-      >
-        <p className="text-[10px] text-gray-500 leading-relaxed -mt-1">
-          纯云端 + 几个必须本地（Depth / SAM2 / Grounding DINO / LaMa）。
-          下方可单独覆盖每个组件的运行方式。
-        </p>
-        <ModeToggle
-          label="VLM (场景分析)"
-          value={settings.vlm_mode}
-          onChange={(v) => setLocalField('vlm_mode', v)}
-        />
-        <ModeToggle
-          label="Image (图像生成)"
-          value={settings.image_mode}
-          onChange={(v) => setLocalField('image_mode', v)}
-        />
-        <ModeToggle
-          label="Video (视频生成)"
-          value={settings.video_mode}
-          onChange={(v) => setLocalField('video_mode', v)}
-        />
-        <div className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-amber-950/30 border border-amber-800/40 text-[10px] text-amber-300/90">
-          <HardDrive size={11} className="mt-0.5 shrink-0" />
-          <span>
-            以下组件始终本地运行（无云端替代）：Depth / SAM2 / Grounding DINO / LaMa。
-          </span>
-        </div>
-      </SettingsGroup>
-
-      {/* LLM Settings */}
-      <SettingsGroup icon={<Cpu size={14} className="text-indigo-400" />} title="LLM">
-        <Field label="Model">
-          <select
-            value={settings.dashscope_llm_model}
-            onChange={(e) => setLocalField('dashscope_llm_model', e.target.value)}
-            className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-              focus:outline-none focus:border-blue-500"
-          >
-            {DASHSCOPE_LLM_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="API Key">
-          <input
-            type="password"
-            value={settings.dashscope_llm_api_key ?? ''}
-            onChange={(e) => setLocalField('dashscope_llm_api_key', e.target.value)}
-            placeholder="sk-..."
-            spellCheck={false}
-            className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-              placeholder-gray-600 focus:outline-none focus:border-blue-500"
-          />
-        </Field>
-      </SettingsGroup>
-
-      {/* VLM Settings */}
-      {settings.vlm_mode === 'cloud' && (
-        <SettingsGroup icon={<Video size={14} className="text-cyan-400" />} title="VLM (Cloud)">
-          <Field label="Model">
-            <select
-              value={settings.dashscope_vlm_model}
-              onChange={(e) => setLocalField('dashscope_vlm_model', e.target.value)}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                focus:outline-none focus:border-blue-500"
-            >
-              {DASHSCOPE_VLM_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="API Key">
-            <input
-              type="password"
-              value={settings.dashscope_vlm_api_key ?? ''}
-              onChange={(e) => setLocalField('dashscope_vlm_api_key', e.target.value)}
-              placeholder="sk-..."
-              spellCheck={false}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                placeholder-gray-600 focus:outline-none focus:border-blue-500"
-            />
-          </Field>
-        </SettingsGroup>
-      )}
-
-      {/* Image Settings */}
-      {settings.image_mode === 'cloud' && (
-        <SettingsGroup icon={<ImageIcon size={14} className="text-emerald-400" />} title="Image (Cloud)">
-          <Field label="Model">
-            <select
-              value={settings.dashscope_image_model}
-              onChange={(e) => setLocalField('dashscope_image_model', e.target.value)}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                focus:outline-none focus:border-blue-500"
-            >
-              {DASHSCOPE_IMAGE_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="API Key">
-            <input
-              type="password"
-              value={settings.dashscope_image_api_key ?? ''}
-              onChange={(e) => setLocalField('dashscope_image_api_key', e.target.value)}
-              placeholder="sk-..."
-              spellCheck={false}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                placeholder-gray-600 focus:outline-none focus:border-blue-500"
-            />
-          </Field>
-        </SettingsGroup>
-      )}
-
-      {/* Video Settings */}
-      {settings.video_mode === 'cloud' && (
-        <SettingsGroup icon={<Video size={14} className="text-purple-400" />} title="Video (Cloud)">
-          <Field label="Provider">
-            <select
-              value={settings.video_provider}
-              onChange={(e) => setLocalField('video_provider', e.target.value)}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                focus:outline-none focus:border-blue-500"
-            >
-              {VIDEO_PROVIDER_OPTIONS.filter((o) => o.value === 'dashscope').map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="API Key">
-            <input
-              type="password"
-              value={settings.dashscope_video_api_key ?? ''}
-              onChange={(e) => setLocalField('dashscope_video_api_key', e.target.value)}
-              placeholder="sk-..."
-              spellCheck={false}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                placeholder-gray-600 focus:outline-none focus:border-blue-500"
-            />
-          </Field>
-        </SettingsGroup>
-      )}
-
-      <p className="text-[10px] text-gray-500 leading-relaxed">
-        纯云端模式：LLM / VLM / 图像 / 视频走 DashScope API。需要有效 API Key。
-      </p>
-    </div>
-  );
-}
-
-// ── Local tab content ──────────────────────────────────────────────────────────
-
-function LocalTabContent({
-  settings,
-  setLocalField,
-  modelDownloads,
-}: {
-  settings: RuntimeSettings;
-  setLocalField: <K extends keyof RuntimeSettings>(key: K, value: RuntimeSettings[K]) => void;
-  modelDownloads: ModelDownloadState;
-}) {
-  return (
-    <div className="flex flex-col gap-3">
-      {/* Per-component mode toggles */}
-      <SettingsGroup
-        icon={<HardDrive size={14} className="text-emerald-400" />}
-        title="Per-Component Mode"
-      >
-        <p className="text-[10px] text-gray-500 leading-relaxed -mt-1">
-          每个组件可独立切换 cloud / local。需要本地运行时，请确保下方对应模型已下载。
-        </p>
-        <ModeToggle
-          label="VLM (场景分析)"
-          value={settings.vlm_mode}
-          onChange={(v) => setLocalField('vlm_mode', v)}
-        />
-        <ModeToggle
-          label="Image (图像生成)"
-          value={settings.image_mode}
-          onChange={(v) => setLocalField('image_mode', v)}
-        />
-        <ModeToggle
-          label="Video (视频生成)"
-          value={settings.video_mode}
-          onChange={(v) => setLocalField('video_mode', v)}
-        />
-        <div className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-amber-950/30 border border-amber-800/40 text-[10px] text-amber-300/90">
-          <HardDrive size={11} className="mt-0.5 shrink-0" />
-          <span>
-            始终本地运行：Depth / SAM2 / Grounding DINO / LaMa — 无云端替代。
-          </span>
-        </div>
-      </SettingsGroup>
-
-      {/* LLM Settings */}
-      <SettingsGroup icon={<Cpu size={14} className="text-indigo-400" />} title="Local LLM">
-        <Field label="Server URL">
-          <input
-            type="text"
-            value={settings.llm_base_url}
-            onChange={(e) => setLocalField('llm_base_url', e.target.value)}
-            placeholder="http://localhost:8080/v1"
-            spellCheck={false}
-            className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-              placeholder-gray-600 focus:outline-none focus:border-blue-500"
-          />
-        </Field>
-        <Field label="Model">
-          <select
-            value={settings.llm_model}
-            onChange={(e) => setLocalField('llm_model', e.target.value)}
-            className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-              focus:outline-none focus:border-blue-500"
-          >
-            {LOCAL_LLM_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </Field>
-      </SettingsGroup>
-
-      {/* VLM local settings — only shown if VLM mode is local */}
-      {settings.vlm_mode === 'local' && (
-        <SettingsGroup icon={<Video size={14} className="text-cyan-400" />} title="Local VLM">
-          <ModelDownloadItem
-            modelKey="qwen3vl"
-            label="Qwen3-VL"
-            hint="场景分析 VLM"
-            status={modelDownloads.qwen3vl}
-          />
-        </SettingsGroup>
-      )}
-
-      {/* Image local settings — only shown if Image mode is local */}
-      {settings.image_mode === 'local' && (
-        <SettingsGroup icon={<ImageIcon size={14} className="text-emerald-400" />} title="Local Image Generation">
-          <Field label="Model ID">
-            <input
-              type="text"
-              value={settings.image_model_id}
-              onChange={(e) => setLocalField('image_model_id', e.target.value)}
-              placeholder="Tongyi-MAI/Z-Image-Turbo"
-              list="local-image-presets"
-              spellCheck={false}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                placeholder-gray-600 focus:outline-none focus:border-blue-500"
-            />
-            <datalist id="local-image-presets">
-              {IMAGE_MODEL_PRESETS.map((p) => (
-                <option key={p} value={p} />
-              ))}
-            </datalist>
-          </Field>
-          <Field label="Dtype">
-            <select
-              value={settings.image_dtype}
-              onChange={(e) => setLocalField('image_dtype', e.target.value)}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                focus:outline-none focus:border-blue-500"
-            >
-              {DTYPE_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </Field>
-          <ModelDownloadItem
-            modelKey="image"
-            label="Z-Image-Turbo"
-            hint="图生图 (~33 GB)"
-            status={modelDownloads.image}
-          />
-        </SettingsGroup>
-      )}
-
-      {/* Video local settings — only shown if Video mode is local */}
-      {settings.video_mode === 'local' && (
-        <SettingsGroup icon={<Video size={14} className="text-purple-400" />} title="Local Video Generation">
-          <Field label="Provider">
-            <select
-              value={settings.video_provider}
-              onChange={(e) => setLocalField('video_provider', e.target.value)}
-              className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                focus:outline-none focus:border-blue-500"
-            >
-              {VIDEO_PROVIDER_OPTIONS.filter((o) => o.value !== 'dashscope').map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </Field>
-        </SettingsGroup>
-      )}
-
-      {/* Always-local components — download UI */}
-      <SettingsGroup icon={<Download size={14} className="text-amber-400" />} title="Always-Local Models">
-        <p className="text-[10px] text-gray-500 leading-relaxed -mt-1">
-          以下模型没有云端替代品，始终在本地运行。请提前下载。
-        </p>
-        <ModelDownloadItem
-          modelKey="depth"
-          label="Depth (DepthAnything V2)"
-          hint="深度估计"
-          status={modelDownloads.depth}
-        />
-        <ModelDownloadItem
-          modelKey="sam2"
-          label="SAM2"
-          hint="图像分割"
-          status={modelDownloads.sam2}
-        />
-        <ModelDownloadItem
-          modelKey="grounding_dino"
-          label="Grounding DINO"
-          hint="目标检测"
-          status={modelDownloads.grounding_dino}
-        />
-        <ModelDownloadItem
-          modelKey="lama"
-          label="LaMa Inpaint"
-          hint="图像修复"
-          status={modelDownloads.lama}
-        />
-      </SettingsGroup>
-
-      <p className="text-[10px] text-gray-500 leading-relaxed">
-        本地模式需要本地运行 llama-server / 下载模型权重。请确保有足够显存（推荐 16GB+）。
-      </p>
     </div>
   );
 }

@@ -248,8 +248,8 @@ async def _generate_with_retry(
     max_retries: int = 2,
     size: Optional[str] = None,
 ) -> Optional[str]:
-    """Generate via txt2img with retry/backoff."""
-    last_exc = None
+    """Generate via txt2img with retry/backoff. Raises RuntimeError after exhausting retries."""
+    last_exc: Exception | None = None
     image_mode = _get_image_mode()
     out_size = size or _default_character_size()
 
@@ -259,7 +259,7 @@ async def _generate_with_retry(
                 return await _generate_via_cloud(prompt, size=out_size)
             else:
                 return await _generate_via_local(prompt, seed=seed, size=out_size)
-        except Exception as e:
+        except RuntimeError as e:
             last_exc = e
             logger.warning(
                 "[character_generator] %s attempt %d failed (mode=%s): %s",
@@ -268,8 +268,12 @@ async def _generate_with_retry(
             if attempt < max_retries:
                 await asyncio.sleep(0.6 * (attempt + 1))
 
-    logger.error("[character_generator] %s exhausted retries: %s", label, last_exc)
-    return None
+    # All retries exhausted — surface as a clear failure
+    detail = str(last_exc) if last_exc else "unknown error"
+    raise RuntimeError(
+        f"[character_generator] {label} exhausted {max_retries + 1} attempts "
+        f"(mode={image_mode}): {detail}"
+    )
 
 
 async def _img2img_with_retry(
@@ -280,8 +284,8 @@ async def _img2img_with_retry(
     strength: float = 0.7,
     max_retries: int = 2,
 ) -> Optional[str]:
-    """Generate via img2img with retry/backoff."""
-    last_exc = None
+    """Generate via img2img with retry/backoff. Raises RuntimeError after exhausting retries."""
+    last_exc: Exception | None = None
     image_mode = _get_image_mode()
 
     for attempt in range(max_retries + 1):
@@ -291,7 +295,7 @@ async def _img2img_with_retry(
                 return await _generate_via_cloud(prompt)
             else:
                 return await _generate_via_local_with_reference(prompt, anchor_b64, strength=strength)
-        except Exception as e:
+        except RuntimeError as e:
             last_exc = e
             logger.warning(
                 "[character_generator] %s attempt %d failed (mode=%s): %s",
@@ -300,8 +304,11 @@ async def _img2img_with_retry(
             if attempt < max_retries:
                 await asyncio.sleep(0.6 * (attempt + 1))
 
-    logger.error("[character_generator] %s exhausted retries: %s", label, last_exc)
-    return None
+    detail = str(last_exc) if last_exc else "unknown error"
+    raise RuntimeError(
+        f"[character_generator] {label} img2img exhausted {max_retries + 1} attempts "
+        f"(mode={image_mode}): {detail}"
+    )
 
 
 async def generate_character_variation(
@@ -399,7 +406,7 @@ async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Option
     """
     Generate image via DashScope ImageSynthesis API.
 
-    Returns base64-encoded PNG, or None on failure.
+    Returns base64-encoded PNG, or raises RuntimeError on failure.
     """
     try:
         from app.services.dashscope_client import get_dashscope_client
@@ -409,14 +416,26 @@ async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Option
             client.generate_image, prompt, size=out_size, n=1,
         )
         if not urls:
-            return None
+            raise RuntimeError(
+                "DashScope ImageSynthesis returned an empty URL list. "
+                "Check that your WANX API key has remaining quota and "
+                "the model 'wanx-v1' is enabled in your DashScope workspace."
+            )
         url = urls[0]
         image_bytes = await asyncio.to_thread(_fetch_url, url)
         if image_bytes:
             return base64.b64encode(image_bytes).decode("ascii")
+        raise RuntimeError(
+            f"Failed to fetch image from DashScope URL: {url}. "
+            "Network issue or URL expired."
+        )
+    except RuntimeError:
+        raise  # re-raise RuntimeErrors from above
     except Exception as e:
-        logger.warning("[character_generator] _generate_via_cloud failed: %s", e)
-    return None
+        raise RuntimeError(
+            f"DashScope ImageSynthesis call failed: {e}. "
+            "Verify DASHSCOPE_API_KEY (or AICSS_DASHSCOPE_IMAGE_API_KEY) is set."
+        ) from e
 
 
 def _fetch_url(url: str) -> bytes:
