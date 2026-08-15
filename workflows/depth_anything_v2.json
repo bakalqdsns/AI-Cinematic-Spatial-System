@@ -1,0 +1,94 @@
+{
+  "last_node_id": 8,
+  "last_link_id": 7,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [80, 200],
+      "size": [320, 220],
+      "widgets_values": ["example.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "ImageScale",
+      "pos": [460, 200],
+      "size": [260, 140],
+      "widgets_values": ["lanczos", 1024, 1024, "disabled"]
+    },
+    {
+      "id": 3,
+      "type": "DepthAnythingV2Advanced",
+      "pos": [780, 200],
+      "size": [340, 220],
+      "widgets_values": ["depth_anything_v2_vitl.pth", "fp16", 0.0, 1.0, "standard"]
+    },
+    {
+      "id": 4,
+      "type": "ImageBatch",
+      "pos": [1180, 200],
+      "size": [220, 100]
+    },
+    {
+      "id": 5,
+      "type": "ImageColorCorrect",
+      "pos": [1180, 360],
+      "size": [260, 200],
+      "widgets_values": [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0]
+    },
+    {
+      "id": 6,
+      "type": "SaveImage",
+      "pos": [1480, 200],
+      "size": [280, 100],
+      "title": "DEPTH OUTPUT",
+      "widgets_values": ["aicss_depth"]
+    },
+    {
+      "id": 7,
+      "type": "SaveImage",
+      "pos": [1480, 360],
+      "size": [280, 100],
+      "title": "DEPTH COLORIZED",
+      "widgets_values": ["aicss_depth_colorized"]
+    },
+    {
+      "id": 8,
+      "type": "PreviewImage",
+      "pos": [780, 480],
+      "size": [340, 280]
+    }
+  ],
+  "links": [
+    [1, 1, 1, 0, 2, 0, "IMAGE"],
+    [2, 1, 2, 0, 3, 0, "IMAGE"],
+    [3, 1, 3, 0, 4, 0, "IMAGE"],
+    [4, 1, 3, 0, 5, 0, "IMAGE"],
+    [5, 1, 4, 0, 6, 0, "IMAGE"],
+    [6, 1, 5, 0, 7, 0, "IMAGE"],
+    [7, 1, 3, 0, 8, 0, "IMAGE"]
+  ],
+  "groups": [
+    {
+      "title": "AICSS · 深度估计（Depth Anything V2）",
+      "bounding": [40, 140, 1740, 640],
+      "color": "#2e7d32"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "aicss": {
+      "workflow_name": "depth_anything_v2",
+      "purpose": "RGB image -> per-pixel depth map for 2.5D parallax",
+      "model_recommended": "depth_anything_v2_vitl.pth (~1.3GB)",
+      "estimated_runtime_seconds": 4,
+      "notes": [
+        "Upload your image to ComfyUI first, then type its filename into node 1 (LoadImage).",
+        "node 5 (ImageColorCorrect) tints the depth to a viridis-like colormap for visual review. Drop it if you only need the raw grayscale depth.",
+        "The output is a single-channel depth saved as PNG. Use the colormap variant for humans, the grayscale for downstream AI pipelines.",
+        "Install via: cd custom_nodes && git clone https://github.com/kijai/ComfyUI-DepthAnythingV2.git"
+      ]
+    }
+  },
+  "version": 0.4
+}

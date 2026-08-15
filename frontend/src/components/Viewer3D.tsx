@@ -12,6 +12,8 @@ import { LAYER_COLORS, DEPTH_LAYER_Z } from '../types';
 import type { DepthLayerKey, DetectedObject, LayerRegion } from '../types';
 import { zForRegion } from '../utils/depthUtils';
 import { ExportPanel } from './ExportPanel';
+import { CameraPathPlayer } from './CameraPathPlayer';
+import { ShotPlaybackControls, type PlaybackState } from './ShotPlaybackControls';
 
 // Scene dimensions (world units)
 const SCENE_WIDTH = 20;
@@ -477,7 +479,20 @@ function CameraController() {
 }
 
 // Main export
-export function Viewer3D() {
+
+export interface Viewer3DProps {
+  /**
+   * The currently-selected shot from the StoryboardTab. When provided,
+   * `CameraPathPlayer` runs the shot's camera animation automatically
+   * and `ShotPlaybackControls` lets the user play / pause / scrub.
+   *
+   * When omitted, the Viewer behaves as before — manual orbit controls
+   * only, no camera animation.
+   */
+  currentShot?: import('../types/script').Shot | null;
+}
+
+export function Viewer3D({ currentShot = null }: Viewer3DProps = {}) {
   const analysisResult = useAppStore((s) => s.analysisResult);
   const selectedObjectId = useAppStore((s) => s.selectedObjectId);
   const setSelectedObjectId = useAppStore((s) => s.setSelectedObjectId);
@@ -486,6 +501,17 @@ export function Viewer3D() {
   const regions = useAppStore((s) => s.regions);
 
   const [glCanvas, setGlCanvas] = useState<HTMLCanvasElement | null>(null);
+
+  // Playback state — only used when `currentShot` is set.
+  const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
+  const [playbackProgress, setPlaybackProgress] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+
+  // Reset playback when the shot changes
+  useEffect(() => {
+    setPlaybackState('idle');
+    setPlaybackProgress(0);
+  }, [currentShot?.id]);
 
   const handleSelect = useCallback(
     (id: string) => { setSelectedObjectId(selectedObjectId === id ? null : id); },
@@ -503,6 +529,15 @@ export function Viewer3D() {
         <GlDomElement onDomReady={setGlCanvas} />
         <SceneContent onSelectObject={handleSelect} />
         <CameraController />
+        {currentShot && (
+          <CameraPathPlayer
+            shot={currentShot}
+            state={playbackState}
+            speed={playbackSpeed}
+            onProgress={setPlaybackProgress}
+            onFinish={() => setPlaybackState('finished')}
+          />
+        )}
       </Canvas>
 
       <div className="absolute top-3 right-3 flex items-center gap-2">
@@ -517,6 +552,24 @@ export function Viewer3D() {
       {selectedObjectId && analysisResult && (
         <div className="absolute bottom-3 left-3 bg-black/70 text-white text-xs px-3 py-2 rounded-lg">
           Selected: {selectedObjectId}
+        </div>
+      )}
+
+      {/* Shot playback controls (Phase 1.3.2) — only visible when a shot
+          is active. Sits at the bottom of the viewport, full-width. */}
+      {currentShot && (
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 w-[90%] max-w-2xl">
+          <ShotPlaybackControls
+            movement={currentShot.cameraMovement}
+            duration={currentShot.durationSeconds}
+            state={playbackState}
+            progress={playbackProgress}
+            speed={playbackSpeed}
+            onPlay={() => setPlaybackState('playing')}
+            onPause={() => setPlaybackState('paused')}
+            onStop={() => setPlaybackState('idle')}
+            onSpeedChange={setPlaybackSpeed}
+          />
         </div>
       )}
 

@@ -769,22 +769,63 @@ def _default_checkpoint_dir() -> Optional[str]:
         return None
 
 
-def get_image_generator() -> LocalImageGenerator:
-    """Return the shared LocalImageGenerator singleton (loads lazily on first call)."""
+def _wrap_singleton(gen):
+    """Wrap the singleton in RLockImageGenerator so generate/configure can't
+    race against each other.
+
+    Import is local so this module can still import even if the interface
+    module has a syntax error (defensive — the singleton code path runs on
+    first image generation, not at module import time).
+    """
+    if gen is None:
+        return None
+    try:
+        from app.services.image_generator_interface import wrap_with_rlock
+    except Exception as e:
+        logger.warning(
+            "[ImageGen] Could not import RLock wrapper, returning raw singleton: %s", e
+        )
+        return gen
+    return wrap_with_rlock(gen)
+
+
+def get_image_generator():
+    """Return the shared image generator singleton (loads lazily on first call).
+
+    The returned object satisfies :class:`ImageGeneratorInterface` and is
+    wrapped in an :class:`RLockImageGenerator` so that ``configure()`` and
+    ``unload()`` block while a generation is in flight, fixing the race
+    condition flagged in ``PROJECT_STATUS.md``.
+
+    For raw attribute access (tests, advanced operations), use
+    :func:`unwrap_image_generator` instead.
+    """
     global _img_gen
-    # Use a lock so two concurrent requests can't both try to build the
-    # pipeline at the same time and double the GPU memory peak.  The
-    # lock is only held during object construction — once the singleton
-    # exists, subsequent calls return immediately.
     if _img_gen is None:
         with _img_gen_lock:
             if _img_gen is None:
                 logger.info(
-                    "[ImageGen] get_image_generator: first call, building singleton (model=%s dtype=%s)",
-                    settings.image_model_id if False else "from-defaults",
-                    "from-defaults",
+                    "[ImageGen] get_image_generator: first call, building singleton"
                 )
-                _img_gen = LocalImageGenerator(checkpoint_dir=_default_checkpoint_dir())
+                _img_gen = _wrap_singleton(
+                    LocalImageGenerator(checkpoint_dir=_default_checkpoint_dir())
+                )
+    return _img_gen
+
+
+def unwrap_image_generator():
+    """Return the raw LocalImageGenerator (no RLock wrapper).
+
+    Returns ``None`` if no singleton has been built yet.
+    """
+    if _img_gen is None:
+        return None
+    try:
+        from app.services.image_generator_interface import RLockImageGenerator
+        if isinstance(_img_gen, RLockImageGenerator):
+            return _img_gen.wrapped
+    except Exception:
+        pass
     return _img_gen
 
 
@@ -797,6 +838,9 @@ def configure_image_generator(model_id: str, dtype_name: str) -> None:
     If a previous generator is resident in GPU memory, we unload it first so
     the new model doesn't pile up on top of the old one (the Z-Image-Turbo
     pipeline is ~14 GB on its own — stacking two of them kills an RTX 4060 Ti).
+
+    The RLock wrapper blocks this call until any in-flight ``generate()``
+    completes, so the swap is atomic with respect to ongoing generation.
     """
     global _img_gen
     with _img_gen_lock:
@@ -807,10 +851,12 @@ def configure_image_generator(model_id: str, dtype_name: str) -> None:
                 logger.warning("[ImageGen] configure: unload old generator failed: %s", e)
             _img_gen = None
             _clear_cuda_cache_best_effort()
-        _img_gen = LocalImageGenerator(
-            model_id=model_id,
-            dtype_name=dtype_name,
-            checkpoint_dir=_default_checkpoint_dir(),
+        _img_gen = _wrap_singleton(
+            LocalImageGenerator(
+                model_id=model_id,
+                dtype_name=dtype_name,
+                checkpoint_dir=_default_checkpoint_dir(),
+            )
         )
     logger.info("[ImageGen] Configured: model_id=%s dtype=%s", model_id, dtype_name)
 

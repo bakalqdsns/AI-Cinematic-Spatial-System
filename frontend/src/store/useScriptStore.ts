@@ -7,7 +7,7 @@ import { create } from 'zustand';
 import type {
   ScriptData, Shot, SceneTransition, CharacterActionSequence,
   CharacterAsset, Character, MotionSequence, ScriptLanguage,
-  SceneAsset,
+  SceneAsset, Scene,
 } from '../types/script';
 import * as scriptService from '../services/scriptService';
 import { useAppStore } from './useAppStore';
@@ -54,6 +54,13 @@ interface ScriptStore {
   // ─── Project context ───────────────────────────────────────────────────────
   projectId: string | null;
 
+  // ─── Auto-resolve prompts (LLM-generated visual_prompt) ─────────────────────
+  // When true, parseScript will fan out `/visual-prompt` calls for every
+  // character/scene with empty visualPrompt. Default-on; future SettingsPanel
+  // can wire this to a UI toggle.
+  autoResolvePromptsEnabled: boolean;
+  isResolvingPrompts: boolean;
+
   // ─── Error state ───────────────────────────────────────────────────────────
   error: string | null;
 
@@ -64,6 +71,7 @@ interface ScriptStore {
   selectShot: (shotId: string | null) => void;
   selectCharacter: (charId: string | null) => void;
   setProjectId: (id: string | null) => void;
+  setAutoResolvePrompts: (enabled: boolean) => void;
 
   parseScript: (projectId?: string) => Promise<void>;
   extractCharacters: (projectId?: string) => Promise<Character[]>;
@@ -72,6 +80,9 @@ interface ScriptStore {
   generateCharacterThreeView: (charId: string, projectId?: string) => Promise<void>;
   generateCharacterVariation: (charId: string, prompt: string, projectId?: string) => Promise<void>;
   updateCharacterVisualPrompt: (charId: string, prompt: string) => void;
+  updateSceneVisualPrompt: (sceneId: string, prompt: string) => void;
+  resolveCharacterVisualPrompts: (charIds?: string[]) => Promise<void>;
+  resolveSceneVisualPrompts: (sceneIds?: string[]) => Promise<void>;
   generateSceneAsset: (sceneId: string, location: string, time: string, atmosphere: string, visualPrompt: string, projectId?: string) => Promise<void>;
   selectScene: (sceneId: string | null) => void;
 
@@ -122,6 +133,8 @@ const initialState = {
   selectedSceneId: null as string | null,
   activeTab: 'script' as const,
   projectId: null as string | null,
+  autoResolvePromptsEnabled: true,
+  isResolvingPrompts: false,
   error: null as string | null,
 };
 
@@ -135,6 +148,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
   selectCharacter: (charId) => set({ selectedCharacterId: charId }),
   selectScene: (sceneId) => set({ selectedSceneId: sceneId }),
   setProjectId: (id) => set({ projectId: id }),
+  setAutoResolvePrompts: (enabled) => set({ autoResolvePromptsEnabled: enabled }),
 
   // ─── Pass 1: extract characters only (independent fast step) ────────────────
   extractCharacters: async (projectId) => {
@@ -235,6 +249,20 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
           response.scriptData.scenes.map(s => s.id),
         );
       }
+
+      // Auto-resolve visual_prompts (LLM-only, no images). Default-on; runs
+      // in parallel with the heavier image auto-batches above. Writes the
+      // resolved prompt back into parsedScript.characters[i].visualPrompt so
+      // the CharactersTab textarea (and list-card preview) populates
+      // immediately, even before three-view finishes.
+      if (get().autoResolvePromptsEnabled) {
+        void get().resolveCharacterVisualPrompts(finalChars.map(c => c.id));
+        if (response.scriptData?.scenes?.length) {
+          void get().resolveSceneVisualPrompts(
+            response.scriptData.scenes.map(s => s.id),
+          );
+        }
+      }
     } catch (err) {
       console.error('[useScriptStore] parseScript error:', err);
       set({
@@ -294,9 +322,33 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         }
 
         if (Object.keys(newAssets).length) {
-          set(state => ({
-            characterAssets: { ...state.characterAssets, ...newAssets },
-          }));
+          set(state => {
+            const newAssetMap = { ...state.characterAssets, ...newAssets };
+            // Bidirectional flow: also hydrate parsedScript.characters[i]
+            // and extractedCharacters[i] with the resolved visual_prompt +
+            // referenceImage. Only fill when the field is currently empty so
+            // a user-edited prompt is never overwritten by the auto batch.
+            const hydrate = (list: Character[]): Character[] =>
+              list.map(c => {
+                const a = newAssets[c.id];
+                if (!a) return c;
+                const patch: Partial<Character> = {};
+                if (!c.visualPrompt && a.visualPrompt) {
+                  patch.visualPrompt = a.visualPrompt;
+                }
+                if (!c.referenceImage && a.referenceImage) {
+                  patch.referenceImage = a.referenceImage;
+                }
+                return Object.keys(patch).length ? { ...c, ...patch } : c;
+              });
+            return {
+              characterAssets: newAssetMap,
+              parsedScript: state.parsedScript
+                ? { ...state.parsedScript, characters: hydrate(state.parsedScript.characters) }
+                : state.parsedScript,
+              extractedCharacters: hydrate(state.extractedCharacters),
+            };
+          });
         }
 
         // Clear isGeneratingCharacter for finished/failed characters.
@@ -379,9 +431,26 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         }
 
         if (Object.keys(newAssets).length) {
-          set(state => ({
-            sceneAssets: { ...state.sceneAssets, ...newAssets },
-          }));
+          set(state => {
+            const newAssetMap = { ...state.sceneAssets, ...newAssets };
+            // Hydrate parsedScript.scenes[i].visualPrompt for any scene whose
+            // own field is empty. The list-card preview + detail textarea
+            // read from this single source of truth.
+            const hydrateScenes = (list: Scene[]): Scene[] =>
+              list.map(s => {
+                const a = newAssets[s.id];
+                if (a && !s.visualPrompt && a.visualPrompt) {
+                  return { ...s, visualPrompt: a.visualPrompt };
+                }
+                return s;
+              });
+            return {
+              sceneAssets: newAssetMap,
+              parsedScript: state.parsedScript
+                ? { ...state.parsedScript, scenes: hydrateScenes(state.parsedScript.scenes) }
+                : state.parsedScript,
+            };
+          });
         }
 
         const finishedIds = sceneIds.filter(id => {
@@ -484,16 +553,37 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         variations: characterAssets[charId]?.variations || [],
       };
 
-      set(state => ({
-        characterAssets: {
-          ...state.characterAssets,
-          [charId]: asset,
-        },
-        isGeneratingCharacter: {
-          ...state.isGeneratingCharacter,
-          [charId]: false,
-        },
-      }));
+      set(state => {
+        // Bidirectional: also hydrate parsedScript + extractedCharacters with
+        // the resolved visualPrompt + referenceImage so the CharactersTab
+        // textarea + list-card preview update without an extra poll.
+        const hydrated = (list: Character[]): Character[] =>
+          list.map(c => {
+            if (c.id !== charId) return c;
+            const patch: Partial<Character> = {};
+            if (!c.visualPrompt && response.visualPrompt) {
+              patch.visualPrompt = response.visualPrompt;
+            }
+            if (!c.referenceImage && response.referenceImage) {
+              patch.referenceImage = response.referenceImage;
+            }
+            return Object.keys(patch).length ? { ...c, ...patch } : c;
+          });
+        return {
+          characterAssets: {
+            ...state.characterAssets,
+            [charId]: asset,
+          },
+          parsedScript: state.parsedScript
+            ? { ...state.parsedScript, characters: hydrated(state.parsedScript.characters) }
+            : state.parsedScript,
+          extractedCharacters: hydrated(state.extractedCharacters),
+          isGeneratingCharacter: {
+            ...state.isGeneratingCharacter,
+            [charId]: false,
+          },
+        };
+      });
     } catch (err) {
       set(state => ({
         isGeneratingCharacter: {
@@ -579,10 +669,26 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         visualPrompt,
         projectId,
       });
-      set(state => ({
-        sceneAssets: { ...state.sceneAssets, [sceneId]: asset },
-        isGeneratingSceneAsset: { ...state.isGeneratingSceneAsset, [sceneId]: false },
-      }));
+      set(state => {
+        // Hydrate parsedScript.scenes[i].visualPrompt with the resolved prompt
+        // so the ScenesTab list-card preview and detail textarea pick it up
+        // immediately.
+        const hydratedScenes: Scene[] = state.parsedScript
+          ? state.parsedScript.scenes.map(s => {
+              if (s.id === sceneId && !s.visualPrompt && asset.visualPrompt) {
+                return { ...s, visualPrompt: asset.visualPrompt };
+              }
+              return s;
+            })
+          : [];
+        return {
+          sceneAssets: { ...state.sceneAssets, [sceneId]: asset },
+          isGeneratingSceneAsset: { ...state.isGeneratingSceneAsset, [sceneId]: false },
+          parsedScript: state.parsedScript
+            ? { ...state.parsedScript, scenes: hydratedScenes }
+            : state.parsedScript,
+        };
+      });
     } catch (err) {
       console.error('[useScriptStore] generateSceneAsset error:', err);
       set(state => ({
@@ -594,17 +700,124 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
 
   // ─── Local mutation (no API call) — keeps parsedScript as the source of truth
   updateCharacterVisualPrompt: (charId, prompt) => {
+    set(state => {
+      if (!state.parsedScript) return state;
+      const patch = (c: Character): Character =>
+        c.id === charId ? { ...c, visualPrompt: prompt } : c;
+      return {
+        parsedScript: {
+          ...state.parsedScript,
+          characters: state.parsedScript.characters.map(patch),
+        },
+        extractedCharacters: state.extractedCharacters.map(patch),
+      };
+    });
+  },
+
+  updateSceneVisualPrompt: (sceneId, prompt) => {
+    set(state => {
+      if (!state.parsedScript) return state;
+      return {
+        parsedScript: {
+          ...state.parsedScript,
+          scenes: state.parsedScript.scenes.map(s =>
+            s.id === sceneId ? { ...s, visualPrompt: prompt } : s,
+          ),
+        },
+      };
+    });
+  },
+
+  // ─── Bidirectional flow: script analysis → prompt box ─────────────────────
+  // Calls the backend `/v2/scripts/visual-prompt` endpoint for any character
+  // (or scene) whose `visualPrompt` is currently empty. The resolved prompt
+  // is then written back to `parsedScript.characters[i]` (or scenes) and to
+  // `extractedCharacters` so the CharactersTab / ScenesTab textareas +
+  // list-card previews populate automatically.
+  //
+  // Auto-batches do not need to be running — this is a fast, image-free
+  // LLM call. Safe to fan out on /parse completion.
+  resolveCharacterVisualPrompts: async (charIds) => {
+    const { parsedScript, extractedCharacters, language, isResolvingPrompts } = get();
+    if (isResolvingPrompts) return;
+    if (!parsedScript?.characters.length) return;
+    const targets = (charIds && charIds.length
+      ? parsedScript.characters.filter(c => charIds.includes(c.id) && !c.visualPrompt)
+      : parsedScript.characters.filter(c => !c.visualPrompt)
+    );
+    if (!targets.length) return;
+
+    set({ isResolvingPrompts: true });
+    try {
+      const filled = await Promise.all(targets.map(async c => {
+        try {
+          const prompt = await scriptService.generateVisualPrompt(
+            c.name, c.gender, c.age, c.personality, 'cinematic', language,
+          );
+          return { id: c.id, prompt };
+        } catch (err) {
+          console.warn('[useScriptStore] resolveCharacterVisualPrompts failed for', c.name, err);
+          return { id: c.id, prompt: '' };
+        }
+      }));
+
+      const filledMap = new Map(filled.map(f => [f.id, f.prompt]));
+      set(state => {
+        if (!state.parsedScript) return state;
+        const patch = (c: Character): Character => {
+          const p = filledMap.get(c.id);
+          if (p && !c.visualPrompt) return { ...c, visualPrompt: p };
+          return c;
+        };
+        return {
+          parsedScript: {
+            ...state.parsedScript,
+            characters: state.parsedScript.characters.map(patch),
+          },
+          extractedCharacters: state.extractedCharacters.map(patch),
+          isResolvingPrompts: false,
+        };
+      });
+    } catch (err) {
+      console.error('[useScriptStore] resolveCharacterVisualPrompts batch error:', err);
+      set({ isResolvingPrompts: false });
+    }
+    void extractedCharacters;
+  },
+
+  // Scene version: the backend has no `/visual-prompt`-for-scenes endpoint,
+  // so we synthesise a stable English prompt from location/time/atmosphere
+  // locally. This guarantees `parsedScript.scenes[i].visualPrompt` is never
+  // empty (barring truly blank input) — the textarea + list-card will
+  // always have something to show.
+  resolveSceneVisualPrompts: async (sceneIds) => {
     const { parsedScript } = get();
-    if (!parsedScript) return;
+    if (!parsedScript?.scenes.length) return;
+    const targets = (sceneIds && sceneIds.length
+      ? parsedScript.scenes.filter(s => sceneIds.includes(s.id) && !s.visualPrompt)
+      : parsedScript.scenes.filter(s => !s.visualPrompt)
+    );
+    if (!targets.length) return;
+
+    const filledMap = new Map<string, string>();
+    for (const s of targets) {
+      const atm = (s.atmosphere || '').trim();
+      const prompt = atm
+        ? `${s.location}, ${s.time.toLowerCase()}, ${atm}, cinematic, atmospheric composition`
+        : `${s.location}, ${s.time.toLowerCase()}, cinematic establishing shot, detailed lighting`;
+      filledMap.set(s.id, prompt);
+    }
 
     set(state => {
       if (!state.parsedScript) return state;
       return {
         parsedScript: {
           ...state.parsedScript,
-          characters: state.parsedScript.characters.map(c =>
-            c.id === charId ? { ...c, visualPrompt: prompt } : c,
-          ),
+          scenes: state.parsedScript.scenes.map(s => {
+            const p = filledMap.get(s.id);
+            if (p && !s.visualPrompt) return { ...s, visualPrompt: p };
+            return s;
+          }),
         },
       };
     });

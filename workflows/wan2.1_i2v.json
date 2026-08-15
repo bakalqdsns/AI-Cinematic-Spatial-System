@@ -1,0 +1,151 @@
+{
+  "last_node_id": 18,
+  "last_link_id": 20,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "WanVideoLoader",
+      "pos": [80, 200],
+      "size": [340, 140],
+      "widgets_values": ["wan2.1_i2v_14b_fp8.safetensors", "fp8_e4m3fn"]
+    },
+    {
+      "id": 2,
+      "type": "LoadImage",
+      "pos": [80, 400],
+      "size": [320, 220],
+      "title": "KEYFRAME",
+      "widgets_values": ["keyframe.png", "image"]
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [80, 680],
+      "size": [440, 220],
+      "title": "POSITIVE PROMPT",
+      "widgets_values": [
+        "cinematic shot, smooth slow camera movement, slight dolly in, 17-year-old Chinese high school girl standing on school rooftop, gentle wind blowing hair, golden hour sunset, dramatic clouds, distant city skyline, nostalgic melancholic atmosphere, 16fps, coherent motion, sharp focus, film grain, cinematic color grading, anamorphic lens flare, paper craft aesthetic with subtle motion"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [80, 960],
+      "size": [440, 180],
+      "title": "NEGATIVE PROMPT",
+      "widgets_values": [
+        "blurry, jittery, fast motion, distorted, flickering, frame artifacts, low quality, worst quality, morphing, melting, extra limbs, ugly, deformed face, watermark, text, signature, inconsistent motion, sudden camera jump"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "WanVideoImageToVideo",
+      "pos": [480, 400],
+      "size": [340, 200],
+      "widgets_values": [81, 16, "480p", "auto"]
+    },
+    {
+      "id": 6,
+      "type": "WanVideoSampler",
+      "pos": [880, 540],
+      "size": [340, 360],
+      "widgets_values": [4.0, 30, "uni_pc", "default", 1.0, 0, true]
+    },
+    {
+      "id": 7,
+      "type": "VHS_VideoCombine",
+      "pos": [1280, 540],
+      "size": [340, 320],
+      "widgets_values": ["video/h264-mp4", 16, 1, "aicss_video_5s", "output", true, false, false, false]
+    },
+    {
+      "id": 8,
+      "type": "SaveImage",
+      "pos": [1660, 540],
+      "size": [220, 100],
+      "title": "FIRST FRAME",
+      "widgets_values": ["aicss_first_frame"]
+    },
+    {
+      "id": 9,
+      "type": "PreviewImage",
+      "pos": [1660, 700],
+      "size": [220, 240]
+    },
+    {
+      "id": 10,
+      "type": "ImageBatch",
+      "pos": [1280, 200],
+      "size": [220, 100]
+    },
+    {
+      "id": 11,
+      "type": "VAE",
+      "pos": [480, 200],
+      "size": [220, 80],
+      "widgets_values": ["wan2.1_vae.safetensors"]
+    },
+    {
+      "id": 12,
+      "type": "WanVideoEncodeLatent",
+      "pos": [880, 200],
+      "size": [340, 200]
+    },
+    {
+      "id": 13,
+      "type": "VHS_VideoInfo",
+      "pos": [1280, 920],
+      "size": [220, 100]
+    },
+    {
+      "id": 14,
+      "type": "Note",
+      "pos": [80, 1280],
+      "size": [440, 240],
+      "widgets_values": [
+        "Wan2.1 I2V takes a single keyframe + prompt and animates a 5-second (81-frame @ 16fps) 480p video.\n\nHardware:\n- 14B model: needs ~16GB VRAM (fp8) or 24GB+ (fp16)\n- 1.3B model: needs ~6GB VRAM, faster\n\nIf you have a 4060 Ti 16GB, use fp8 + 480p.\n\nInstall via: cd custom_nodes && git clone https://github.com/city96/ComfyUI-WanVideoWrapper.git"
+      ],
+      "color": "#3f789e"
+    }
+  ],
+  "links": [
+    [1, 1, 1, 0, 6, 0, "model"],
+    [2, 1, 2, 0, 5, 0, "start_image"],
+    [3, 1, 3, 0, 6, 1, "positive"],
+    [4, 1, 4, 0, 6, 2, "negative"],
+    [5, 1, 5, 0, 6, 3, "latent"],
+    [6, 1, 6, 0, 7, 0, "frames"],
+    [7, 1, 7, 0, 8, 0, "IMAGE"],
+    [8, 1, 7, 0, 9, 0, "IMAGE"],
+    [9, 1, 2, 0, 10, 0, "IMAGE1"],
+    [10, 1, 1, 2, 11, 0, "vae"],
+    [11, 1, 11, 0, 12, 2, "vae"],
+    [12, 1, 5, 1, 12, 0, "latent"],
+    [13, 1, 5, 0, 12, 1, "image"],
+    [14, 1, 7, 0, 13, 0, "video"]
+  ],
+  "groups": [
+    {
+      "title": "AICSS · 图生视频（Wan2.1 I2V · 5秒480p）",
+      "bounding": [40, 140, 1880, 1100],
+      "color": "#c2410c"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "aicss": {
+      "workflow_name": "wan2.1_i2v",
+      "purpose": "Single keyframe -> 5-second 480p video clip",
+      "model_recommended": "Wan2.1-I2V-14B-480P fp8 (~14GB VRAM, 16GB GPU required) OR Wan2.1-I2V-1.3B-480P (~2.5GB VRAM)",
+      "estimated_runtime_seconds": 180,
+      "notes": [
+        "Upload your keyframe to ComfyUI, type its filename in node 2.",
+        "Replace node 1 ckpt_name with 1.3B variant if your VRAM is tight.",
+        "Steps=30, cfg=4.0, sampler=uni_pc are Wan2.1's recommended settings.",
+        "81 frames @ 16fps = 5.06 seconds. Increase num_frames and fps for longer clips (need more VRAM).",
+        "Output is saved to ComfyUI/output/aicss_video_5s_XXXXX.mp4."
+      ]
+    }
+  },
+  "version": 0.4
+}

@@ -53,6 +53,13 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   vlm_mode: 'cloud',
   image_mode: 'cloud',
   video_mode: 'cloud',
+  cloud_llm_provider: 'dashscope',
+  cloud_vlm_provider: 'dashscope',
+  cloud_image_provider: 'dashscope',
+  cloud_video_provider: 'dashscope',
+  toapi_llm_model: 'gpt-5.6-terra',
+  toapi_image_model: 'gpt-image-2',
+  toapi_video_model: 'sora-2-vvip',
   dashscope_llm_model: 'qwen3.7-plus',
   dashscope_vlm_model: 'qwen3-vl-flash-2026-01-22',
   dashscope_image_model: 'wan2.7-image-pro',
@@ -65,6 +72,8 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   dashscope_vlm_api_key: null,
   dashscope_image_api_key: null,
   dashscope_video_api_key: null,
+  toapi_llm_api_key: null,
+  providers: [],
 };
 
 const DEFAULT_MODEL_DOWNLOADS: ModelDownloadState = {
@@ -197,6 +206,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           remote.dashscope_video_api_key === '***'
             ? (patch.dashscope_video_api_key ?? prev.dashscope_video_api_key ?? null)
             : remote.dashscope_video_api_key,
+        toapi_llm_api_key:
+          remote.toapi_llm_api_key === '***'
+            ? (patch.toapi_llm_api_key ?? prev.toapi_llm_api_key ?? null)
+            : remote.toapi_llm_api_key,
       };
       set({ settings: next, saving: false });
       // Persist API keys + non-secret UI choices for next session.

@@ -30,18 +30,37 @@ RUNTIME_FIELDS = (
     "vlm_mode",
     "image_mode",
     "video_mode",
+    # Per-component cloud provider: "dashscope" | "toapi" (legacy) or any user-defined
+    "cloud_llm_provider",
+    "cloud_vlm_provider",
+    "cloud_image_provider",
+    "cloud_video_provider",
+    # ToAPIs model IDs (legacy per-component fields)
+    "toapi_llm_model",
+    "toapi_image_model",
+    "toapi_video_model",
+    # DashScope model IDs
     "dashscope_llm_model",
     "dashscope_vlm_model",
     "dashscope_image_model",
+    # Local LLM
     "llm_base_url",
     "llm_model",
+    # Local Image
     "image_model_id",
     "image_dtype",
+    # Video
     "video_provider",
+    "motion_greenscreen_default",
+    "motion_feather_edges_default",
+    # API keys
     "dashscope_llm_api_key",
     "dashscope_vlm_api_key",
     "dashscope_image_api_key",
     "dashscope_video_api_key",
+    "toapi_llm_api_key",
+    # Unified provider registry (the new approach; supersedes all of the above)
+    "providers",
 )
 
 # API keys are sensitive; we redact them in GET responses.
@@ -50,6 +69,7 @@ SENSITIVE_FIELDS = (
     "dashscope_vlm_api_key",
     "dashscope_image_api_key",
     "dashscope_video_api_key",
+    "toapi_llm_api_key",
 )
 
 
@@ -73,6 +93,14 @@ def _coerce_value(key: str, value: Any) -> Any:
     if key in ("llm_timeout",) and value is not None:
         # llm_timeout isn't in RUNTIME_FIELDS but keep coercion available
         return float(value)
+    if key in ("motion_greenscreen_default", "motion_feather_edges_default"):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        if value is None:
+            return False
+        return bool(value)
     return value
 
 
@@ -83,6 +111,15 @@ def get_settings() -> dict:
         value = getattr(settings, key, None)
         if key in SENSITIVE_FIELDS and value:
             value = "***"
+        if key == "providers" and isinstance(value, list):
+            # Mask api_key fields inside each provider entry
+            masked = []
+            for p in value:
+                pp = dict(p) if isinstance(p, dict) else p
+                if isinstance(pp, dict) and pp.get("api_key"):
+                    pp["api_key"] = "***"
+                masked.append(pp)
+            value = masked
         result[key] = value
     return result
 
@@ -93,11 +130,18 @@ def update_settings(updates: dict) -> dict:
     appropriate. Returns the (post-update) runtime settings snapshot.
 
     Unknown keys are silently ignored so the API is forward-compatible.
+
+    Side effect: notifies all observers registered via
+    ``services.settings_observer.register_observer`` of each effective change.
+    This lets consumers (LLM, ImageGen, CloudRouter) react to changes without
+    needing to poll `config.settings`. The legacy ``setattr(settings, ...)``
+    behaviour is preserved for backward compatibility — observers are additive.
     """
     if not isinstance(updates, dict):
         raise ValueError("settings update must be a JSON object")
 
     changes: dict[str, Any] = {}
+    previous: dict[str, Any] = {}
     for key, value in updates.items():
         if key not in RUNTIME_FIELDS:
             continue
@@ -106,6 +150,7 @@ def update_settings(updates: dict) -> dict:
         current = getattr(settings, key, None)
         if coerced == current:
             continue
+        previous[key] = current
         setattr(settings, key, coerced)
         changes[key] = coerced
 
@@ -114,6 +159,46 @@ def update_settings(updates: dict) -> dict:
         return get_settings()
 
     _log.info("[settings] applying changes: %s", sorted(changes.keys()))
+
+    # ── Notify observers (Phase 1.4.1) ───────────────────────────────────────
+    # Fan out each change so consumers can react. Wrapped in try/except so
+    # a buggy observer can never break the hot-reload chain.
+    try:
+        from app.services.settings_observer import notify_bulk
+        notify_bulk(changes, previous)
+    except Exception as exc:
+        _log.warning("[settings] observer notification failed: %s", exc)
+
+    # ── Hot-reload cloud providers ─────────────────────────────────────────────
+    provider_fields = {
+        "cloud_llm_provider": "llm",
+        "cloud_vlm_provider": "vlm",
+        "cloud_image_provider": "image",
+        "cloud_video_provider": "video",
+    }
+    if any(k in changes for k in provider_fields) or "providers" in changes:
+        try:
+            from app.providers.cloud_router import invalidate_cache
+
+            if "cloud_llm_provider" in changes:
+                _log.info(
+                    "[settings] Cloud LLM provider switched to: %s",
+                    changes["cloud_llm_provider"],
+                )
+
+            # Invalidate the cache for every affected component so the router
+            # rebuilds providers from the new settings on the next call.
+            for field, comp in provider_fields.items():
+                if field in changes:
+                    invalidate_cache(comp)
+            if "providers" in changes:
+                invalidate_cache()  # full reset
+                _log.info(
+                    "[settings] Providers registry updated: %d entries",
+                    len(settings.providers or []),
+                )
+        except Exception as exc:
+            _log.warning("[settings] Cloud provider switch failed: %s", exc)
 
     # ── Hot-reload model mode ───────────────────────────────────────────────
     if "model_mode" in changes:
@@ -188,25 +273,33 @@ def update_settings(updates: dict) -> dict:
         except Exception as exc:
             _log.warning("[settings] DashScope reconfigure failed: %s", exc)
 
-    # ── Hot-reload per-component DashScope API keys ─────────────────────────
+    # ── Hot-reload per-component API keys ───────────────────────────────────
     api_key_changes = {
         k: v for k, v in changes.items()
         if k in SENSITIVE_FIELDS and isinstance(v, str) and v
     }
     if api_key_changes:
-        # Mirror to process env so the dashscope SDK (which reads DASHSCOPE_API_KEY
-        # at call time) and any subprocesses spawned later (e.g. llama-server,
-        # dashscope video adapter) all see the latest key without restart.
+        # Mirror to process env so callers that read env vars at call time
+        # (DashScope SDK, OpenAI-compat provider) see the latest key without
+        # restart. The CloudRouter picks these up via settings on next call.
         for k, v in api_key_changes.items():
             os.environ[k.upper()] = v
-            _log.info("[settings] DashScope API key updated: %s (len=%d)", k, len(v))
-        # Force-reset dashscope.api_key if any component key changed so the SDK
-        # re-reads it on the next call. Setting an empty string clears the cached
-        # key, forcing Generation.call / MultiModalConversation.call / etc. to
-        # re-resolve via the env var.
+            _log.info("[settings] API key updated: %s (len=%d)", k, len(v))
+
+        # DashScope SDK caches the key globally; clear it so the SDK re-reads
+        # from the env (or from our explicit api_key= kwarg) on next call.
+        if any(k.startswith("dashscope") for k in api_key_changes):
+            try:
+                import dashscope as _dashscope
+                _dashscope.api_key = ""
+            except Exception:
+                pass
+
+        # Any API-key change → invalidate the CloudRouter cache so the next
+        # request rebuilds the provider with the new credentials.
         try:
-            import dashscope as _dashscope
-            _dashscope.api_key = ""
+            from app.providers.cloud_router import invalidate_cache
+            invalidate_cache()
         except Exception:
             pass
 

@@ -1,0 +1,109 @@
+{
+  "last_node_id": 9,
+  "last_link_id": 9,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [80, 200],
+      "size": [320, 100],
+      "properties": {
+        "modelspec.modelspec.id": "z-image-turbo-fp8"
+      },
+      "widgets_values": ["z_image_turbo_fp8.safetensors"]
+    },
+    {
+      "id": 2,
+      "type": "CLIPTextEncode",
+      "pos": [80, 360],
+      "size": [400, 200],
+      "title": "POSITIVE PROMPT",
+      "widgets_values": [
+        "aesthetic concept art, full body character, centered composition, paper craft style, layered paper art, hand-cut paper silhouette, flat colors with subtle gradients, white paper edges visible, soft cinematic lighting, by hayao miyazaki, by makoto shinkai, highly detailed, 8k"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [80, 620],
+      "size": [400, 120],
+      "title": "NEGATIVE PROMPT",
+      "widgets_values": [
+        "low quality, worst quality, blurry, distorted, disfigured, extra limbs, extra fingers, mutated hands, bad anatomy, bad proportions, cropped, out of frame, text, watermark, signature, username, jpeg artifacts, pixelated, grainy, 3d render, photorealistic, photo, cluttered background, multiple characters"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "EmptyLatentImage",
+      "pos": [80, 800],
+      "size": [320, 100],
+      "widgets_values": [1024, 1024, 1]
+    },
+    {
+      "id": 5,
+      "type": "KSampler",
+      "pos": [560, 360],
+      "size": [320, 280],
+      "widgets_values": [42, "randomize", 20, 1.0, "euler_ancestral", "simple", 1.0]
+    },
+    {
+      "id": 6,
+      "type": "VAEDecode",
+      "pos": [960, 360],
+      "size": [220, 100]
+    },
+    {
+      "id": 7,
+      "type": "VAE",
+      "pos": [560, 700],
+      "size": [220, 80],
+      "widgets_values": ["sdxl_vae.safetensors"]
+    },
+    {
+      "id": 8,
+      "type": "SaveImage",
+      "pos": [1240, 360],
+      "size": [320, 100],
+      "widgets_values": ["aicss_txt2img"]
+    },
+    {
+      "id": 9,
+      "type": "PreviewImage",
+      "pos": [1240, 500],
+      "size": [320, 240]
+    }
+  ],
+  "links": [
+    [1, 1, 1, 5, 0, "MODEL"],
+    [2, 1, 2, 5, 1, "POSITIVE"],
+    [3, 1, 3, 5, 2, "NEGATIVE"],
+    [4, 1, 4, 5, 3, "LATENT"],
+    [5, 1, 5, 0, 6, 0, "LATENT"],
+    [6, 1, 6, 0, 8, 0, "IMAGE"],
+    [7, 1, 6, 0, 9, 0, "IMAGE"],
+    [8, 1, 7, 0, 1, 2, "VAE"],
+    [9, 1, 1, 1, 2, 0, "CLIP"]
+  ],
+  "groups": [
+    {
+      "title": "AICSS · 基础文生图（Z-Image-Turbo）",
+      "bounding": [40, 140, 1560, 800],
+      "color": "#3f789e"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "aicss": {
+      "workflow_name": "txt2img_basic",
+      "purpose": "Single image generation for concept art and quick previews",
+      "model_recommended": "Z-Image-Turbo fp8 (~5GB VRAM)",
+      "estimated_runtime_seconds": 8,
+      "notes": [
+        "Z-Image-Turbo is a distilled model - keep cfg=1.0 and steps=20",
+        "If you don't have sdxl_vae.safetensors, delete node 7 and wire node 1 VAE output (pin 2) directly to node 6 VAE input",
+        "Customize the character description in node 2 (POSITIVE PROMPT)"
+      ]
+    }
+  },
+  "version": 0.4
+}

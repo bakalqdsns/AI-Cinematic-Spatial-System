@@ -1,0 +1,20 @@
+{
+  "name": "Warm Interior",
+  "description": "Cozy indoor lighting — soft yellow key, neutral fill, warm rim.",
+  "key": {
+    "type": "SUN",
+    "energy": 3.0,
+    "color": [1.0, 0.96, 0.88]
+  },
+  "fill": {
+    "type": "AREA",
+    "energy": 1.5,
+    "color": [0.8, 0.9, 1.0],
+    "size": 5.0
+  },
+  "rim": {
+    "type": "SPOT",
+    "energy": 2.0,
+    "color": [1.0, 0.93, 0.8]
+  }
+}

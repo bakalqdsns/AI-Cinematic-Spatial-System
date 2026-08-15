@@ -1,0 +1,128 @@
+{
+  "last_node_id": 12,
+  "last_link_id": 11,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [80, 200],
+      "size": [320, 220],
+      "title": "INPUT IMAGE",
+      "widgets_values": ["scene_with_occlusion.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "LoadImage",
+      "pos": [80, 480],
+      "size": [320, 220],
+      "title": "MASK (white = inpaint)",
+      "widgets_values": ["mask.png", "image"]
+    },
+    {
+      "id": 3,
+      "type": "ImageCompositeMasked",
+      "pos": [460, 320],
+      "size": [280, 140],
+      "widgets_values": [0, 0, 0, false, 1.0, 0]
+    },
+    {
+      "id": 4,
+      "type": "LaMaInpaint",
+      "pos": [800, 320],
+      "size": [320, 220],
+      "widgets_values": ["big-lama.pt", 8, 0, true]
+    },
+    {
+      "id": 5,
+      "type": "ImageScale",
+      "pos": [1180, 320],
+      "size": [260, 140],
+      "widgets_values": ["lanczos", 1024, 1024, "disabled"]
+    },
+    {
+      "id": 6,
+      "type": "ImageCompare",
+      "pos": [1480, 200],
+      "size": [280, 320]
+    },
+    {
+      "id": 7,
+      "type": "SaveImage",
+      "pos": [1180, 520],
+      "size": [280, 100],
+      "title": "INPAINTED",
+      "widgets_values": ["aicss_inpainted"]
+    },
+    {
+      "id": 8,
+      "type": "PreviewImage",
+      "pos": [460, 600],
+      "size": [320, 240]
+    },
+    {
+      "id": 9,
+      "type": "MaskBlur",
+      "pos": [800, 100],
+      "size": [280, 100],
+      "widgets_values": [12, 1]
+    },
+    {
+      "id": 10,
+      "type": "GroundingDinoSAM2Segment",
+      "pos": [800, 600],
+      "size": [340, 240],
+      "widgets_values": ["groundingdino_swit_ogc.pth", "sam2.1_hiera_large.pt", "person . chair . table", 0.30, 0.25]
+    },
+    {
+      "id": 11,
+      "type": "MaskToImage",
+      "pos": [460, 880],
+      "size": [220, 100]
+    },
+    {
+      "id": 12,
+      "type": "SaveImage",
+      "pos": [1180, 880],
+      "size": [280, 100],
+      "title": "AUTO MASK (from DINO+SAM2)",
+      "widgets_values": ["aicss_auto_mask"]
+    }
+  ],
+  "links": [
+    [1, 1, 1, 0, 3, 1, "IMAGE"],
+    [2, 1, 2, 0, 3, 2, "MASK"],
+    [3, 1, 3, 0, 4, 0, "IMAGE"],
+    [4, 1, 4, 0, 5, 0, "IMAGE"],
+    [5, 1, 5, 0, 6, 0, "first_image"],
+    [6, 1, 1, 0, 6, 1, "second_image"],
+    [7, 1, 5, 0, 7, 0, "IMAGE"],
+    [8, 1, 4, 0, 8, 0, "IMAGE"],
+    [9, 1, 2, 0, 9, 0, "MASK"],
+    [10, 1, 3, 2, 10, 0, "image"],
+    [11, 1, 10, 1, 11, 0, "mask"]
+  ],
+  "groups": [
+    {
+      "title": "AICSS · LaMa 图像修复（手动 Mask / 自动 Mask）",
+      "bounding": [40, 80, 1760, 940],
+      "color": "#8b5cf6"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "aicss": {
+      "workflow_name": "lama_inpaint",
+      "purpose": "Remove or replace objects in an image using LaMa inpainting",
+      "model_recommended": "big-lama.pt (auto-downloaded by simple-lama-inpainting)",
+      "estimated_runtime_seconds": 6,
+      "notes": [
+        "Two paths supported: (A) provide a manual mask in node 2, or (B) auto-generate a mask via Grounding DINO + SAM2 in node 10 (type what to remove in its 'prompt' widget).",
+        "Mask should be: white = area to inpaint, black = keep. Load a single-channel PNG.",
+        "Node 9 (MaskBlur) softly dilates the mask for smoother edges - increase blur_radius for softer boundaries.",
+        "Useful for: removing occluders (people, signs, trash), removing watermarks, restoring torn photo regions.",
+        "Install via: cd custom_nodes && git clone https://github.com/luxuus/ComfyUI-Inpaint-Utils.git (LaMa) + https://github.com/spacepxl/ComfyUI-GroundingDINO-SAM2.git"
+      ]
+    }
+  },
+  "version": 0.4
+}

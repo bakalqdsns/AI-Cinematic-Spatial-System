@@ -74,8 +74,9 @@ from app.endpoints_shots import router as shots_router
 from app.endpoints_script import router as script_router
 from app.endpoints_mesh import router as mesh_router
 from app.endpoints_llm import router as llm_router
-from app.endpoints_settings import router as settings_router
+from app.endpoints_settings import router as settings_router, provider_router
 from app.endpoints_models import router as models_router
+from app.endpoints_layers import router as layers_router
 from app.services.llama_server_manager import ensure_server_running
 
 
@@ -93,9 +94,19 @@ async def lifespan(app: FastAPI):
     )
     # Initialize local LLM and image generator clients with settings
     configure_llm(base_url=settings.llm_base_url, model=settings.llm_model, timeout=settings.llm_timeout)
-    # Route LLM calls through DashScope when in cloud mode
-    from app.services.local_llm import set_use_cloud
+    # Route LLM calls through DashScope or ToAPIs when in cloud mode
+    from app.services.local_llm import set_use_cloud, set_cloud_provider
     set_use_cloud(settings.model_mode == "cloud")
+    set_cloud_provider(settings.cloud_llm_provider)
+    _log.info(
+        "[AICSS] model_mode=%s | LLM provider=%s | VLM provider=%s | "
+        "Image provider=%s | Video provider=%s",
+        settings.model_mode,
+        settings.cloud_llm_provider,
+        settings.cloud_vlm_provider,
+        settings.cloud_image_provider,
+        settings.cloud_video_provider,
+    )
     configure_image_generator(model_id=settings.image_model_id, dtype_name=settings.image_dtype)
     print(f"[AICSS] Model mode: {settings.model_mode}")
     print(f"[AICSS] LLM client: {settings.llm_base_url} ({settings.llm_model})")
@@ -196,7 +207,9 @@ app.include_router(script_router, prefix="/api/aicss", tags=["v2 - Script & Moti
 app.include_router(mesh_router, prefix="/api/aicss", tags=["v2 - 3D Mesh Export"])
 app.include_router(llm_router, tags=["LLM Server"])
 app.include_router(settings_router, tags=["Settings"])
+app.include_router(provider_router, tags=["Cloud Providers"])
 app.include_router(models_router, tags=["Models"])
+app.include_router(layers_router, prefix="/api/aicss", tags=["Layers"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

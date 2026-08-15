@@ -127,6 +127,180 @@ class AnalyzeRequest(BaseModel):
     projectId: Optional[str] = Field(None, description="Optional project ID — when set, results are persisted to .workspace/projects/<id>/")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Response models (Phase 1.4.4 — v1 endpoint Pydantic responses)
+#
+# Previously every v1 endpoint returned ``-> dict``, which means OpenAPI
+# couldn't expose the response schema and the frontend had to guess field
+# names by reading the backend source. We now declare Pydantic models so
+# the OpenAPI doc renders complete response shapes — and consumers can
+# rely on field names documented here rather than chasing implementation
+# details. Existing callers keep working because Pydantic models are
+# JSON-serialisable.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class DepthResponse(BaseModel):
+    """`POST /api/aicss/depth` response."""
+    depthMapUrl: str = Field(
+        ..., description="Base64 data URI of the depth map PNG (grayscale)"
+    )
+    width: int = Field(..., description="Depth map width in pixels")
+    height: int = Field(..., description="Depth map height in pixels")
+    minDepth: float = Field(..., description="Minimum depth value (meters)")
+    maxDepth: float = Field(..., description="Maximum depth value (meters)")
+    savedFiles: Optional[list[str]] = Field(
+        default=None,
+        description="Filenames persisted under the project's `depth/` dir (when projectId was provided)",
+    )
+
+
+class SegmentResponse(BaseModel):
+    """`POST /api/aicss/segment` response."""
+    objects: list[dict] = Field(
+        ...,
+        description="Detected objects with `id`, `classLabel`, `boundingBox`, `mask`, etc.",
+    )
+    width: int
+    height: int
+    savedFiles: Optional[list[str]] = None
+
+
+class LayersResponse(BaseModel):
+    """`POST /api/aicss/layers` response."""
+    layers: list[dict] = Field(
+        ...,
+        description="Per-layer entries with `name`, `zMin`, `zMax`, `objects`.",
+    )
+    width: int
+    height: int
+    savedFiles: Optional[list[str]] = None
+
+
+class SceneGraphResponse(BaseModel):
+    """`POST /api/aicss/scene-graph` response."""
+    shotId: str
+    nodes: list[dict] = Field(
+        ...,
+        description="Object nodes with relations (`leftOf`, `rightOf`, `inFrontOf`, `behind`, `above`, `below`).",
+    )
+    savedFiles: Optional[list[str]] = None
+
+
+class AnalyzeResponse(BaseModel):
+    """`POST /api/aicss/analyze` response — full pipeline output.
+
+    The handler returns extra diagnostic fields (`analysisId`,
+    `vlmDetectedClasses`, `vlmDetectedScene`) that aren't part of the
+    core pipeline output but are useful for debugging and for the
+    frontend to show the user which classes VLM detected. FastAPI's
+    ``response_model_exclude_none=True`` would hide them on None; we
+    instead expose them as Optional so the OpenAPI schema documents the
+    real shape including diagnostic fields.
+    """
+    analysisId: Optional[str] = Field(
+        default=None,
+        description="Unique analysis run ID (for log correlation)",
+    )
+    shotId: Optional[str] = Field(
+        default=None,
+        description="Echoes the request's shotId so the frontend can correlate",
+    )
+    depthMapUrl: Optional[str] = None
+    objects: list[dict] = Field(default_factory=list)
+    layers: list[dict] = Field(default_factory=list)
+    sceneGraph: Optional[dict] = None
+    width: int = 0
+    height: int = 0
+    savedFiles: Optional[list[str]] = None
+    vlmDetectedClasses: Optional[list[str]] = Field(
+        default=None,
+        description="Classes detected by the Qwen3-VL scene classifier (diagnostic)",
+    )
+    vlmDetectedScene: Optional[str] = Field(
+        default=None,
+        description="Scene type detected by VLM (outdoor/indoor/night/nature, diagnostic)",
+    )
+
+
+class InpaintResponse(BaseModel):
+    """`POST /api/aicss/inpaint` response."""
+    imageUrl: str = Field(..., description="Base64 data URI of the inpainted PNG")
+    width: int
+    height: int
+    usedFallback: bool = Field(
+        default=False,
+        description="True when the call fell back from cloud to local LaMa.",
+    )
+    savedFiles: Optional[list[str]] = None
+
+
+class PaperDioramaResponse(BaseModel):
+    """`POST /api/aicss/paper-diorama` response."""
+    paperStyleUrl: Optional[str] = None
+    normalMapUrl: Optional[str] = None
+    thicknessGrayUrl: Optional[str] = None
+    outlinedUrl: Optional[str] = None
+    width: int = 0
+    height: int = 0
+    savedFiles: Optional[list[str]] = None
+
+
+class PaperStyleResponse(BaseModel):
+    """`POST /api/aicss/paper-style` response.
+
+    Single-image cartoonisation — the input RGB image gets a flat paper-style
+    texture applied. Distinct from `PaperDioramaResponse` which adds
+    thickness/normal maps.
+    """
+    paperStyleUrl: Optional[str] = None
+    width: int = 0
+    height: int = 0
+    savedFiles: Optional[list[str]] = None
+
+
+class PaperLayerResponse(BaseModel):
+    """`POST /api/aicss/paper-layer` response.
+
+    Same texture set as `PaperDioramaResponse` but for an entire depth layer
+    (e.g. the foreground layer of a scene). Adds a `layerKey` echo so the
+    frontend can route the response back to the right layer.
+    """
+    paperStyleUrl: Optional[str] = None
+    normalMapUrl: Optional[str] = None
+    thicknessGrayUrl: Optional[str] = None
+    outlinedUrl: Optional[str] = None
+    width: int = 0
+    height: int = 0
+    savedFiles: Optional[list[str]] = None
+    layerKey: Optional[str] = None
+
+
+class BillboardResponse(BaseModel):
+    """`POST /api/aicss/billboard` response."""
+    rgbaUrl: Optional[str] = None
+    width: int = 0
+    height: int = 0
+    savedFiles: Optional[list[str]] = None
+
+
+class MultifaceResponse(BaseModel):
+    """`POST /api/aicss/multiface` response.
+
+    Returns 6 RGBA PNGs — one per cube face. Useful for 3D viewers that
+    need a quick pseudo-3D representation of a 2D object without
+    running a full 3D reconstruction.
+    """
+    faces: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of face name (front/back/left/right/top/bottom) → "
+                    "data:image/png;base64,... URI",
+    )
+    width: int = 0
+    height: int = 0
+    savedFiles: Optional[list[str]] = None
+
+
 class DepthRequest(BaseModel):
     imageUrl: str
     projectId: Optional[str] = Field(None, description="Optional project ID — when set, depth map is persisted")
@@ -235,8 +409,8 @@ async def _load_image(url: str) -> Image.Image:
 # POST /api/aicss/analyze — Full pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/analyze")
-async def analyze(request: AnalyzeRequest):
+@router.post("/analyze", response_model=AnalyzeResponse)
+async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     """
     Full AICSS analysis pipeline.
 
@@ -471,8 +645,8 @@ async def analyze(request: AnalyzeRequest):
 # POST /api/aicss/depth — Depth map only
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/depth")
-async def generate_depth(request: DepthRequest):
+@router.post("/depth", response_model=DepthResponse)
+async def generate_depth(request: DepthRequest) -> DepthResponse:
     """Generate a depth map from an image."""
     try:
         image = await _load_image(request.imageUrl)
@@ -481,8 +655,10 @@ async def generate_depth(request: DepthRequest):
         model_manager.unload_depth()   # depth_norm numpy is all we need
         depth_pil = numpy_to_pil_depth(depth_norm, cmap="gray")
         depth_pil_resized = depth_pil.resize((w, h), Image.LANCZOS)
-        result = {"depthMapUrl": pil_to_base64(depth_pil_resized)}
 
+        depth_meters_arr = depth_to_meters(depth_norm, scale=50.0)
+
+        saved_files: Optional[list[str]] = None
         # Persist if projectId supplied
         if request.projectId:
             depth_bytes = _pil_to_png_bytes(depth_pil_resized)
@@ -490,9 +666,16 @@ async def generate_depth(request: DepthRequest):
                 request.projectId, "depth", {"depth_map.png": depth_bytes}
             )
             if saved is not None:
-                result["savedArtifacts"] = saved
+                saved_files = saved
 
-        return result
+        return DepthResponse(
+            depthMapUrl=pil_to_base64(depth_pil_resized),
+            width=w,
+            height=h,
+            minDepth=float(depth_meters_arr.min()),
+            maxDepth=float(depth_meters_arr.max()),
+            savedFiles=saved_files,
+        )
     except Exception as e:
         _log.exception("[depth] Error")
         raise HTTPException(status_code=500, detail="Depth estimation failed")
@@ -502,8 +685,8 @@ async def generate_depth(request: DepthRequest):
 # POST /api/aicss/segment — Object segmentation only
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/segment")
-async def segment_objects(request: SegmentRequest):
+@router.post("/segment", response_model=SegmentResponse)
+async def segment_objects(request: SegmentRequest) -> SegmentResponse:
     """Detect and segment objects using Grounding DINO + SAM2."""
     try:
         image = await _load_image(request.imageUrl)
@@ -590,8 +773,8 @@ async def segment_objects(request: SegmentRequest):
 # POST /api/aicss/layers — Build spatial layers
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/layers")
-async def build_layers(request: LayersRequest):
+@router.post("/layers", response_model=LayersResponse)
+async def build_layers(request: LayersRequest) -> LayersResponse:
     """Build spatial layers from a depth map and object list."""
     try:
         depth_img = base64_to_pil(request.depthMap)
@@ -637,8 +820,8 @@ async def build_layers(request: LayersRequest):
 # POST /api/aicss/scene-graph — Build scene graph
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/scene-graph")
-async def build_graph(request: SceneGraphRequest):
+@router.post("/scene-graph", response_model=SceneGraphResponse)
+async def build_graph(request: SceneGraphRequest) -> SceneGraphResponse:
     """Build spatial relationship graph from objects."""
     try:
         graph = build_scene_graph_from_objects(request.shotId, request.objects)
@@ -662,8 +845,8 @@ async def build_graph(request: SceneGraphRequest):
 # POST /api/aicss/billboard — Generate RGBA billboard
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/billboard")
-async def generate_billboard(request: BillboardRequest):
+@router.post("/billboard", response_model=BillboardResponse)
+async def generate_billboard(request: BillboardRequest) -> BillboardResponse:
     """
     Generate an RGBA billboard texture for a cropped object.
     Uses the mask to cut out the subject and apply transparency.
@@ -736,8 +919,8 @@ async def generate_billboard(request: BillboardRequest):
 # POST /api/aicss/multiface — Generate 6-face textures
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/multiface")
-async def generate_multiface(request: MultifaceRequest):
+@router.post("/multiface", response_model=MultifaceResponse)
+async def generate_multiface(request: MultifaceRequest) -> MultifaceResponse:
     """
     Generate 6-face pseudo-3D textures for an object.
     - front: original image (cropped)
@@ -812,8 +995,8 @@ async def generate_multiface(request: MultifaceRequest):
 # POST /api/aicss/inpaint — Inpaint with wanx2.1-imageedit
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/inpaint")
-async def inpaint_image(request: InpaintRequest):
+@router.post("/inpaint", response_model=InpaintResponse)
+async def inpaint_image(request: InpaintRequest) -> InpaintResponse:
     """
     Inpaint masked areas using local LaMa model (replaces DashScope wanx2.1-imageedit).
 
@@ -892,8 +1075,8 @@ async def inpaint_image(request: InpaintRequest):
 # POST /api/aicss/paper-style — Paper illustration style transfer
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/paper-style")
-async def paper_style_transfer(request: PaperStyleRequest):
+@router.post("/paper-style", response_model=PaperStyleResponse)
+async def paper_style_transfer(request: PaperStyleRequest) -> PaperStyleResponse:
     """
     Convert a photograph to paper-cut / illustration style.
     Applies bilateral filtering + colour quantisation + edge detection.
@@ -929,8 +1112,8 @@ async def paper_style_transfer(request: PaperStyleRequest):
 # POST /api/aicss/paper-diorama — Full diorama texture set for one object
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/paper-diorama")
-async def paper_diorama_generate(request: PaperDioramaRequest):
+@router.post("/paper-diorama", response_model=PaperDioramaResponse)
+async def paper_diorama_generate(request: PaperDioramaRequest) -> PaperDioramaResponse:
     """
     Generate a complete paper-diorama texture set for a single object:
       - paper_style_url    : illustrated paper style image
@@ -1005,8 +1188,8 @@ async def paper_diorama_generate(request: PaperDioramaRequest):
 # POST /api/aicss/paper-layer — Paper diorama texture for a depth layer
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/paper-layer")
-async def paper_layer_generate(request: PaperLayerRequest):
+@router.post("/paper-layer", response_model=PaperLayerResponse)
+async def paper_layer_generate(request: PaperLayerRequest) -> PaperLayerResponse:
     """
     Generate paper-diorama texture for a full depth layer image.
     Returns the same texture fields as /paper-diorama.

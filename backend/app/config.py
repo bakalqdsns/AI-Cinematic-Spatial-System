@@ -125,6 +125,25 @@ class Settings(BaseSettings):
     dashscope_image_api_key: str = ""
     dashscope_video_api_key: str = ""
 
+    # ── Cloud LLM Provider ─────────────────────────────────────────────────────
+    # Which cloud provider to use when model_mode == "cloud".
+    #   "dashscope"  — use DashScope API (qwen-plus etc.)
+    #   "toapi"      — use ToAPIs OpenAI-compatible API (gpt-5.6-terra etc.)
+    cloud_llm_provider: str = "dashscope"
+    cloud_vlm_provider: str = "dashscope"
+    cloud_image_provider: str = "dashscope"
+    cloud_video_provider: str = "dashscope"
+
+    # ToAPIs API key — used for ALL toapi components (LLM + Image + Video).
+    # Falls back to TOAPI_API_KEY env var if empty.
+    toapi_llm_api_key: str = ""
+
+    # ToAPIs model IDs (used when cloud_xxx_provider == "toapi").
+    # Available models: https://docs.toapis.com
+    toapi_llm_model: str = "gpt-5.6-terra"
+    toapi_image_model: str = "gpt-image-2"
+    toapi_video_model: str = "sora-2-vvip"
+
     # LaMa inpainting model (local, replaces DashScope API)
     lama_checkpoint_dir: Path = CACHE_DIR / "lama"
 
@@ -179,6 +198,46 @@ class Settings(BaseSettings):
     #   "svd"        — Stable Video Diffusion (8GB VRAM, degraded quality)
     video_provider: str = "dashscope"
 
+    # When True, the video provider is asked to render the action against a
+    # flat green-screen backdrop and the segmenter applies a chroma-key pass
+    # on top of the SAM2 mask. Frontend can override per-request via
+    # POST /api/aicss/v2/scripts/motion/generate {"greenscreen": true}.
+    motion_greenscreen_default: bool = False
+    # When True, the segmenter snaps SAM2 masks to nearby Canny edges for
+    # softer silhouettes. Same per-request override pattern as above.
+    motion_feather_edges_default: bool = True
+
+    # ── Custom Cloud Providers (user-defined, JSON-serializable) ────────────────
+    # Each entry is a complete provider config that the CloudRouter will instantiate
+    # on demand. This is the user-facing surface for adding new third-party models
+    # without backend code changes.
+    #
+    # Built-in provider "types":
+    #   - "dashscope"          (uses official SDK, requires DASHSCOPE_API_KEY)
+    #   - "openai_compatible"  (works with any OpenAI-style REST API: ToAPIs,
+    #                           SiliconFlow, Groq, OpenRouter, custom proxies, etc.)
+    #
+    # Schema per entry:
+    #   {
+    #     "name":         "siliconflow",            # unique key, lowercase
+    #     "type":         "openai_compatible",
+    #     "base_url":     "https://api.siliconflow.cn/v1",
+    #     "api_key":      "sk-xxx",
+    #     "extra_headers": {"X-App-Id": "..."},     # optional
+    #     "extra_json":   {"response_format": ...}, # optional
+    #     "models": {
+    #       "llm":   "Qwen/Qwen2.5-7B-Instruct",
+    #       "vlm":   "Qwen/Qwen2.5-VL-72B",
+    #       "image": "black-forest-labs/FLUX.1-schnell",
+    #       "video": null,                          # null → not supported
+    #     }
+    #   }
+    #
+    # The legacy single-provider fields (cloud_xxx_provider, dashscope_xxx_api_key,
+    # toapi_xxx_model) are kept for backwards compat and are AUTO-MIGRATED into
+    # the `providers` list on first startup.
+    providers: list[dict] = []
+
     # Model loading strategy
     # True=按需懒加载（默认，推荐，可节省 16-22GB 常驻显存）
     # False=启动时全量加载（兼容旧行为，服务器内存足够时使用）
@@ -187,6 +246,88 @@ class Settings(BaseSettings):
     # Project Workspace
     workspace_dir: Path = BASE_DIR / ".workspace"
     project_id_format: str = "{timestamp}_{shot_id}"
+
+    # ── Cloud provider helpers (instance methods) ──────────────────────────────
+
+    def get_provider_config(self, component: str) -> dict:
+        """
+        Return the active provider's config block for the given component.
+
+        component: 'llm' | 'vlm' | 'image' | 'video'
+
+        Returns a dict suitable for instantiating a BaseProvider:
+            {
+                "provider":      "toapi",                  # provider name (key)
+                "type":          "openai_compatible",      # provider class type
+                "api_key":       "sk-xxx",
+                "base_url":      "https://toapis.com/v1",
+                "extra_headers": {...},
+                "extra_json":    {...},
+                "model":         "gpt-5.6-terra",          # resolved model ID for this component
+            }
+
+        If `providers` is empty, falls back to legacy fields
+        (cloud_xxx_provider / dashscope_xxx_api_key / etc.).
+        """
+        component_to_field = {
+            "llm":   ("cloud_llm_provider",   "dashscope_llm_api_key",   "dashscope_llm_model",   "toapi_llm_model",   "toapi_llm_api_key"),
+            "vlm":   ("cloud_vlm_provider",   "dashscope_vlm_api_key",   "dashscope_vlm_model",   None,                None),
+            "image": ("cloud_image_provider", "dashscope_image_api_key", "dashscope_image_model", "toapi_image_model", "toapi_llm_api_key"),
+            "video": ("cloud_video_provider", "dashscope_video_api_key", None,                    "toapi_video_model", "toapi_llm_api_key"),
+        }
+        fields = component_to_field.get(component)
+        if fields is None:
+            raise ValueError(f"Unknown component: {component!r}")
+        prov_field, ds_key_field, ds_model_attr, toapi_model_attr, toapi_key_field = fields
+
+        # New style: look up in self.providers list
+        chosen_name = getattr(self, prov_field, "dashscope")
+        for p in (self.providers or []):
+            if p.get("name") == chosen_name:
+                models = p.get("models") or {}
+                model = models.get(component) or ""
+                return {
+                    "provider": chosen_name,
+                    "type": p.get("type", "openai_compatible"),
+                    "api_key": p.get("api_key", ""),
+                    "base_url": p.get("base_url", ""),
+                    "extra_headers": p.get("extra_headers"),
+                    "extra_json": p.get("extra_json"),
+                    "model": model,
+                }
+
+        # Legacy fallback: synthesize a provider block on the fly
+        legacy_type = "openai_compatible" if chosen_name == "toapi" else "dashscope"
+        legacy_model = ""
+        legacy_key = ""
+        legacy_url = ""
+        if chosen_name == "toapi":
+            legacy_model = getattr(self, toapi_model_attr, "") or ""
+            legacy_key = getattr(self, toapi_key_field, "") or ""
+            legacy_url = "https://toapis.com/v1"
+        elif chosen_name == "dashscope":
+            if ds_model_attr:
+                legacy_model = getattr(self, ds_model_attr, "") or ""
+            if ds_key_field:
+                legacy_key = getattr(self, ds_key_field, "") or ""
+            # DashScope SDK uses its own base; URL not strictly needed.
+        return {
+            "provider": chosen_name,
+            "type": legacy_type,
+            "api_key": legacy_key,
+            "base_url": legacy_url,
+            "extra_headers": None,
+            "extra_json": None,
+            "model": legacy_model,
+        }
+
+    def get_model_id(self, component: str) -> str:
+        """Convenience: model ID for the given component."""
+        return self.get_provider_config(component).get("model") or ""
+
+    def list_user_providers(self) -> list[dict]:
+        """Return the user-defined `providers` list (used by Settings UI)."""
+        return list(self.providers or [])
 
 
 settings = Settings()

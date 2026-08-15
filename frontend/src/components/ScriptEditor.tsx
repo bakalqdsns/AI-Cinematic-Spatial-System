@@ -8,11 +8,11 @@
 //   3. Characters — character list with 3-view + variation generation
 //   4. Motion     — shot × character motion video generation
 // ─────────────────────────────────────────────────────────────────────────────
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useScriptStore } from '../store/useScriptStore';
 import type {
   ScriptLanguage, Character, CharacterAsset, Shot,
-  ScriptData, SceneAsset,
+  ScriptData, SceneAsset, Scene,
 } from '../types/script';
 
 const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
@@ -44,13 +44,18 @@ export const ScriptEditor: React.FC = () => {
     updateShot,
     characterAssets,
     generateCharacterThreeView,
+    generateCharacterVariation,
     isGeneratingCharacter,
     sceneAssets,
     isGeneratingSceneAsset,
     updateCharacterVisualPrompt,
+    updateSceneVisualPrompt,
+    resolveCharacterVisualPrompts,
+    resolveSceneVisualPrompts,
     selectedSceneId, selectScene,
     generateSceneAsset,
     projectId,
+    isResolvingPrompts,
   } = useScriptStore();
 
   const handleParse = async () => {
@@ -173,6 +178,7 @@ export const ScriptEditor: React.FC = () => {
             selectedShotId={selectedShotId}
             onSelectShot={selectShot}
             onUpdateShot={updateShot}
+            sceneAssets={sceneAssets}
           />
         )}
         {activeTab === 'characters' && (
@@ -180,10 +186,13 @@ export const ScriptEditor: React.FC = () => {
             characters={parsedScript?.characters || []}
             characterAssets={characterAssets}
             onGenerateThreeView={generateCharacterThreeView}
+            onGenerateVariation={generateCharacterVariation}
             isGenerating={isGeneratingCharacter}
             selectedCharId={selectedCharacterId}
             onSelectChar={selectCharacter}
             onUpdatePrompt={updateCharacterVisualPrompt}
+            onResolvePrompt={resolveCharacterVisualPrompts}
+            isResolvingPrompts={!!isResolvingPrompts}
           />
         )}
         {activeTab === 'motion' && (
@@ -197,6 +206,8 @@ export const ScriptEditor: React.FC = () => {
             selectedSceneId={selectedSceneId}
             onSelectScene={selectScene}
             onGenerateSceneAsset={generateSceneAsset}
+            onUpdatePrompt={updateSceneVisualPrompt}
+            onResolvePrompt={resolveSceneVisualPrompts}
           />
         )}
       </div>
@@ -399,6 +410,7 @@ interface StoryboardTabProps {
   selectedShotId: string | null;
   onSelectShot: (id: string | null) => void;
   onUpdateShot: (shotId: string, updates: Partial<Shot>) => void;
+  sceneAssets?: Record<string, SceneAsset>;
 }
 
 const SHOT_SIZES: Shot['shotSize'][] = [
@@ -413,9 +425,43 @@ const CAMERA_MOVEMENTS: Shot['cameraMovement'][] = [
 
 const StoryboardTab: React.FC<StoryboardTabProps> = ({
   shots, parsedScript, selectedShotId, onSelectShot, onUpdateShot,
+  sceneAssets = {},
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState<Partial<Shot>>({});
+
+  // ── Group shots by sceneId, preserving script's scene order ─────────────
+  type ShotGroup = { sceneId: string; scene: Scene | undefined; shots: Shot[] };
+  const groupedShots: ShotGroup[] = useMemo(() => {
+    const map = new Map<string, ShotGroup>();
+    for (const shot of shots) {
+      const scene = parsedScript?.scenes.find(s => s.id === shot.sceneId);
+      let group = map.get(shot.sceneId);
+      if (!group) {
+        group = { sceneId: shot.sceneId, scene, shots: [] };
+        map.set(shot.sceneId, group);
+      }
+      group.shots.push(shot);
+    }
+    const order = (parsedScript?.scenes ?? []).map(s => s.id);
+    return [...map.entries()]
+      .sort(([a], [b]) => {
+        const ia = order.indexOf(a);
+        const ib = order.indexOf(b);
+        // 已知场景按剧本顺序，未知场景排在末尾
+        if (ia === -1 && ib === -1) return 0;
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
+      })
+      .map(([, group]) => group);
+  }, [shots, parsedScript]);
+
+  // helper: turn raw base64 into a usable src (handles both with/without prefix)
+  const toImgSrc = (b64: string | undefined): string | null => {
+    if (!b64) return null;
+    return b64.startsWith('data:') ? b64 : `data:image/png;base64,${b64}`;
+  };
 
   if (shots.length === 0) {
     return (
@@ -432,80 +478,128 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
 
   return (
     <div className="flex h-full">
-      {/* Shot grid */}
-      <div className="flex-1 p-4 overflow-auto">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {shots.map(shot => {
-            const scene = parsedScript?.scenes.find(s => s.id === shot.sceneId);
-            const chars = (parsedScript?.characters || []).filter(c => shot.characters.includes(c.id));
-
-            return (
-              <div
-                key={shot.id}
-                onClick={() => onSelectShot(shot.id === selectedShotId ? null : shot.id)}
-                onDoubleClick={() => {
-                  onSelectShot(shot.id);
-                  setEditForm({
-                    shotSize: shot.shotSize,
-                    cameraMovement: shot.cameraMovement,
-                    durationSeconds: shot.durationSeconds,
-                    actionSummary: shot.actionSummary,
-                    dialogue: shot.dialogue,
-                  });
-                  setIsEditing(true);
-                }}
-                className={`p-3 rounded-lg border cursor-pointer transition-all select-none ${
-                  shot.id === selectedShotId
-                    ? 'border-cyan-400 bg-cyan-950/40 shadow-[0_0_0_1px_rgba(34,211,238,0.5)]'
-                    : 'border-gray-700 bg-gray-900 hover:border-gray-500 hover:shadow'
-                }`}
-              >
-                {/* Shot number & badges */}
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-bold text-cyan-300">
-                    镜 {shot.shotNumber}
+      {/* Shot grid — grouped by scene with cinematic storyboard headers */}
+      <div className="flex-1 p-4 overflow-auto space-y-6">
+        {groupedShots.map(({ sceneId, scene, shots: sceneShots }) => {
+          const sceneAsset = sceneAssets[sceneId];
+          const heroThumb = toImgSrc(sceneAsset?.keyframeImages?.wide);
+          return (
+            <section key={sceneId}>
+              {/* Cinematic storyboard section header */}
+              <header className="flex items-center gap-3 mb-3 px-1">
+                <span className="text-[10px] uppercase tracking-widest text-gray-500 font-semibold">
+                  Scene
+                </span>
+                <h2 className="text-base font-semibold text-gray-100">
+                  {scene?.location || sceneId}
+                </h2>
+                {scene?.time && (
+                  <span className="text-xs text-gray-400 bg-gray-800 px-2 py-0.5 rounded">
+                    {scene.time}
                   </span>
-                  <div className="flex gap-1">
-                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded truncate max-w-[80px]" title={shot.shotSize}>
-                      {shot.shotSize}
-                    </span>
-                    <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded truncate max-w-[70px]" title={shot.cameraMovement}>
-                      {shot.cameraMovement}
-                    </span>
-                  </div>
-                </div>
+                )}
+                <span className="text-xs text-gray-500">
+                  · {sceneShots.length} 镜
+                </span>
+                <div className="flex-1 h-px bg-gradient-to-r from-gray-700 to-transparent" />
+              </header>
 
-                {/* Scene & action */}
-                <div className="text-xs text-gray-400 mb-1">
-                  场景：{scene?.location || shot.sceneId}
-                </div>
-                <div className="text-sm text-gray-200 mb-2 line-clamp-2">
-                  {shot.actionSummary || shot.visualPrompts.actionPrompt}
-                </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                {sceneShots.map(shot => {
+                  const chars = (parsedScript?.characters || []).filter(
+                    c => shot.characters.includes(c.id),
+                  );
 
-                {/* Characters */}
-                <div className="flex flex-wrap gap-1 mb-2">
-                  {chars.slice(0, 3).map(c => (
-                    <span key={c.id} className="text-[10px] px-1.5 py-0.5 bg-emerald-900/50 text-emerald-300 rounded">
-                      {c.name}
-                    </span>
-                  ))}
-                  {chars.length > 3 && (
-                    <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 rounded">
-                      +{chars.length - 3}
-                    </span>
-                  )}
-                </div>
+                  return (
+                    <div
+                      key={shot.id}
+                      onClick={() => onSelectShot(shot.id === selectedShotId ? null : shot.id)}
+                      onDoubleClick={() => {
+                        onSelectShot(shot.id);
+                        setEditForm({
+                          shotSize: shot.shotSize,
+                          cameraMovement: shot.cameraMovement,
+                          durationSeconds: shot.durationSeconds,
+                          actionSummary: shot.actionSummary,
+                          dialogue: shot.dialogue,
+                        });
+                        setIsEditing(true);
+                      }}
+                      className={`p-3 rounded-lg border cursor-pointer transition-all select-none ${
+                        shot.id === selectedShotId
+                          ? 'border-cyan-400 bg-cyan-950/40 shadow-[0_0_0_1px_rgba(34,211,238,0.5)]'
+                          : 'border-gray-700 bg-gray-900 hover:border-gray-500 hover:shadow'
+                      }`}
+                    >
+                      {/* Shot-level thumbnail: prefer shot's own sceneAsset.wide,
+                          fall back to the section hero thumb, finally placeholder. */}
+                      {(() => {
+                        const shotAsset = sceneAssets[shot.sceneId];
+                        const thumb = toImgSrc(shotAsset?.keyframeImages?.wide) || heroThumb;
+                        return (
+                          <div className="aspect-video bg-gray-950 rounded mb-2 overflow-hidden border border-gray-800">
+                            {thumb ? (
+                              <img
+                                src={thumb}
+                                alt={`scene ${scene?.location ?? shot.sceneId}`}
+                                className="w-full h-full object-cover"
+                                loading="lazy"
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-[10px] text-gray-600">
+                                无预览 · {scene?.location || shot.sceneId}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
 
-                {/* Duration */}
-                <div className="text-xs text-gray-400 flex items-center gap-1">
-                  <span>{shot.durationSeconds}s</span>
-                  {shot.dialogue && <span className="text-amber-400 ml-1">对白</span>}
-                </div>
+                      {/* Shot number & badges */}
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm font-bold text-cyan-300">
+                          镜 {shot.shotNumber}
+                        </span>
+                        <div className="flex gap-1">
+                          <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-300 rounded truncate max-w-[80px]" title={shot.shotSize}>
+                            {shot.shotSize}
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded truncate max-w-[70px]" title={shot.cameraMovement}>
+                            {shot.cameraMovement}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Action summary */}
+                      <div className="text-sm text-gray-200 mb-2 line-clamp-2">
+                        {shot.actionSummary || shot.visualPrompts.actionPrompt}
+                      </div>
+
+                      {/* Characters */}
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {chars.slice(0, 3).map(c => (
+                          <span key={c.id} className="text-[10px] px-1.5 py-0.5 bg-emerald-900/50 text-emerald-300 rounded">
+                            {c.name}
+                          </span>
+                        ))}
+                        {chars.length > 3 && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 rounded">
+                            +{chars.length - 3}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Duration */}
+                      <div className="text-xs text-gray-400 flex items-center gap-1">
+                        <span>{shot.durationSeconds}s</span>
+                        {shot.dialogue && <span className="text-amber-400 ml-1">对白</span>}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
-        </div>
+            </section>
+          );
+        })}
       </div>
 
       {/* Shot detail panel */}
@@ -696,20 +790,48 @@ interface CharactersTabProps {
   characters: Character[];
   characterAssets: Record<string, CharacterAsset>;
   onGenerateThreeView: (charId: string, projectId?: string) => Promise<void>;
+  onGenerateVariation: (charId: string, prompt: string, projectId?: string) => Promise<void>;
   isGenerating: Record<string, boolean>;
   selectedCharId: string | null;
   onSelectChar: (id: string | null) => void;
   onUpdatePrompt: (charId: string, prompt: string) => void;
+  onResolvePrompt: (charIds?: string[]) => Promise<void>;
+  isResolvingPrompts: boolean;
 }
 
+type PromptSource = 'none' | 'auto' | 'manual';
+
+// Tiny visual chip that makes the prompt provenance obvious in the UI.
+const PromptSourceBadge: React.FC<{ source: PromptSource }> = ({ source }) => {
+  const map: Record<PromptSource, { label: string; cls: string }> = {
+    none:   { label: '空',       cls: 'bg-gray-800 text-gray-400' },
+    auto:   { label: 'AI 自动',  cls: 'bg-cyan-900/40 text-cyan-300 border border-cyan-700/40' },
+    manual: { label: '人工编辑', cls: 'bg-amber-900/40 text-amber-300 border border-amber-700/40' },
+  };
+  const { label, cls } = map[source];
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}>{label}</span>;
+};
+
 const CharactersTab: React.FC<CharactersTabProps> = ({
-  characters, characterAssets, onGenerateThreeView, isGenerating, selectedCharId, onSelectChar,
-  onUpdatePrompt,
+  characters, characterAssets, onGenerateThreeView, onGenerateVariation,
+  isGenerating, selectedCharId, onSelectChar, onUpdatePrompt,
+  onResolvePrompt, isResolvingPrompts,
 }) => {
   const [editingPrompt, setEditingPrompt] = useState<Record<string, string>>({});
   const char = characters.find(c => c.id === selectedCharId);
   const asset = selectedCharId ? characterAssets[selectedCharId] : undefined;
-  const promptValue = editingPrompt[selectedCharId ?? ''] ?? char?.visualPrompt ?? asset?.visualPrompt ?? '';
+  // Resolve order: user edit buffer > parsedScript.characters[i].visualPrompt
+  //                > characterAssets[id].visualPrompt (legacy fallback for
+  //                older sessions before the bidirectional hydration added
+  //                in 2026-08).
+  const promptValue = editingPrompt[selectedCharId ?? '']
+    ?? char?.visualPrompt
+    ?? asset?.visualPrompt
+    ?? '';
+  const promptSource: PromptSource = editingPrompt[selectedCharId ?? '']
+    ? 'manual'
+    : (char?.visualPrompt || asset?.visualPrompt) ? 'auto' : 'none';
+
   if (characters.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-gray-400">
@@ -726,6 +848,7 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
         <div className="space-y-2">
           {characters.map(char => {
             const asset = characterAssets[char.id];
+            const preview = asset?.visualPrompt || char.visualPrompt;
             return (
               <div
                 key={char.id}
@@ -750,6 +873,21 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
                 {asset?.threeViewImages?.front && (
                   <div className="mt-1 text-xs text-emerald-400">✓ 三视图已生成</div>
                 )}
+                {/* Bidirectional prompt preview: show as italic line-clamp-2
+                    when present; falling back to a 'generating...' hint while
+                    autoResolvePrompts is in flight. */}
+                {preview ? (
+                  <div
+                    className="mt-2 text-[10px] text-gray-500 line-clamp-2 italic"
+                    title={preview}
+                  >
+                    {preview}
+                  </div>
+                ) : isResolvingPrompts ? (
+                  <div className="mt-2 text-[10px] text-cyan-500/70 italic">
+                    正在生成提示词…
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -769,7 +907,7 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
               <p className="text-sm text-gray-400">{char.personality}</p>
             </div>
 
-            {/* Generate button */}
+            {/* Generate three-view button */}
             <button
               onClick={() => onGenerateThreeView(char.id)}
               disabled={isGenerating[char.id]}
@@ -806,20 +944,54 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
               </div>
             )}
 
-            {/* Visual prompt */}
+            {/* ── Visual prompt (bidirectional) ─────────────────────────── */}
             <div className="mb-4">
-              <h3 className="text-sm font-semibold text-gray-200 mb-1">视觉提示词</h3>
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-sm font-semibold text-gray-200">视觉提示词</h3>
+                <PromptSourceBadge source={promptSource} />
+              </div>
               <textarea
                 className="w-full p-2 bg-gray-950 border border-gray-700 text-gray-100 placeholder:text-gray-500 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
                 rows={4}
                 value={promptValue}
-                placeholder="自动生成或手动编辑..."
+                placeholder="点击下方「生成初始提示词」开始，或等待解析后自动生成…"
                 onChange={e => {
                   if (!selectedCharId) return;
                   setEditingPrompt(prev => ({ ...prev, [selectedCharId]: e.target.value }));
                   onUpdatePrompt(selectedCharId, e.target.value);
                 }}
               />
+              <div className="flex flex-wrap gap-2 mt-2">
+                {/* Input side: from script analysis → prompt box */}
+                <button
+                  onClick={() => onResolvePrompt([char.id])}
+                  disabled={isResolvingPrompts}
+                  className="px-3 py-1 bg-cyan-700 hover:bg-cyan-600 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
+                  title="让 LLM 根据角色属性生成视觉提示词"
+                >
+                  {char.visualPrompt || asset?.visualPrompt
+                    ? '重新生成提示词'
+                    : '生成初始提示词'}
+                </button>
+                {/* Output side 1: prompt box → image generation (three-view) */}
+                <button
+                  onClick={() => onGenerateThreeView(char.id)}
+                  disabled={isGenerating[char.id] || !promptValue}
+                  className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
+                  title="使用当前提示词生成三视图"
+                >
+                  用此提示词生成三视图
+                </button>
+                {/* Output side 2: prompt box → variation */}
+                <button
+                  onClick={() => onGenerateVariation(char.id, promptValue)}
+                  disabled={isGenerating[char.id] || !promptValue}
+                  className="px-3 py-1 bg-purple-700 hover:bg-purple-600 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
+                  title="把当前提示词作为种子生成服装变体"
+                >
+                  以此为种子生成变体
+                </button>
+              </div>
             </div>
 
             {/* Variations */}
@@ -900,8 +1072,22 @@ const MotionTab: React.FC<MotionTabProps> = ({ shots, parsedScript }) => {
                   )}
                 </div>
 
-                <div className="text-xs text-gray-400 mb-2 line-clamp-1">
-                  {shot.visualPrompts.actionPrompt}
+                <div className="text-xs text-gray-400 mb-2">
+                  <details className="group">
+                    <summary className="cursor-pointer hover:text-gray-200 line-clamp-1 list-none">
+                      <span className="text-gray-500 mr-1 group-open:hidden">▸</span>
+                      <span className="text-gray-500 mr-1 hidden group-open:inline">▾</span>
+                      {shot.visualPrompts.actionPrompt}
+                    </summary>
+                    <pre className="mt-1 p-2 bg-gray-950 border border-gray-800 rounded text-[11px] whitespace-pre-wrap text-gray-300">
+                      <b className="text-emerald-400">动作：</b>{shot.visualPrompts.actionPrompt}
+                      {'\n'}<b className="text-cyan-400">场景：</b>{shot.visualPrompts.scenePrompt}
+                      {'\n'}<b className="text-purple-400">相机：</b>{shot.visualPrompts.cameraPrompt}
+                      {shot.visualPrompts.transitionPrompt
+                        ? `\n转场：${shot.visualPrompts.transitionPrompt}`
+                        : ''}
+                    </pre>
+                  </details>
                 </div>
 
                 <button
@@ -950,11 +1136,14 @@ interface ScenesTabProps {
     visualPrompt: string,
     projectId?: string,
   ) => Promise<void>;
+  onUpdatePrompt: (sceneId: string, prompt: string) => void;
+  onResolvePrompt: (sceneIds?: string[]) => Promise<void>;
 }
 
 const ScenesTab: React.FC<ScenesTabProps> = ({
   parsedScript, sceneAssets, isGeneratingSceneAsset,
   selectedSceneId, onSelectScene, onGenerateSceneAsset,
+  onUpdatePrompt, onResolvePrompt,
 }) => {
   const scenes = parsedScript?.scenes ?? [];
 
@@ -977,6 +1166,7 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
             const doneCount = asset
               ? Object.values(asset.keyframeImages ?? {}).filter(Boolean).length
               : 0;
+            const preview = scene.visualPrompt || asset?.visualPrompt;
             return (
               <div
                 key={scene.id}
@@ -992,6 +1182,22 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
                 {doneCount > 0 && (
                   <div className="text-xs text-emerald-400 mt-1">✓ {doneCount}/3 已生成</div>
                 )}
+                {/* Bidirectional preview line (mirrors CharactersTab) */}
+                {preview ? (
+                  <div
+                    className="mt-2 text-[10px] text-gray-500 line-clamp-2 italic"
+                    title={preview}
+                  >
+                    {preview}
+                  </div>
+                ) : scene.atmosphere ? (
+                  <div
+                    className="mt-2 text-[10px] text-gray-600 line-clamp-2 italic"
+                    title={scene.atmosphere}
+                  >
+                    {scene.atmosphere}
+                  </div>
+                ) : null}
               </div>
             );
           })}
@@ -1006,6 +1212,12 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
         const generating = !!isGeneratingSceneAsset[scene.id];
         const keyframes = ['wide', 'closeup', 'mood'] as const;
 
+        // Resolve chain: parsedScript.scenes[i].visualPrompt (single source
+        // of truth, hydrated by pollAutoSceneAsset / generateSceneAsset /
+        // resolveSceneVisualPrompts) → asset fallback for legacy sessions
+        // → atmosphere as last-resort minimum.
+        const promptValue = scene.visualPrompt || asset?.visualPrompt || scene.atmosphere || '';
+
         return (
           <div className="flex-1 p-4 overflow-auto">
             <div className="mb-4">
@@ -1015,30 +1227,51 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
               </p>
             </div>
 
-            {/* Scene visual prompt */}
+            {/* ── Visual prompt (bidirectional) ─────────────────────────── */}
             <div className="mb-4">
-              <h3 className="text-sm font-semibold text-gray-200 mb-1">视觉提示词</h3>
-              <pre className="p-2 bg-gray-950 border border-gray-700 text-gray-200 rounded-lg text-sm whitespace-pre-wrap">
-                {asset?.visualPrompt || scene.atmosphere || '—'}
-              </pre>
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-sm font-semibold text-gray-200">视觉提示词</h3>
+                <PromptSourceBadge
+                  source={scene.visualPrompt || asset?.visualPrompt ? 'auto' : 'none'}
+                />
+              </div>
+              <textarea
+                className="w-full p-2 bg-gray-950 border border-gray-700 text-gray-100 placeholder:text-gray-500 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
+                rows={4}
+                value={promptValue}
+                placeholder="点击下方「生成初始提示词」开始，或等待解析后自动生成…"
+                onChange={e => onUpdatePrompt(scene.id, e.target.value)}
+              />
+              <div className="flex flex-wrap gap-2 mt-2">
+                {/* Input side: derive scene prompt from location/time/atmosphere */}
+                <button
+                  onClick={() => onResolvePrompt([scene.id])}
+                  className="px-3 py-1 bg-cyan-700 hover:bg-cyan-600 text-white text-xs rounded-lg transition-colors"
+                  title="基于场景位置/时间/氛围生成视觉提示词"
+                >
+                  {scene.visualPrompt || asset?.visualPrompt
+                    ? '重新生成提示词'
+                    : '生成初始提示词'}
+                </button>
+                {/* Output side: prompt box → keyframe image generation */}
+                <button
+                  onClick={() =>
+                    onGenerateSceneAsset(
+                      scene.id,
+                      scene.location,
+                      scene.time,
+                      scene.atmosphere || '',
+                      promptValue,
+                    )
+                  }
+                  disabled={generating || !promptValue}
+                  className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
+                  title="使用当前提示词生成关键帧"
+                >
+                  用此提示词生成关键帧
+                </button>
+              </div>
             </div>
-
-            {/* Generate button */}
-            <button
-              onClick={() =>
-                onGenerateSceneAsset(
-                  scene.id,
-                  scene.location,
-                  scene.time,
-                  scene.atmosphere || '',
-                  asset?.visualPrompt || scene.atmosphere || '',
-                )
-              }
-              disabled={generating}
-              className="mb-4 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors disabled:opacity-50"
-            >
-              {generating ? '生成中...' : '生成场景关键帧'}
-            </button>
 
             {/* Keyframe grid */}
             {asset?.keyframeImages && (

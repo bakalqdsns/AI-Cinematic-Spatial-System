@@ -133,12 +133,11 @@ async def generate_scene_visual_prompt(
 
     if model_mode == "cloud":
         try:
-            from app.services.dashscope_client import get_dashscope_client
-            client = get_dashscope_client()
-            content = await asyncio.to_thread(
-                client.chat,
+            from app.providers.cloud_router import cloud_chat
+            content = await cloud_chat(
                 [{"role": "system", "content": system_prompt},
                  {"role": "user", "content": user_text}],
+                component="llm",
                 temperature=0.3,
                 max_tokens=256,
             )
@@ -365,17 +364,14 @@ async def _generate_via_local_with_reference(
 
 async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Optional[str]:
     """
-    Generate image via DashScope ImageSynthesis API.
+    Generate image via the active cloud image provider (DashScope, ToAPIs, ...).
 
     Returns base64-encoded PNG, or None on failure.
     """
     try:
-        from app.services.dashscope_client import get_dashscope_client
-        client = get_dashscope_client()
+        from app.providers.cloud_router import cloud_generate_image
         out_size = size or _default_scene_size()
-        urls = await asyncio.to_thread(
-            client.generate_image, prompt, size=out_size, n=1,
-        )
+        urls = await cloud_generate_image(prompt, size=out_size, n=1)
         if not urls:
             return None
         url = urls[0]

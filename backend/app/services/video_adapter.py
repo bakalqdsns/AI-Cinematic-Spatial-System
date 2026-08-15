@@ -4,9 +4,10 @@ Video Generation Adapter — Pluggable provider layer.
 Provides a unified `VideoProvider` interface for action video generation, with
 multiple backends:
 
-  - "dashscope"  — DashScope VideoSynthesis API (wanx_2_1_i2v_plus, cloud)
-  - "local_wan"  — wan2.1-i2v local inference via Modelscope (28GB+ VRAM)
-  - "svd"        — Stable Video Diffusion local (8GB VRAM, degraded quality)
+  - "dashscope"   — wan2.5-i2v-preview via DashScope (cloud, charged)
+  - "happyhorse"  — happyhorse-1.1-r2v via DashScope (cloud, 10 free gen/key)
+  - "local_wan"   — wan2.1-i2v local inference via Modelscope (28GB+ VRAM)
+  - "svd"         — Stable Video Diffusion local (8GB VRAM, degraded quality)
 
 Usage:
     provider = get_video_provider("dashscope")   # or "local_wan", "svd"
@@ -37,6 +38,23 @@ logger = logging.getLogger(__name__)
 
 # ── VideoProvider interface ───────────────────────────────────────────────────────
 
+def _apply_greenscreen_prompt(prompt: str, greenscreen: bool) -> str:
+    """Append the green-screen background directive to ``prompt`` when enabled.
+
+    The suffix matches the chroma key colour used by
+    :func:`app.services.motion_extractor.chroma_key_rgba` (pure green
+    ``#00FF00``). The wording is deliberately fixed so the video provider
+    reliably produces a flat green backdrop regardless of base language model.
+    """
+    if not greenscreen:
+        return prompt
+    suffix = (
+        ", solid bright green (#00FF00) chroma key background, "
+        "no other objects in background, flat lighting"
+    )
+    return f"{prompt}{suffix}"
+
+
 class VideoProvider(ABC):
     """
     Abstract base for all video generation providers.
@@ -56,6 +74,7 @@ class VideoProvider(ABC):
         start_image_b64: Optional[str] = None,
         end_image_b64: Optional[str] = None,
         duration: float = 5.0,
+        greenscreen: bool = False,
     ) -> Optional[str]:
         """
         Generate an action video.
@@ -65,6 +84,9 @@ class VideoProvider(ABC):
             start_image_b64: Optional first frame (base64)
             end_image_b64: Optional last frame (base64)
             duration: Target duration in seconds
+            greenscreen: When True, prepend a flat green-screen background
+                directive so the resulting video is suitable for chroma-key
+                post-processing.
 
         Returns:
             Local file path to the generated video, or None on failure.
@@ -78,7 +100,9 @@ class DashScopeFilmProvider(VideoProvider):
     """
     DashScope VideoSynthesis API via dashscope.VideoSynthesis.
 
-    Uses wanx_2_1_i2v_plus for image-to-video generation (cloud, high quality).
+    Uses wan2.5-i2v-preview for image-to-video generation (cloud).
+    Only use this when the key has quota for wan2.5; otherwise use HappyHorseProvider
+    (happyhorse-1.1-r2v, 10 free generations).
 
     API key resolution order (matches dashscope_client):
       1. ``dashscope_video_api_key`` setting (set via Settings UI)
@@ -87,7 +111,10 @@ class DashScopeFilmProvider(VideoProvider):
     """
 
     name = "dashscope"
-    _model = "wanx_2_1_i2v_plus"
+    # Model name verified against the live DashScope API on 2026-08-15.
+    # ``wan2.1-i2v-plus`` rejects first_frame_url under the current API
+    # surface; ``wan2.5-i2v-preview`` accepts first_frame_url (standard API).
+    _model = "wan2.5-i2v-preview"
 
     @staticmethod
     def _resolve_api_key() -> str:
@@ -109,6 +136,7 @@ class DashScopeFilmProvider(VideoProvider):
         start_image_b64: Optional[str] = None,
         end_image_b64: Optional[str] = None,
         duration: float = 5.0,
+        greenscreen: bool = False,
     ) -> Optional[str]:
         try:
             from dashscope import VideoSynthesis
@@ -121,9 +149,10 @@ class DashScopeFilmProvider(VideoProvider):
                 return f"data:image/png;base64,{b64}"
 
             api_key = self._resolve_api_key()
+            effective_prompt = _apply_greenscreen_prompt(prompt, greenscreen)
             call_kwargs: dict = {
                 "model": self._model,
-                "prompt": prompt,
+                "prompt": effective_prompt,
                 "api_key": api_key,
             }
 
@@ -146,7 +175,7 @@ class DashScopeFilmProvider(VideoProvider):
             poll_idx = 0
 
             while elapsed < 300:
-                status_resp = VideoSynthesis.fetch(task_id=task_id, api_key=api_key)
+                status_resp = VideoSynthesis.fetch(task=task_id, api_key=api_key)
                 task_status = status_resp.output.task_status
                 if task_status == "succeed":
                     video_url = status_resp.output.video.video_url
@@ -188,6 +217,121 @@ class DashScopeFilmProvider(VideoProvider):
             return None
 
 
+class HappyHorseProvider(VideoProvider):
+    """
+    happyhorse-1.1-r2v via DashScope VideoSynthesis API.
+
+    This model accepts image input via ``extra_input={"media": [...]}``
+    (NOT ``first_frame_url``), with ``type="reference_image"``.  It has 10
+    free generations per key and is the recommended provider for e2e testing.
+
+    API key resolution order:
+      1. ``dashscope_video_api_key`` setting
+      2. ``DASHSCOPE_VIDEO_API_KEY`` env var
+      3. ``DASHSCOPE_API_KEY`` env var
+    """
+
+    name = "happyhorse"
+    _model = "happyhorse-1.1-r2v"
+
+    @staticmethod
+    def _resolve_api_key() -> str:
+        try:
+            from app.config import settings
+            if settings.dashscope_video_api_key:
+                return settings.dashscope_video_api_key
+        except Exception:
+            pass
+        return (
+            os.getenv("DASHSCOPE_VIDEO_API_KEY", "")
+            or os.getenv("DASHSCOPE_API_KEY", "")
+        )
+
+    async def generate(
+        self,
+        prompt: str,
+        start_image_b64: Optional[str] = None,
+        end_image_b64: Optional[str] = None,
+        duration: float = 5.0,
+        greenscreen: bool = False,
+    ) -> Optional[str]:
+        try:
+            from dashscope import VideoSynthesis
+            import httpx
+
+            def b64_to_data_uri(b64: str) -> str:
+                if b64.startswith("data:"):
+                    return b64
+                return f"data:image/png;base64,{b64}"
+
+            api_key = self._resolve_api_key()
+            effective_prompt = _apply_greenscreen_prompt(prompt, greenscreen)
+
+            call_kwargs: dict = {
+                "model": self._model,
+                "prompt": effective_prompt,
+                "api_key": api_key,
+                "extra_input": {},
+            }
+            # happyhorse requires extra_input.media with type="reference_image"
+            if start_image_b64:
+                call_kwargs["extra_input"]["media"] = [
+                    {"url": b64_to_data_uri(start_image_b64), "type": "reference_image"}
+                ]
+
+            task_resp = VideoSynthesis.call(**call_kwargs)
+            if task_resp.status_code != 200:
+                logger.warning("[VideoAdapter:HappyHorse] task creation failed: %s", task_resp.message)
+                return None
+
+            task_id = task_resp.output.task_id
+            logger.info("[VideoAdapter:HappyHorse] task created: %s", task_id)
+
+            poll_intervals = [10, 10, 15, 15, 20]
+            elapsed = 0
+            poll_idx = 0
+
+            while elapsed < 600:   # happyhorse is slower; give it 10 min
+                status_resp = VideoSynthesis.fetch(task=task_id, api_key=api_key)
+                task_status = status_resp.output.task_status
+                if task_status == "SUCCEED":
+                    video_url = status_resp.output.video_url
+                    logger.info("[VideoAdapter:HappyHorse] task succeeded after %ds", elapsed)
+                    return await self._download_video(video_url)
+                if task_status in ("FAILED", "ERROR"):
+                    logger.warning("[VideoAdapter:HappyHorse] task failed: %s", status_resp.output)
+                    return None
+
+                interval = poll_intervals[min(poll_idx, len(poll_intervals) - 1)]
+                time.sleep(interval)
+                elapsed += interval
+                poll_idx += 1
+
+            logger.warning("[VideoAdapter:HappyHorse] task timed out after 600s")
+            return None
+
+        except Exception as e:
+            logger.warning("[VideoAdapter:HappyHorse] error: %s", e)
+            return None
+
+    @staticmethod
+    async def _download_video(url: str) -> Optional[str]:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                out_dir = Path(__file__).parent.parent.parent / "test_outputs" / "dashscope_live"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = out_dir / f"hh_{uuid.uuid4().hex[:8]}.mp4"
+                out_path.write_bytes(resp.content)
+                logger.info("[VideoAdapter:HappyHorse] downloaded: %s", out_path)
+                return str(out_path)
+        except Exception as e:
+            logger.warning("[VideoAdapter:HappyHorse] download error: %s", e)
+            return None
+
+
 class LocalWanProvider(VideoProvider):
     """
     wan2.1-i2v local inference via Modelscope / diffusers.
@@ -202,6 +346,7 @@ class LocalWanProvider(VideoProvider):
         start_image_b64: Optional[str] = None,
         end_image_b64: Optional[str] = None,
         duration: float = 5.0,
+        greenscreen: bool = False,
     ) -> Optional[str]:
         try:
             from diffusers import WanImageToVideoPipeline
@@ -221,12 +366,13 @@ class LocalWanProvider(VideoProvider):
                 start_img = self._b64_to_pil(start_image_b64)
 
             num_frames = int(duration * 8)  # ~8fps
+            effective_prompt = _apply_greenscreen_prompt(prompt, greenscreen)
 
             if start_img is not None:
-                result = pipe(prompt=prompt, image=start_img, num_inference_steps=50, guidance_scale=5.0)
+                result = pipe(prompt=effective_prompt, image=start_img, num_inference_steps=50, guidance_scale=5.0)
             else:
                 logger.warning("[VideoAdapter:LocalWan] requires start_image — generating text-to-video")
-                result = pipe(prompt=prompt, num_inference_steps=50, guidance_scale=5.0)
+                result = pipe(prompt=effective_prompt, num_inference_steps=50, guidance_scale=5.0)
 
             frames = result.frames[0] if hasattr(result, "frames") else result[0]
             video_path = await self._save_video_frames(frames, duration)
@@ -287,6 +433,7 @@ class SVDProvider(VideoProvider):
         start_image_b64: Optional[str] = None,
         end_image_b64: Optional[str] = None,
         duration: float = 5.0,
+        greenscreen: bool = False,
     ) -> Optional[str]:
         try:
             from diffusers import StableVideoDiffusionPipeline
@@ -310,6 +457,11 @@ class SVDProvider(VideoProvider):
                 init_image = Image.new("RGB", (1024, 576), (0, 0, 0))
 
             num_frames = min(int(duration * 25), 25)  # SVD caps at 25 frames
+
+            # SVD is image-conditioned and does not consume the prompt text,
+            # but we still record greenscreen intent in logs for traceability.
+            if greenscreen:
+                logger.info("[VideoAdapter:SVD] greenscreen requested; init image dominates SVD output")
 
             with torch.no_grad():
                 result = pipe(
@@ -370,6 +522,7 @@ class SVDProvider(VideoProvider):
 
 _PROVIDER_REGISTRY: dict[str, type[VideoProvider]] = {
     "dashscope": DashScopeFilmProvider,
+    "happyhorse": HappyHorseProvider,
     "local_wan": LocalWanProvider,
     "svd": SVDProvider,
 }
@@ -409,13 +562,20 @@ async def video_generate(
     start_image_b64: Optional[str] = None,
     end_image_b64: Optional[str] = None,
     duration: float = 5.0,
+    greenscreen: bool = False,
 ) -> Optional[str]:
     """
     One-line video generation through the active provider.
 
     Equivalent to:
         provider = get_video_provider(provider)
-        await provider.generate(prompt, start_image_b64, end_image_b64, duration)
+        await provider.generate(prompt, start_image_b64, end_image_b64, duration, greenscreen=greenscreen)
     """
     p = get_video_provider(provider)
-    return await p.generate(prompt, start_image_b64, end_image_b64, duration)
+    return await p.generate(
+        prompt,
+        start_image_b64,
+        end_image_b64,
+        duration,
+        greenscreen=greenscreen,
+    )

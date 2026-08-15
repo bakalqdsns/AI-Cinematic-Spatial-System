@@ -5,8 +5,9 @@
 // Cloud/Local ModeToggle, allowing fully mixed configurations without tabs.
 // ─────────────────────────────────────────────────────────────────────────────
 import { useEffect, useRef, useState } from 'react';
-import { Settings, X, Image as ImageIcon, Video, RefreshCw, Check, AlertCircle, Cpu, Cloud, HardDrive, Download } from 'lucide-react';
+import { Settings, X, Image as ImageIcon, Video, RefreshCw, Check, AlertCircle, Cpu, Cloud, HardDrive, Download, Server } from 'lucide-react';
 import { useSettingsStore } from '../store/useSettingsStore';
+import { ProviderRegistry } from './ProviderRegistry';
 import type { ModelDownloadState, ModelDownloadStatus } from '../store/useSettingsStore';
 import type { RuntimeSettings } from '../services/settingsService';
 
@@ -16,6 +17,28 @@ const DASHSCOPE_LLM_OPTIONS = [
   { value: 'qwen3.7-max', label: 'qwen3.7-max (最强推理)' },
   { value: 'qwen3.7-plus', label: 'qwen3.7-plus (平衡性能)' },
   { value: 'qwen3.6-flash', label: 'qwen3.6-flash (快速响应)' },
+];
+
+const TOAPI_LLM_OPTIONS = [
+  { value: 'gpt-5.6-terra', label: 'gpt-5.6-terra (均衡)' },
+  { value: 'gpt-4.6-latest', label: 'gpt-4.6-latest (高精度)' },
+  { value: 'gpt-4o-mini', label: 'gpt-4o-mini (快速)' },
+];
+
+// ToAPIs image models — https://docs.toapis.com
+const TOAPI_IMAGE_OPTIONS = [
+  { value: 'gpt-image-2', label: 'gpt-image-2 (推荐)' },
+];
+
+// ToAPIs video models — https://docs.toapis.com
+const TOAPI_VIDEO_OPTIONS = [
+  { value: 'sora-2-vvip', label: 'sora-2-vvip (高清)' },
+  { value: 'sora-2-flash', label: 'sora-2-flash (快速)' },
+];
+
+const CLOUD_PROVIDER_OPTIONS = [
+  { value: 'dashscope', label: 'DashScope (通义千问)' },
+  { value: 'toapi', label: 'ToAPIs (OpenAI兼容)' },
 ];
 
 const DASHSCOPE_VLM_OPTIONS = [
@@ -41,8 +64,14 @@ const DTYPE_OPTIONS = [
   { value: 'float32', label: 'float32' },
 ];
 
+// Cloud video providers — all DashScope-backed options share `dashscope_video_api_key`.
+//   - "dashscope"  : wan2.5-i2v-preview (paid, premium quality)
+//   - "happyhorse" : happyhorse-1.1-r2v (free tier, ~10 calls, quick test)
 const VIDEO_PROVIDER_OPTIONS = [
-  { value: 'dashscope', label: 'DashScope (云端)' },
+  { value: 'dashscope', label: 'DashScope wan2.5 (付费)' },
+  { value: 'happyhorse', label: 'DashScope happyhorse-1.1-r2v (免费试用)' },
+];
+const LOCAL_VIDEO_PROVIDER_OPTIONS = [
   { value: 'local_wan', label: 'Local Wan2.1' },
   { value: 'svd', label: 'Stable Video Diffusion' },
 ];
@@ -110,6 +139,13 @@ export function SettingsPanel() {
       vlm_mode: settings.vlm_mode,
       image_mode: settings.image_mode,
       video_mode: settings.video_mode,
+      cloud_llm_provider: settings.cloud_llm_provider ?? 'dashscope',
+      toapi_llm_model: settings.toapi_llm_model ?? 'gpt-5.6-terra',
+      cloud_vlm_provider: settings.cloud_vlm_provider ?? 'dashscope',
+      cloud_image_provider: settings.cloud_image_provider ?? 'dashscope',
+      toapi_image_model: settings.toapi_image_model ?? 'gpt-image-2',
+      cloud_video_provider: settings.cloud_video_provider ?? 'dashscope',
+      toapi_video_model: settings.toapi_video_model ?? 'sora-2-vvip',
       dashscope_llm_model: settings.dashscope_llm_model,
       dashscope_vlm_model: settings.dashscope_vlm_model,
       dashscope_image_model: settings.dashscope_image_model,
@@ -122,6 +158,8 @@ export function SettingsPanel() {
       dashscope_vlm_api_key: settings.dashscope_vlm_api_key ?? '',
       dashscope_image_api_key: settings.dashscope_image_api_key ?? '',
       dashscope_video_api_key: settings.dashscope_video_api_key ?? '',
+      toapi_llm_api_key: settings.toapi_llm_api_key ?? '',
+      providers: settings.providers ?? [],
     });
     if (!useSettingsStore.getState().error) {
       setSavedFlash(true);
@@ -206,29 +244,71 @@ export function SettingsPanel() {
               />
               {settings.model_mode === 'cloud' ? (
                 <>
-                  <Field label="Model">
+                  <Field label="Provider">
                     <select
-                      value={settings.dashscope_llm_model}
-                      onChange={(e) => setLocalField('dashscope_llm_model', e.target.value)}
+                      value={settings.cloud_llm_provider ?? 'dashscope'}
+                      onChange={(e) => setLocalField('cloud_llm_provider', e.target.value)}
                       className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
                         focus:outline-none focus:border-blue-500"
                     >
-                      {DASHSCOPE_LLM_OPTIONS.map((o) => (
+                      {CLOUD_PROVIDER_OPTIONS.map((o) => (
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                   </Field>
-                  <Field label="API Key">
-                    <input
-                      type="password"
-                      value={settings.dashscope_llm_api_key ?? ''}
-                      onChange={(e) => setLocalField('dashscope_llm_api_key', e.target.value)}
-                      placeholder="sk-..."
-                      spellCheck={false}
-                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                    />
-                  </Field>
+                  {settings.cloud_llm_provider === 'toapi' ? (
+                    <>
+                      <Field label="Model">
+                        <select
+                          value={settings.toapi_llm_model ?? 'gpt-5.6-terra'}
+                          onChange={(e) => setLocalField('toapi_llm_model', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            focus:outline-none focus:border-blue-500"
+                        >
+                          {TOAPI_LLM_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="API Key">
+                        <input
+                          type="password"
+                          value={settings.toapi_llm_api_key ?? ''}
+                          onChange={(e) => setLocalField('toapi_llm_api_key', e.target.value)}
+                          placeholder="your-toapis-api-key"
+                          spellCheck={false}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                        />
+                      </Field>
+                    </>
+                  ) : (
+                    <>
+                      <Field label="Model">
+                        <select
+                          value={settings.dashscope_llm_model}
+                          onChange={(e) => setLocalField('dashscope_llm_model', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            focus:outline-none focus:border-blue-500"
+                        >
+                          {DASHSCOPE_LLM_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="API Key">
+                        <input
+                          type="password"
+                          value={settings.dashscope_llm_api_key ?? ''}
+                          onChange={(e) => setLocalField('dashscope_llm_api_key', e.target.value)}
+                          placeholder="sk-..."
+                          spellCheck={false}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                        />
+                      </Field>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -268,29 +348,50 @@ export function SettingsPanel() {
               />
               {settings.vlm_mode === 'cloud' ? (
                 <>
-                  <Field label="Model">
+                  <Field label="Provider">
                     <select
-                      value={settings.dashscope_vlm_model}
-                      onChange={(e) => setLocalField('dashscope_vlm_model', e.target.value)}
+                      value={settings.cloud_vlm_provider ?? 'dashscope'}
+                      onChange={(e) => setLocalField('cloud_vlm_provider', e.target.value)}
                       className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
                         focus:outline-none focus:border-blue-500"
                     >
-                      {DASHSCOPE_VLM_OPTIONS.map((o) => (
+                      {CLOUD_PROVIDER_OPTIONS.map((o) => (
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                   </Field>
-                  <Field label="API Key">
-                    <input
-                      type="password"
-                      value={settings.dashscope_vlm_api_key ?? ''}
-                      onChange={(e) => setLocalField('dashscope_vlm_api_key', e.target.value)}
-                      placeholder="sk-..."
-                      spellCheck={false}
-                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                    />
-                  </Field>
+                  {settings.cloud_vlm_provider === 'toapi' ? (
+                    <div className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-amber-950/30 border border-amber-800/40 text-[10px] text-amber-300/90">
+                      <AlertCircle size={11} className="mt-0.5 shrink-0" />
+                      <span>ToAPIs 暂不支持视觉理解（VLM），请切换至 DashScope。</span>
+                    </div>
+                  ) : (
+                    <>
+                      <Field label="Model">
+                        <select
+                          value={settings.dashscope_vlm_model}
+                          onChange={(e) => setLocalField('dashscope_vlm_model', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            focus:outline-none focus:border-blue-500"
+                        >
+                          {DASHSCOPE_VLM_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="API Key">
+                        <input
+                          type="password"
+                          value={settings.dashscope_vlm_api_key ?? ''}
+                          onChange={(e) => setLocalField('dashscope_vlm_api_key', e.target.value)}
+                          placeholder="sk-..."
+                          spellCheck={false}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                        />
+                      </Field>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -313,29 +414,71 @@ export function SettingsPanel() {
               />
               {settings.image_mode === 'cloud' ? (
                 <>
-                  <Field label="Model">
+                  <Field label="Provider">
                     <select
-                      value={settings.dashscope_image_model}
-                      onChange={(e) => setLocalField('dashscope_image_model', e.target.value)}
+                      value={settings.cloud_image_provider ?? 'dashscope'}
+                      onChange={(e) => setLocalField('cloud_image_provider', e.target.value)}
                       className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
                         focus:outline-none focus:border-blue-500"
                     >
-                      {DASHSCOPE_IMAGE_OPTIONS.map((o) => (
+                      {CLOUD_PROVIDER_OPTIONS.map((o) => (
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                   </Field>
-                  <Field label="API Key">
-                    <input
-                      type="password"
-                      value={settings.dashscope_image_api_key ?? ''}
-                      onChange={(e) => setLocalField('dashscope_image_api_key', e.target.value)}
-                      placeholder="sk-..."
-                      spellCheck={false}
-                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                    />
-                  </Field>
+                  {settings.cloud_image_provider === 'toapi' ? (
+                    <>
+                      <Field label="Model">
+                        <select
+                          value={settings.toapi_image_model ?? 'gpt-image-2'}
+                          onChange={(e) => setLocalField('toapi_image_model', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            focus:outline-none focus:border-blue-500"
+                        >
+                          {TOAPI_IMAGE_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="API Key">
+                        <input
+                          type="password"
+                          value={settings.toapi_llm_api_key ?? ''}
+                          onChange={(e) => setLocalField('toapi_llm_api_key', e.target.value)}
+                          placeholder="your-toapis-api-key"
+                          spellCheck={false}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                        />
+                      </Field>
+                    </>
+                  ) : (
+                    <>
+                      <Field label="Model">
+                        <select
+                          value={settings.dashscope_image_model}
+                          onChange={(e) => setLocalField('dashscope_image_model', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            focus:outline-none focus:border-blue-500"
+                        >
+                          {DASHSCOPE_IMAGE_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="API Key">
+                        <input
+                          type="password"
+                          value={settings.dashscope_image_api_key ?? ''}
+                          onChange={(e) => setLocalField('dashscope_image_api_key', e.target.value)}
+                          placeholder="sk-..."
+                          spellCheck={false}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                        />
+                      </Field>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
@@ -389,46 +532,130 @@ export function SettingsPanel() {
                 <>
                   <Field label="Provider">
                     <select
-                      value={settings.video_provider}
-                      onChange={(e) => setLocalField('video_provider', e.target.value)}
+                      value={settings.cloud_video_provider ?? 'dashscope'}
+                      onChange={(e) => setLocalField('cloud_video_provider', e.target.value)}
                       className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
                         focus:outline-none focus:border-blue-500"
                     >
-                      {VIDEO_PROVIDER_OPTIONS.filter((o) => o.value === 'dashscope').map((o) => (
+                      {CLOUD_PROVIDER_OPTIONS.map((o) => (
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                   </Field>
-                  <Field label="API Key">
-                    <input
-                      type="password"
-                      value={settings.dashscope_video_api_key ?? ''}
-                      onChange={(e) => setLocalField('dashscope_video_api_key', e.target.value)}
-                      placeholder="sk-..."
-                      spellCheck={false}
-                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
-                        placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                    />
-                  </Field>
+                  {settings.cloud_video_provider === 'toapi' ? (
+                    <>
+                      <Field label="Model">
+                        <select
+                          value={settings.toapi_video_model ?? 'sora-2-vvip'}
+                          onChange={(e) => setLocalField('toapi_video_model', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            focus:outline-none focus:border-blue-500"
+                        >
+                          {TOAPI_VIDEO_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="API Key">
+                        <input
+                          type="password"
+                          value={settings.toapi_llm_api_key ?? ''}
+                          onChange={(e) => setLocalField('toapi_llm_api_key', e.target.value)}
+                          placeholder="your-toapis-api-key"
+                          spellCheck={false}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                        />
+                      </Field>
+                    </>
+                  ) : (
+                    <>
+                      <Field label="Provider">
+                        <select
+                          value={VIDEO_PROVIDER_OPTIONS.some((o) => o.value === settings.video_provider)
+                            ? settings.video_provider
+                            : 'dashscope'}
+                          onChange={(e) => setLocalField('video_provider', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            focus:outline-none focus:border-blue-500"
+                        >
+                          {VIDEO_PROVIDER_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="API Key">
+                        <input
+                          type="password"
+                          value={settings.dashscope_video_api_key ?? ''}
+                          onChange={(e) => setLocalField('dashscope_video_api_key', e.target.value)}
+                          placeholder="sk-..."
+                          spellCheck={false}
+                          className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                            placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                        />
+                        {settings.video_provider === 'happyhorse' && (
+                          <div className="flex items-start gap-1.5 mt-1.5 px-2 py-1.5 rounded bg-amber-950/30 border border-amber-800/40 text-[10px] text-amber-300/90">
+                            <AlertCircle size={11} className="mt-0.5 shrink-0" />
+                            <span>
+                              happyhorse-1.1-r2v 共享 <code className="font-mono">dashscope_video_api_key</code>。
+                              该模型走 happyhorse-1.1-r2v，约 10 次免费额度。
+                            </span>
+                          </div>
+                        )}
+                      </Field>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
                   <Field label="Provider">
                     <select
-                      value={VIDEO_PROVIDER_OPTIONS.filter((o) => o.value !== 'dashscope').some((o) => o.value === settings.video_provider)
+                      value={LOCAL_VIDEO_PROVIDER_OPTIONS.some((o) => o.value === settings.video_provider)
                         ? settings.video_provider
                         : 'local_wan'}
                       onChange={(e) => setLocalField('video_provider', e.target.value)}
                       className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
                         focus:outline-none focus:border-blue-500"
                     >
-                      {VIDEO_PROVIDER_OPTIONS.filter((o) => o.value !== 'dashscope').map((o) => (
+                      {LOCAL_VIDEO_PROVIDER_OPTIONS.map((o) => (
                         <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                   </Field>
                 </>
               )}
+            </SettingsGroup>
+
+            {/* Provider Registry — unified cloud provider management */}
+            <SettingsGroup
+              icon={<Server size={14} className="text-blue-400" />}
+              title="云端 Provider 注册表"
+            >
+              <p className="text-[10px] text-gray-500 leading-relaxed -mt-1">
+                在此处添加 / 编辑第三方云端模型（ToAPIs、SiliconFlow、Groq、自建 OpenAI 代理等）。
+                添加完成后，LLM / VLM / Image / Video 任意模块的 Provider 下拉里都能直接选用。
+                OpenAI 兼容服务 <b>无需后端代码改动</b>。
+              </p>
+              <ProviderRegistry
+                providers={settings.providers ?? []}
+                onChange={(ps) => setLocalField('providers', ps)}
+                componentProviders={{
+                  llm: settings.cloud_llm_provider ?? 'dashscope',
+                  vlm: settings.cloud_vlm_provider ?? 'dashscope',
+                  image: settings.cloud_image_provider ?? 'dashscope',
+                  video: settings.cloud_video_provider ?? 'dashscope',
+                }}
+                onSelectProvider={(comp, name) =>
+                  setLocalField(
+                    comp === 'llm' ? 'cloud_llm_provider' :
+                    comp === 'vlm' ? 'cloud_vlm_provider' :
+                    comp === 'image' ? 'cloud_image_provider' :
+                    'cloud_video_provider',
+                    name,
+                  )
+                }
+              />
             </SettingsGroup>
 
             {/* Always-local models */}

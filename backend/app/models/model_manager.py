@@ -76,22 +76,29 @@ class ModelManager:
     # ── Cloud-mode convenience wrappers ─────────────────────────────────────
 
     def cloud_llm_chat(self, messages: list[dict], temperature: float = 0.3, max_tokens: int = 4096) -> str:
-        """Send a chat request via DashScope API. Raises if not in cloud mode."""
+        """Send a chat request via the active cloud LLM provider (sync wrapper)."""
         if not self.use_cloud:
             raise RuntimeError("cloud_llm_chat() called in local mode — use local_llm instead")
-        return self.dashscope_client.chat(messages, temperature=temperature, max_tokens=max_tokens)
+        import asyncio
+        from app.providers.cloud_router import cloud_chat
+        return asyncio.run(cloud_chat(messages, component="llm",
+                                       temperature=temperature, max_tokens=max_tokens))
 
     def cloud_vlm_analyze(self, image, prompt: str) -> str:
-        """Analyze an image via DashScope VLM. Raises if not in cloud mode."""
+        """Analyze an image via the active cloud VLM provider (sync wrapper)."""
         if not self.use_cloud:
             raise RuntimeError("cloud_vlm_analyze() called in local mode — use qwen3vl instead")
-        return self.dashscope_client.vlm_analyze(image, prompt)
+        import asyncio
+        from app.providers.cloud_router import cloud_vlm_analyze
+        return asyncio.run(cloud_vlm_analyze(image, prompt))
 
     def cloud_generate_image(self, prompt: str, size: str = "1024*1024", n: int = 1) -> list[str]:
-        """Generate images via DashScope. Raises if not in cloud mode."""
+        """Generate images via the active cloud image provider (sync wrapper)."""
         if not self.use_cloud:
             raise RuntimeError("cloud_generate_image() called in local mode — use image_model instead")
-        return self.dashscope_client.generate_image(prompt, size=size, n=n)
+        import asyncio
+        from app.providers.cloud_router import cloud_generate_image
+        return asyncio.run(cloud_generate_image(prompt, size=size, n=n))
 
     # ── Lazy-load properties ───────────────────────────────────────────────────
 

@@ -113,19 +113,18 @@ async def generate_visual_prompt(
 
     if model_mode == "cloud":
         try:
-            from app.services.dashscope_client import get_dashscope_client
-            client = get_dashscope_client()
-            content = await asyncio.to_thread(
-                client.chat,
+            from app.providers.cloud_router import cloud_chat
+            content = await cloud_chat(
                 [{"role": "system", "content": system_prompt},
                  {"role": "user", "content": user_text}],
+                component="llm",
                 temperature=0.3,
                 max_tokens=256,
             )
             if content:
                 return content.strip()
         except Exception as e:
-            logger.warning("[character_generator] DashScope LLM visual prompt failed: %s", e)
+            logger.warning("[character_generator] Cloud LLM visual prompt failed: %s", e)
     else:
         try:
             from .local_llm import get_llm_client
@@ -404,37 +403,35 @@ async def _generate_via_local_with_reference(
 
 async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Optional[str]:
     """
-    Generate image via DashScope ImageSynthesis API.
+    Generate image via the active cloud image provider (DashScope, ToAPIs, ...).
 
     Returns base64-encoded PNG, or raises RuntimeError on failure.
     """
     try:
-        from app.services.dashscope_client import get_dashscope_client
-        client = get_dashscope_client()
+        from app.providers.cloud_router import cloud_generate_image
         out_size = size or _default_character_size()
-        urls = await asyncio.to_thread(
-            client.generate_image, prompt, size=out_size, n=1,
-        )
+        urls = await cloud_generate_image(prompt, size=out_size, n=1)
         if not urls:
             raise RuntimeError(
-                "DashScope ImageSynthesis returned an empty URL list. "
-                "Check that your WANX API key has remaining quota and "
-                "the model 'wanx-v1' is enabled in your DashScope workspace."
+                "Cloud image provider returned an empty URL list. "
+                "Check that the API key has remaining quota and the configured "
+                "model is enabled in your account."
             )
         url = urls[0]
         image_bytes = await asyncio.to_thread(_fetch_url, url)
         if image_bytes:
             return base64.b64encode(image_bytes).decode("ascii")
         raise RuntimeError(
-            f"Failed to fetch image from DashScope URL: {url}. "
+            f"Failed to fetch image from cloud URL: {url}. "
             "Network issue or URL expired."
         )
     except RuntimeError:
         raise  # re-raise RuntimeErrors from above
     except Exception as e:
         raise RuntimeError(
-            f"DashScope ImageSynthesis call failed: {e}. "
-            "Verify DASHSCOPE_API_KEY (or AICSS_DASHSCOPE_IMAGE_API_KEY) is set."
+            f"Cloud image generation call failed: {e}. "
+            "Verify the image API key is set (DashScope: DASHSCOPE_API_KEY or "
+            "AICSS_DASHSCOPE_IMAGE_API_KEY; OpenAI-compat: AICSS_TOAPI_LLM_API_KEY)."
         ) from e
 
 

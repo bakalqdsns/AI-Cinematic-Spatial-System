@@ -1,0 +1,194 @@
+{
+  "last_node_id": 18,
+  "last_link_id": 22,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [80, 200],
+      "size": [340, 100],
+      "widgets_values": ["z_image_turbo_fp8.safetensors"]
+    },
+    {
+      "id": 2,
+      "type": "CLIPTextEncode",
+      "pos": [80, 360],
+      "size": [420, 220],
+      "title": "FRONT VIEW PROMPT",
+      "widgets_values": [
+        "character turnaround front view, face directly facing camera, both eyes visible, full face features visible, 17-year-old Chinese high school girl, long straight black hair, brown eyes, gentle but melancholic expression, school uniform with white shirt and blue ribbon, standing pose, full body, head to toe, neutral expression, orthographic perspective, flat lighting, paper craft style, hand-cut paper silhouette, layered paper art, white paper edges visible, flat colors with subtle gradients, white background, highly detailed, 8k"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "CLIPTextEncode",
+      "pos": [80, 640],
+      "size": [420, 220],
+      "title": "SIDE VIEW PROMPT",
+      "widgets_values": [
+        "character turnaround side view, profile view from left, face in profile, only one eye visible, 17-year-old Chinese high school girl, long straight black hair, brown eyes, gentle but melancholic expression, school uniform with white shirt and blue ribbon, standing pose, arms at sides, full body, head to toe, neutral expression, orthographic perspective, flat lighting, paper craft style, hand-cut paper silhouette, layered paper art, white paper edges visible, flat colors with subtle gradients, white background, highly detailed, 8k"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [80, 920],
+      "size": [420, 220],
+      "title": "BACK VIEW PROMPT",
+      "widgets_values": [
+        "character turnaround back view, character facing away from camera, back of head visible, back of body visible, no face features shown, 17-year-old Chinese high school girl, long straight black hair, brown eyes, school uniform with white shirt and blue ribbon, standing pose, arms at sides, full body, head to toe, orthographic perspective, flat lighting, paper craft style, hand-cut paper silhouette, layered paper art, white paper edges visible, flat colors with subtle gradients, white background, highly detailed, 8k"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "CLIPTextEncode",
+      "pos": [80, 1200],
+      "size": [420, 120],
+      "title": "NEGATIVE PROMPT",
+      "widgets_values": [
+        "low quality, worst quality, blurry, distorted, disfigured, extra limbs, mutated hands, bad anatomy, bad proportions, cropped, out of frame, text, watermark, multiple characters, cluttered background, 3d render, photorealistic"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "EmptyLatentImage",
+      "pos": [80, 1380],
+      "size": [320, 100],
+      "widgets_values": [768, 1024, 1]
+    },
+    {
+      "id": 7,
+      "type": "EmptyLatentImage",
+      "pos": [80, 1480],
+      "size": [320, 100],
+      "widgets_values": [768, 1024, 1]
+    },
+    {
+      "id": 8,
+      "type": "EmptyLatentImage",
+      "pos": [80, 1580],
+      "size": [320, 100],
+      "widgets_values": [768, 1024, 1]
+    },
+    {
+      "id": 9,
+      "type": "KSampler",
+      "pos": [560, 360],
+      "size": [320, 280],
+      "title": "FRONT SAMPLER",
+      "widgets_values": [100, "fixed", 20, 1.0, "euler_ancestral", "simple", 1.0]
+    },
+    {
+      "id": 10,
+      "type": "KSampler",
+      "pos": [560, 700],
+      "size": [320, 280],
+      "title": "SIDE SAMPLER",
+      "widgets_values": [101, "fixed", 20, 1.0, "euler_ancestral", "simple", 1.0]
+    },
+    {
+      "id": 11,
+      "type": "KSampler",
+      "pos": [560, 1040],
+      "size": [320, 280],
+      "title": "BACK SAMPLER",
+      "widgets_values": [102, "fixed", 20, 1.0, "euler_ancestral", "simple", 1.0]
+    },
+    {
+      "id": 12,
+      "type": "VAEDecode",
+      "pos": [960, 360],
+      "size": [200, 80]
+    },
+    {
+      "id": 13,
+      "type": "VAEDecode",
+      "pos": [960, 700],
+      "size": [200, 80]
+    },
+    {
+      "id": 14,
+      "type": "VAEDecode",
+      "pos": [960, 1040],
+      "size": [200, 80]
+    },
+    {
+      "id": 15,
+      "type": "SaveImage",
+      "pos": [1240, 320],
+      "size": [280, 100],
+      "title": "FRONT",
+      "widgets_values": ["aicss_char_front"]
+    },
+    {
+      "id": 16,
+      "type": "SaveImage",
+      "pos": [1240, 660],
+      "size": [280, 100],
+      "title": "SIDE",
+      "widgets_values": ["aicss_char_side"]
+    },
+    {
+      "id": 17,
+      "type": "SaveImage",
+      "pos": [1240, 1000],
+      "size": [280, 100],
+      "title": "BACK",
+      "widgets_values": ["aicss_char_back"]
+    },
+    {
+      "id": 18,
+      "type": "ImageGrid",
+      "pos": [1560, 660],
+      "size": [320, 200]
+    }
+  ],
+  "links": [
+    [1, 1, 1, 9, 0, "MODEL"],
+    [2, 1, 1, 10, 0, "MODEL"],
+    [3, 1, 1, 11, 0, "MODEL"],
+    [4, 1, 2, 9, 1, "POSITIVE"],
+    [5, 1, 3, 10, 1, "POSITIVE"],
+    [6, 1, 4, 11, 1, "POSITIVE"],
+    [7, 1, 5, 9, 2, "NEGATIVE"],
+    [8, 1, 5, 10, 2, "NEGATIVE"],
+    [9, 1, 5, 11, 2, "NEGATIVE"],
+    [10, 1, 6, 9, 3, "LATENT"],
+    [11, 1, 7, 10, 3, "LATENT"],
+    [12, 1, 8, 11, 3, "LATENT"],
+    [13, 1, 9, 0, 12, 0, "LATENT"],
+    [14, 1, 10, 0, 13, 0, "LATENT"],
+    [15, 1, 11, 0, 14, 0, "LATENT"],
+    [16, 1, 12, 0, 15, 0, "IMAGE"],
+    [17, 1, 13, 0, 16, 0, "IMAGE"],
+    [18, 1, 14, 0, 17, 0, "IMAGE"],
+    [19, 1, 15, 0, 18, 0, "IMAGE"],
+    [20, 1, 16, 0, 18, 1, "IMAGE"],
+    [21, 1, 17, 0, 18, 2, "IMAGE"],
+    [22, 1, 1, 1, 5, 0, "CLIP"]
+  ],
+  "groups": [
+    {
+      "title": "AICSS · 角色三视图（Front/Side/Back）",
+      "bounding": [40, 140, 1860, 1580],
+      "color": "#a83838"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "aicss": {
+      "workflow_name": "character_three_view",
+      "purpose": "Generate front / side / back view of a character in one go",
+      "model_recommended": "Z-Image-Turbo fp8",
+      "estimated_runtime_seconds": 20,
+      "notes": [
+        "Modify the character description in nodes 2/3/4 (FRONT/SIDE/BACK PROMPT). Keep the keywords character turnaround [view] at the start.",
+        "Three KSamplers use fixed seeds (100/101/102) for reproducibility. Change to 'randomize' to get variations.",
+        "Use small random offsets like 100/101/102 so front/side/back look consistent.",
+        "Node 18 (ImageGrid) stitches the three views into one image for easy review.",
+        "For better consistency, install ComfyUI-IPAdapter and load a reference face embedding."
+      ]
+    }
+  },
+  "version": 0.4
+}

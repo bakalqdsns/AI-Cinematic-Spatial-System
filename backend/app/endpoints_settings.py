@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services import settings_manager
+from app.providers import list_providers
 
 _log = logging.getLogger("aicss.settings")
 router = APIRouter(prefix="/api/aicss/settings", tags=["Settings"])
@@ -46,6 +47,24 @@ class SettingsUpdate(BaseModel):
     dashscope_vlm_model: str | None = Field(None, description="DashScope VLM model ID (e.g. 'qwen-vl-chat-v1')")
     dashscope_image_model: str | None = Field(None, description="DashScope image model ID (e.g. 'wanx-v1')")
 
+    # ── Cloud provider selection (legacy single-field) ─────────────────────────
+    cloud_llm_provider: str | None = Field(None, description="Cloud provider for LLM: 'dashscope' | 'toapi' (legacy)")
+    cloud_vlm_provider: str | None = Field(None, description="Cloud provider for VLM: 'dashscope' | 'toapi' (legacy)")
+    cloud_image_provider: str | None = Field(None, description="Cloud provider for image: 'dashscope' | 'toapi' (legacy)")
+    cloud_video_provider: str | None = Field(None, description="Cloud provider for video: 'dashscope' | 'toapi' (legacy)")
+    toapi_llm_model: str | None = Field(None, description="ToAPIs LLM model ID (legacy)")
+    toapi_image_model: str | None = Field(None, description="ToAPIs image model ID (legacy)")
+    toapi_video_model: str | None = Field(None, description="ToAPIs video model ID (legacy)")
+    toapi_llm_api_key: str | None = Field(None, description="ToAPIs API key (legacy; shared by LLM/Image/Video)")
+
+    # ── Unified cloud provider registry (recommended approach) ───────────────────
+    # Each item: {
+    #   "name": "siliconflow", "type": "openai_compatible", "base_url": "...",
+    #   "api_key": "sk-xxx", "extra_headers": {...}, "extra_json": {...},
+    #   "models": {"llm": "...", "vlm": "...", "image": "...", "video": "..."}
+    # }
+    providers: list[dict] | None = Field(None, description="User-defined cloud provider registry")
+
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -73,3 +92,41 @@ async def post_settings(payload: SettingsUpdate) -> dict:
     except Exception as exc:
         _log.exception("[settings] update failed")
         raise HTTPException(status_code=500, detail=f"Failed to update settings: {exc}")
+
+
+# ── Cloud provider registry endpoints ──────────────────────────────────────────
+
+provider_router = APIRouter(prefix="/api/aicss/providers", tags=["Cloud Providers"])
+
+
+@provider_router.get("/types")
+async def get_provider_types() -> list[dict]:
+    """Return metadata for all registered provider types (DashScope, OpenAI-compat, ...)."""
+    out = []
+    for p in list_providers():
+        out.append({
+            "name": p["name"],
+            "type": p["type"],
+            "supports_chat": bool(p["supports_chat"]),
+            "supports_vlm": bool(p["supports_vlm"]),
+            "supports_image": bool(p["supports_image"]),
+            "supports_video": bool(p["supports_video"]),
+        })
+    return out
+
+
+class PingRequest(BaseModel):
+    component: str = Field(..., description="llm | vlm | image | video")
+    name: str | None = Field(None, description="Provider name override (uses current active if omitted)")
+
+
+@provider_router.post("/ping")
+async def ping_provider(req: PingRequest) -> dict:
+    """Health-check the active cloud provider for the given component."""
+    try:
+        from app.providers.cloud_router import provider_is_alive
+        alive = await provider_is_alive(req.component)
+        return {"alive": alive}
+    except Exception as exc:
+        _log.warning("[providers] ping failed: %s", exc)
+        return {"alive": False, "error": str(exc)}

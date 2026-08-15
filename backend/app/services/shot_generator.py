@@ -63,6 +63,29 @@ class ShotSize(str, Enum):
     TWO_SHOT = "Two-Shot"
 
 
+# Defensive: strip language labels ("English:", "English：", "EN:", "英文：")
+# that some LLMs echo from earlier prompt templates. These prefixes leak
+# into downstream image generators, where they're treated as literal text
+# and produce noisy outputs. Single source of truth — apply at every entry
+# point where a visual_prompt string is ingested.
+import re as _re_language_label  # noqa: E402  (kept local to avoid touching module-level ordering)
+
+_LANG_LABEL_RE = _re_language_label.compile(
+    r'^\s*(?:'
+    r'english|英文|英语|英|en|english\s+prompt|en\s+prompt'
+    r')\s*[:：]\s*',
+    _re_language_label.IGNORECASE,
+)
+
+
+def _strip_language_label(s: str) -> str:
+    """Remove leading language labels like 'English:' / '英文：' from a prompt."""
+    if not s:
+        return s
+    cleaned = _LANG_LABEL_RE.sub('', s)
+    return cleaned.strip()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Data model
 # ─────────────────────────────────────────────────────────────────────────────
@@ -224,16 +247,16 @@ _SHOT_GENERATION_SYSTEM_CHINESE = """你是一个专业的分镜师。请根据�
     "camera_movement": "Static",
     "shot_size": "Wide Shot",
     "characters": ["char-1"],
-    "scene_prompt": "English: A wide shot of a coffee shop interior, warm sunlight streaming through windows...",
-    "action_prompt": "English: A woman sits alone at a table, nervously stirring her coffee...",
+    "scene_prompt": "A wide shot of a coffee shop interior, warm sunlight streaming through windows, soft bokeh background",
+    "action_prompt": "A woman sits alone at a table, nervously stirring her coffee, glancing toward the door",
     "camera_prompt": "Slow dolly in to build tension",
     "duration_seconds": 4.0,
-    "keyframe_start_prompt": "English: Woman sits, cup in hand, looking toward door...",
-    "keyframe_end_prompt": "English: Close-up on worried expression as phone buzzes..."
+    "keyframe_start_prompt": "Woman sits, cup in hand, looking toward door, soft warm lighting",
+    "keyframe_end_prompt": "Close-up on worried expression as phone buzzes on the table"
   }
 ]
 
-只输出JSON数组，不要任何解释。"""
+只输出JSON数组，不要任何解释。注意：scene_prompt 与 action_prompt 必须是直接可用的英文提示词，禁止添加 'English:' 等前缀或语言标签。"""
 
 _SHOT_GENERATION_SYSTEM_ENGLISH = """You are a professional storyboard artist. Generate a detailed shot list based on the following script information.
 
@@ -398,14 +421,14 @@ def _build_shots_from_json(data: list | dict) -> list[Shot]:
                 shot_size=_parse_shot_size(item.get("shot_size", "Medium Shot")),
                 characters=item.get("characters", []),
                 visual_prompts=VisualPrompts(
-                    scene_prompt=item.get("scene_prompt", ""),
-                    action_prompt=item.get("action_prompt", ""),
-                    camera_prompt=item.get("camera_prompt", ""),
-                    transition_prompt=item.get("transition_prompt", ""),
+                    scene_prompt=_strip_language_label(item.get("scene_prompt", "")),
+                    action_prompt=_strip_language_label(item.get("action_prompt", "")),
+                    camera_prompt=_strip_language_label(item.get("camera_prompt", "")),
+                    transition_prompt=_strip_language_label(item.get("transition_prompt", "")),
                 ),
                 duration_seconds=float(item.get("duration_seconds", 3.0)),
-                keyframe_start_prompt=item.get("keyframe_start_prompt", ""),
-                keyframe_end_prompt=item.get("keyframe_end_prompt", ""),
+                keyframe_start_prompt=_strip_language_label(item.get("keyframe_start_prompt", "")),
+                keyframe_end_prompt=_strip_language_label(item.get("keyframe_end_prompt", "")),
             )
             shots.append(shot)
         except Exception as e:
@@ -638,6 +661,8 @@ def _fallback_shots(script_data: ScriptData) -> list[Shot]:
             action_prompt = para.text
 
             # Collect characters in this paragraph. Character-first rules:
+
+            # Collect characters in this paragraph. Character-first rules:
             #   - DIALOGUE/INNER: speaker_id is the primary character
             #   - ACTION: any character whose id is referenced in the para text
             #     OR any character with a dialogue in this scene (always present)
@@ -761,7 +786,7 @@ def generate_character_action_sequences(
     }
 
     sequences: list[CharacterActionSequence] = []
-    para_map: dict[str, StoryParagraph] = {p.scene_id: p for p in (paragraphs or [])}
+    para_map: dict[str, StoryParagraph] = {p.scene_ref_id: p for p in (paragraphs or [])}
 
     for char in characters:
         char_shots = [s for s in shots if char.id in s.characters]

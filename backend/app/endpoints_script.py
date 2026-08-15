@@ -21,7 +21,7 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.script_parser import (
@@ -219,6 +219,14 @@ class GenerateMotionRequest(BaseModel):
     video_provider: str = Field(
         default="dashscope",
         description="Video provider: dashscope | local_wan | svd",
+    )
+    greenscreen: bool = Field(
+        default=False,
+        description="Render the action video against a flat green-screen background and apply a chroma-key pass during segmentation.",
+    )
+    feather_edges: bool = Field(
+        default=True,
+        description="Snap SAM2 masks to nearby Canny edges to soften character silhouettes.",
     )
     project_id: Optional[str] = None
 
@@ -569,24 +577,33 @@ async def api_get_action_sequences(request: ActionSequencesRequest):
 
 
 @router.post("/visual-prompt")
-async def api_generate_visual_prompt(request: VisualPromptRequest):
+async def api_generate_visual_prompt(
+    character_name: str = Query(..., description="Character name"),
+    gender: str = Query("", description="e.g. female / male"),
+    age: str = Query("", description="e.g. 17 / middle-aged"),
+    personality: str = Query("", description="Short trait description"),
+    genre: str = Query("cinematic", description="Visual style hint"),
+    language: str = Query("chinese", description="chinese / english / japanese"),
+):
     """
     Generate visual prompt for a character without producing images.
 
     Useful for previewing prompts before committing to expensive image
-    generation.
+    generation. Parameters are accepted as query string so the caller can
+    trigger this cheaply from auto-fill inputs (see
+    ``scriptService.generateVisualPrompt``).
     """
     char = Character(
         id="temp",
-        name=request.character_name,
-        gender=request.gender,
-        age=request.age,
-        personality=request.personality,
+        name=character_name,
+        gender=gender,
+        age=age,
+        personality=personality,
     )
     prompt = await generate_visual_prompt(
         char,
-        genre=request.genre,
-        language=_lang_from_str(request.language),
+        genre=genre,
+        language=_lang_from_str(language),
     )
     return {"visual_prompt": prompt}
 
@@ -863,6 +880,8 @@ async def api_generate_motion(request: GenerateMotionRequest):
         end_image_b64=request.end_image,
         duration_seconds=request.duration_seconds,
         video_provider=request.video_provider,
+        greenscreen=request.greenscreen,
+        feather_edges=request.feather_edges,
     )
 
     # Collect segmented frame paths
@@ -958,4 +977,62 @@ async def api_segment_frames(request: SegmentFramesRequest):
             }
             for sf in segmented
         ],
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/aicss/v2/scripts/camera-path — generate Three.js camera keyframes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CameraPathRequest(BaseModel):
+    """Request body for the camera-path generator."""
+    cameraMovement: str = Field(
+        ..., description="One of the 13 CameraMovement values (Static, Dolly In, …)",
+    )
+    shotSize: str = Field(
+        ..., description="One of the 10 ShotSize values (Wide Shot, Close-up, …)",
+    )
+    durationSeconds: float = Field(
+        3.0, ge=0.1, le=60.0,
+        description="Shot duration in seconds. Drives nothing in the keyframes "
+                    "themselves but is echoed back so the client can sanity-check.",
+    )
+
+
+class CameraKeyframeDTO(BaseModel):
+    """One keyframe in the camera path."""
+    time: float = Field(..., ge=0.0, le=1.0)
+    position: list[float] = Field(..., description="[x, y, z] world position")
+    target: list[float] = Field(..., description="[x, y, z] look-at target")
+    fov: float = Field(..., description="Vertical FOV in degrees")
+
+
+class CameraPathResponse(BaseModel):
+    """Response — 1 or 2 keyframes (Phase 1: linear start/end interpolation)."""
+    movement: str
+    shotSize: str
+    durationSeconds: float
+    keyframes: list[CameraKeyframeDTO]
+
+
+@router.post("/camera-path", response_model=CameraPathResponse)
+async def api_camera_path(request: CameraPathRequest) -> CameraPathResponse:
+    """Return the camera keyframes that Three.js should play for a given shot.
+
+    The frontend's `utils/cameraAnimation.ts` is the canonical source of truth —
+    this endpoint exists so the Blender renderer and external test harnesses
+    can consume the same abstract path without going through the browser.
+    """
+    from app.services.camera_path_generator import build_camera_path
+
+    keyframes = build_camera_path(
+        request.cameraMovement,
+        request.shotSize,
+        request.durationSeconds,
+    )
+    return CameraPathResponse(
+        movement=request.cameraMovement,
+        shotSize=request.shotSize,
+        durationSeconds=request.durationSeconds,
+        keyframes=[CameraKeyframeDTO(**kf) for kf in keyframes],
     )
