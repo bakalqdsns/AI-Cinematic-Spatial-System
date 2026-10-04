@@ -207,10 +207,61 @@ class LLMObserver:
             logger.warning("[llm-observer] reconfigure failed: %s", exc)
 
 
+class ModelModeCascadeObserver:
+    """
+    Cascades ``model_mode`` changes to ``vlm_mode`` / ``image_mode`` /
+    ``video_mode`` so the user doesn't have to set each sub-mode manually.
+
+    Only cascades when the corresponding sub-mode is currently a *default*
+    value (i.e. hasn't been explicitly set by the user). This avoids
+    overwriting intentional per-component overrides.
+
+    Registered automatically by ``app.main`` at startup so the cascade is
+    active as soon as the settings observer is up.
+    """
+
+    DEFAULT_VALUES = {"cloud", "local"}
+
+    def on_setting_changed(self, key: str, value, old_value) -> None:
+        if key != "model_mode" or value == old_value:
+            return
+        if value not in ("cloud", "local"):
+            return
+        try:
+            from app.services.settings_manager import get as _get, set_runtime_value
+            cascaded: list[str] = []
+            for sub_key in ("vlm_mode", "image_mode", "video_mode"):
+                current = _get(sub_key, None)
+                if current in self.DEFAULT_VALUES:
+                    set_runtime_value(sub_key, value)
+                    cascaded.append(f"{sub_key}={value}")
+            if cascaded:
+                logger.info(
+                    "[model-mode-cascade] cascaded model_mode=%s to %s",
+                    value, ", ".join(cascaded),
+                )
+                # Persist the cascaded values so the next restart sees them
+                try:
+                    from app.services.settings_store import save_overrides
+                    save_overrides({k.split("=")[0]: value for k in cascaded})
+                except Exception as exc:
+                    logger.warning("[model-mode-cascade] persist failed: %s", exc)
+                # Wake up any subscribers that listen for these sub-mode keys
+                try:
+                    from app.services.settings_observer import notify_setting_change
+                    for k in cascaded:
+                        sub_key, sub_val = k.split("=", 1)
+                        notify_setting_change(sub_key, sub_val, None)
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("[model-mode-cascade] failed: %s", exc)
+
+
 def _current_or(key: str, default=None):
     """Read the current value of a setting without crashing on import errors."""
     try:
-        from app.config import settings
-        return getattr(settings, key, default)
+        from app.services.settings_manager import get as _get
+        return _get(key, default)
     except Exception:
         return default

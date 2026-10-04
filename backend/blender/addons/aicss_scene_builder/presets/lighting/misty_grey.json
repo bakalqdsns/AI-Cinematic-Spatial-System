@@ -1,0 +1,28 @@
+{
+  "name": "Misty Grey",
+  "description": "雾灰阴天 — 中性灰主光 + 等强度补光，低对比、无方向感。",
+  "key": {
+    "type": "AREA",
+    "energy": 2.0,
+    "color": [0.85, 0.87, 0.9],
+    "size": 8.0,
+    "location": [4.0, -8.0, 10.0],
+    "rotation": [0.5, 0.0, 0.3]
+  },
+  "fill": {
+    "type": "AREA",
+    "energy": 2.0,
+    "color": [0.8, 0.83, 0.88],
+    "size": 10.0,
+    "location": [-6.0, -6.0, 8.0],
+    "rotation": [0.6, 0.0, -0.4]
+  },
+  "rim": {
+    "type": "AREA",
+    "energy": 1.0,
+    "color": [0.75, 0.78, 0.82],
+    "size": 6.0,
+    "location": [0.0, 6.0, 6.0],
+    "rotation": [-0.6, 0.0, 0.0]
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Tense Night",
+  "description": "紧张夜场景 — 低能量冷蓝主光 + 高对比暖橙边缘光，营造悬疑感。",
+  "key": {
+    "type": "SPOT",
+    "energy": 2.5,
+    "color": [0.55, 0.65, 1.0],
+    "location": [6.0, -6.0, 9.0],
+    "rotation": [0.6, 0.0, 0.5]
+  },
+  "fill": {
+    "type": "AREA",
+    "energy": 0.3,
+    "color": [0.3, 0.35, 0.5],
+    "size": 7.0,
+    "location": [-7.0, -5.0, 5.0],
+    "rotation": [0.7, 0.0, -0.5]
+  },
+  "rim": {
+    "type": "SPOT",
+    "energy": 4.0,
+    "color": [1.0, 0.7, 0.4],
+    "location": [0.0, 7.0, 8.0],
+    "rotation": [-0.7, 0.0, 0.0]
+  }
+}

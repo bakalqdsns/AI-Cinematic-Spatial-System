@@ -1,0 +1,69 @@
+{
+  "timestamp": "20260815_184644",
+  "elapsed_seconds": 16.28,
+  "pass": 9,
+  "warn": 3,
+  "fail": 0,
+  "steps": [
+    {
+      "step": "extract_characters",
+      "status": "PASS",
+      "detail": "1 character(s) extracted"
+    },
+    {
+      "step": "extract_characters_field_shape",
+      "status": "PASS",
+      "detail": "All characters carry id/name/visual_prompt fields"
+    },
+    {
+      "step": "parse_script",
+      "status": "PASS",
+      "detail": "1 scene(s), 1 character(s), 4 paragraph(s), project_id=20260815_104653_Untitled"
+    },
+    {
+      "step": "parse_script_prompt_coverage",
+      "status": "WARN",
+      "detail": "characters with visual_prompt: 0/1, scenes with visual_prompt: 0/1"
+    },
+    {
+      "step": "visual_prompt",
+      "status": "PASS",
+      "detail": "455 chars: young East Asian woman, sharp intelligent eyes, shoulder-length black hair with ..."
+    },
+    {
+      "step": "shots_prompt_completeness",
+      "status": "WARN",
+      "detail": "4/4 shots missing some prompts; first: ('shot-1', ['transition_prompt'])"
+    },
+    {
+      "step": "generate_shots",
+      "status": "PASS",
+      "detail": "4 shot(s) generated"
+    },
+    {
+      "step": "batch_status",
+      "status": "PASS",
+      "detail": "project=20260815_104653_Untitled, summary={'queued': 0, 'running': 1, 'done': 0, 'failed': 0}, characters_tracked=1"
+    },
+    {
+      "step": "batch_status_visual_prompt_hydration",
+      "status": "WARN",
+      "detail": "0/1 characters expose a visual_prompt for hydration"
+    },
+    {
+      "step": "parsedScript.characters[*].visual_prompt field exists",
+      "status": "PASS",
+      "detail": "1/1"
+    },
+    {
+      "step": "parsedScript.scenes[*].visual_prompt field exists",
+      "status": "PASS",
+      "detail": "1/1"
+    },
+    {
+      "step": "shots[*].visual_prompts.{scene,action,camera}_prompt all populated",
+      "status": "PASS",
+      "detail": "4/4 shots"
+    }
+  ]
+}

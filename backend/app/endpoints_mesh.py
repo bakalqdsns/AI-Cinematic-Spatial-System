@@ -64,7 +64,7 @@ class ExportObjectsRequest(BaseModel):
 class ExportLayersRequest(BaseModel):
     """导出深度分层。"""
     project_id: Optional[str] = Field(None)
-    layer_assets: dict = Field(..., description="depthLayerDioramaAssets 字典")
+    layer_assets: dict = Field(default_factory=dict, description="depthLayerDioramaAssets 字典")
     format: str = Field("glb", description="glb | fbx")
     include_textures: bool = Field(True)
 
@@ -72,9 +72,9 @@ class ExportLayersRequest(BaseModel):
 class ExportSceneRequest(BaseModel):
     """导出完整场景。"""
     project_id: Optional[str] = Field(None, description="项目 ID（可选，不提供则不持久化）")
-    analysis_result: dict = Field(..., description="完整 AicssResult")
+    analysis_result: dict = Field(default_factory=dict, description="完整 AicssResult（strip_stack 模式可为空）")
     depth_split_result: dict = Field(default_factory=dict, description="前端 splitDepthLayers() 结果")
-    layer_assets: dict = Field(..., description="depthLayerDioramaAssets 字典")
+    layer_assets: dict = Field(default_factory=dict, description="depthLayerDioramaAssets 字典（strip_stack 模式可为空）")
     object_assets: dict = Field(default_factory=dict, description="objectDioramaAssets 字典")
     billboard_offsets: dict = Field(default_factory=dict, description="物体 3D 偏移")
     regions: list[dict] = Field(
@@ -313,9 +313,12 @@ async def api_export_layers(request: ExportLayersRequest):
 @router.post("/export-scene", response_model=MeshExportResponse)
 async def api_export_scene(request: ExportSceneRequest):
     """
-    导出完整场景（所有深度层 + 所有物体）。
+    导出完整场景（所有深度层 + 所有物体 + 可选 strip-stack billboards + 背景平面）。
 
     生成一个包含所有 paper diorama 元素的组合 GLB/FBX 文件。
+    当 request.strip_stack 非空时，每条 StripStep 会作为一个 PlaneGeometry billboard
+    贴在对应 depthLayer 位置，最后一条 step 的 inpaintResultUrl 作为 BackgroundPlane。
+    当 request.regions 非空时，每个 LayerRegion 也会导出为 PlaneGeometry（按 depthValue 精细 Z）。
     """
     fmt = _format_to_ext(request.format)
 
@@ -340,10 +343,10 @@ async def api_export_scene(request: ExportSceneRequest):
         )
 
     objects = request.analysis_result.get("objects", [])
-    if not objects and not request.layer_assets:
+    if not objects and not request.layer_assets and not request.strip_stack and not request.regions:
         raise HTTPException(
             status_code=400,
-            detail="No objects or layers to export. Provide analysis_result or layer_assets."
+            detail="No objects or layers to export. Provide analysis_result, layer_assets, strip_stack, or regions.",
         )
 
     result = export_full_scene(
@@ -352,9 +355,8 @@ async def api_export_scene(request: ExportSceneRequest):
         layer_assets=request.layer_assets,
         object_assets=request.object_assets,
         billboard_offsets=request.billboard_offsets,
-        # regions: LayerRegion[] — passed but not yet consumed by Blender exporter.
-        # Each region has { id, polygon, depthLayer, colorIndex, depthValue }.
-        # Full Blender integration (build PlaneGeometry per polygon at correct Z) is TBD.
+        strip_stack=request.strip_stack,
+        regions=request.regions,
         scene_id=(
             f"scene_{Path(request.project_id).name}"
             if request.project_id else None

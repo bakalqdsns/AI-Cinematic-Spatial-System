@@ -9,6 +9,7 @@ We use it to get initial detections, then pass boxes to SAM2 for masks.
 import torch
 import numpy as np
 from PIL import Image
+from pathlib import Path
 from typing import Union, Optional
 from dataclasses import dataclass
 
@@ -21,7 +22,7 @@ from app.config import settings
 from app.models.hf_compat import auth_kwargs
 
 
-def _snapshot_download_hf(model_name: str) -> str:
+def _snapshot_download_hf(model_name: str, progress_key: str | None = None) -> str:
     """Download a HuggingFace model via snapshot_download and return the snapshot dir."""
     import os as _os
     _os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
@@ -31,9 +32,14 @@ def _snapshot_download_hf(model_name: str) -> str:
     from huggingface_hub import snapshot_download
     token_kwargs = auth_kwargs(settings.hf_token)
     cache_dir = str(settings.grounding_dino_checkpoint_dir)
+    tqdm_class = None
+    if progress_key:
+        from app.services.download_progress import make_tqdm_callback
+        tqdm_class = make_tqdm_callback(progress_key)
     local_dir = snapshot_download(
         repo_id=model_name,
         cache_dir=cache_dir,
+        tqdm_class=tqdm_class,
         **token_kwargs,
     )
     return local_dir
@@ -70,13 +76,16 @@ class GroundingDinoModel:
         self._processor = None
         self._model = None
 
-    def ensure_downloaded(self) -> str:
+    def ensure_downloaded(self, progress_key: str | None = None) -> str:
         """
         Ensure the Grounding DINO checkpoint is on disk.  Returns the snapshot
         directory path for ``from_pretrained`` with ``local_files_only=True``.
+
+        progress_key: when supplied, progress is reported to the
+                      download-jobs registry under this key.
         """
         print(f"[GroundingDINO] Ensuring {self.model_name} is on disk ...")
-        path = _snapshot_download_hf(self.model_name)
+        path = _snapshot_download_hf(self.model_name, progress_key=progress_key)
         print(f"[GroundingDINO] Snapshot ready: {path}")
         return path
 
@@ -86,17 +95,53 @@ class GroundingDinoModel:
         token_kwargs = auth_kwargs(settings.hf_token)
         loaded = False
 
-        for phase, local_only in enumerate(["online (auto-download)", "local cache"], 1):
+        # Resolve the snapshot directory up-front so we can pass an absolute
+        # path to ``from_pretrained``. This sidesteps the case where the
+        # ``cached_file`` machinery inside transformers tries to re-download
+        # ``config.json`` / ``preprocessor_config.json`` even when the files
+        # are clearly on disk (network calls hang for HF_HUB_DOWNLOAD_TIMEOUT
+        # seconds before giving up).
+        import os as _os
+        snapshot_dir = None
+        for candidate in (
+            _os.environ.get("HF_HUB_CACHE"),
+            str(Path(_os.environ.get("HF_HOME", "")) / "hub") if _os.environ.get("HF_HOME") else None,
+        ):
+            if not candidate:
+                continue
+            base = Path(candidate) / f"models--{self.model_name.replace('/', '--')}"
+            if not base.is_dir():
+                continue
+            for snap_dir in (base / "snapshots").glob("*"):
+                if snap_dir.is_dir() and (snap_dir / "config.json").is_file():
+                    snapshot_dir = str(snap_dir)
+                    break
+            if snapshot_dir:
+                break
+        forced_offline = _os.environ.get("HF_HUB_OFFLINE") == "1"
+        if forced_offline and snapshot_dir is None:
+            print("[GroundingDINO] HF_HUB_OFFLINE=1 but no local snapshot found; falling back to repo name")
+            forced_offline = False
+
+        # When offline mode is on AND we have a local snapshot, pass the
+        # snapshot path directly so ``from_pretrained`` doesn't have to
+        # resolve the cache again. Otherwise behave as before.
+        load_target = snapshot_dir if (forced_offline and snapshot_dir) else self.model_name
+        phase_list = (
+            ["local cache"] if forced_offline
+            else ["online (auto-download)", "local cache"]
+        )
+        for phase, local_only in enumerate(phase_list, 1):
             try:
-                print(f"[GroundingDINO]   phase {phase}: {local_only}...")
+                print(f"[GroundingDINO]   phase {phase}: {local_only} (target={load_target})...")
                 self._processor = AutoProcessor.from_pretrained(
-                    self.model_name,
+                    load_target,
                     trust_remote_code=True,
                     local_files_only=local_only,
                     **token_kwargs,
                 )
                 self._model = AutoModelForZeroShotObjectDetection.from_pretrained(
-                    self.model_name,
+                    load_target,
                     trust_remote_code=True,
                     local_files_only=local_only,
                     **token_kwargs,
@@ -106,8 +151,8 @@ class GroundingDinoModel:
                 print(f"[GroundingDINO]   ✓ loaded from {local_only}")
                 loaded = True
                 break
-            except FileNotFoundError:
-                print(f"[GroundingDINO]   ✗ not found in {local_only}, trying next...")
+            except (FileNotFoundError, OSError) as _load_err:
+                print(f"[GroundingDINO]   ✗ failed in {local_only}: {type(_load_err).__name__}: {_load_err}")
                 self._processor = None
                 self._model = None
                 continue
@@ -198,7 +243,10 @@ class GroundingDinoModel:
                 box=np.array([x1, y1, x2, y2]),
                 label=label_str,
                 score=float(score),
-                object_id=f"obj_{label_str}_{len(detections)}",
+                # Some detectors echo the class name twice when the same word
+                # appears more than once in the prompt — collapse to a single
+                # token so ``object_id`` stays unique and filesystem-safe.
+                object_id=f"obj_{(label_str.split()[-1] if label_str else 'obj')}_{len(detections)}",
             ))
 
         return detections

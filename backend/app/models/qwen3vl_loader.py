@@ -20,7 +20,7 @@ from app.config import settings
 from app.models.hf_compat import auth_kwargs
 
 
-def _snapshot_download_hf(model_name: str) -> str:
+def _snapshot_download_hf(model_name: str, progress_key: str | None = None) -> str:
     """Download a HuggingFace model via snapshot_download and return the snapshot dir."""
     import os as _os
     _os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
@@ -30,9 +30,14 @@ def _snapshot_download_hf(model_name: str) -> str:
     from huggingface_hub import snapshot_download
     token_kwargs = auth_kwargs(settings.hf_token)
     cache_dir = str(settings.vlm_checkpoint_dir)
+    tqdm_class = None
+    if progress_key:
+        from app.services.download_progress import make_tqdm_callback
+        tqdm_class = make_tqdm_callback(progress_key)
     local_dir = snapshot_download(
         repo_id=model_name,
         cache_dir=cache_dir,
+        tqdm_class=tqdm_class,
         **token_kwargs,
     )
     return local_dir
@@ -61,13 +66,16 @@ class Qwen3VLModel:
         self._processor = None
         self._model = None
 
-    def ensure_downloaded(self) -> str:
+    def ensure_downloaded(self, progress_key: str | None = None) -> str:
         """
         Ensure the Qwen3-VL checkpoint is on disk.  Returns the snapshot
         directory path for ``from_pretrained`` with ``local_files_only=True``.
+
+        progress_key: when supplied, progress is reported to the
+                      download-jobs registry under this key.
         """
         print(f"[Qwen3VL] Ensuring {self.model_name} is on disk ...")
-        path = _snapshot_download_hf(self.model_name)
+        path = _snapshot_download_hf(self.model_name, progress_key=progress_key)
         print(f"[Qwen3VL] Snapshot ready: {path}")
         return path
 

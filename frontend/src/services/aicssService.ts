@@ -1,7 +1,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AICSS API Service — calls backend endpoints
+// AICSS API Service — calls backend endpoints.
+//
+// Thin wrapper around the generated OpenAPI client (`generated/aicss`,
+// `generated/layers`, `generated/default`). Most v1 endpoints already speak
+// camelCase, so the wrappers below just forward arguments and cast the
+// response to the existing frontend types.
+//
+// The paper-diorama / paper-layer / paper-style endpoints are an exception:
+// the OpenAPI snapshot's response schema uses camelCase (`paperStyleUrl`,
+// `normalMapUrl`, `thicknessGrayUrl`, `outlinedUrl`) but the existing
+// components (`App.tsx`, `DepthSplitPanel.tsx`, `DioramaSettingsPanel.tsx`)
+// read snake_case fields (`paper_style_url`, `normal_map_url`, ...) from the
+// result. To keep those components untouched, the wrappers below map the
+// generated camelCase response back to the snake_case `PaperDioramaResult`
+// contract the components expect.
 // ─────────────────────────────────────────────────────────────────────────────
-import axios from 'axios';
 import type {
   AicssResult,
   BoundingBox,
@@ -10,24 +23,12 @@ import type {
   LayerRegion,
 } from '../types';
 import { DEFAULT_PAPER_DIORAMA_PARAMS } from '../types';
-
-// 后端地址，默认指向本地开发服务器
-const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
-
-// Axios 实例配置：
-// - baseURL: 所有请求的公共前缀，由各函数中的路径拼接完整URL
-// - timeout: 30min（与 Z-Image-Turbo 生图 + LLM prompt 生成耗时匹配）
-const client = axios.create({
-  baseURL: DEFAULT_BACKEND,
-  timeout: 30 * 60 * 1000,
-});
+import { generatedClient } from './generatedClient';
 
 export async function analyzeImage(imageUrl: string, shotId: string = 'shot_001'): Promise<AicssResult> {
-  const resp = await client.post<AicssResult>('/api/aicss/analyze', {
-    imageUrl,
-    shotId,
-  });
-  return resp.data;
+  return generatedClient.aicss.analyzeApiAicssAnalyzePost({
+    requestBody: { imageUrl, shotId },
+  }) as unknown as Promise<AicssResult>;
 }
 
 export async function generateBillboard(
@@ -36,13 +37,15 @@ export async function generateBillboard(
   boundingBox: BoundingBox,
   polygon?: PolygonPoint[],
 ): Promise<string> {
-  const resp = await client.post<{ billboardUrl: string }>('/api/aicss/billboard', {
-    imageUrl,
-    objectId,
-    boundingBox,
-    polygon: polygon ?? [],
-  });
-  return resp.data.billboardUrl;
+  const resp = await generatedClient.aicss.generateBillboardApiAicssBillboardPost({
+    requestBody: {
+      imageUrl,
+      objectId,
+      boundingBox,
+      polygon: polygon ?? [],
+    } as any,
+  }) as { billboardUrl?: string };
+  return resp.billboardUrl ?? '';
 }
 
 export async function generateMultiface(
@@ -51,18 +54,19 @@ export async function generateMultiface(
   boundingBox: BoundingBox,
   polygon?: PolygonPoint[],
 ): Promise<Record<string, string>> {
-  const resp = await client.post<{ faces: Record<string, string> }>('/api/aicss/multiface', {
-    imageUrl,
-    objectId,
-    boundingBox,
-    polygon: polygon ?? [],
-  });
-  return resp.data.faces;
+  const resp = await generatedClient.aicss.generateMultifaceApiAicssMultifacePost({
+    requestBody: {
+      imageUrl,
+      objectId,
+      boundingBox,
+      polygon: polygon ?? [],
+    } as any,
+  }) as { faces?: Record<string, string> };
+  return resp.faces ?? {};
 }
 
 export async function checkHealth(): Promise<{ status: string; device: string; models_loaded: boolean }> {
-  const resp = await client.get('/health');
-  return resp.data;
+  return generatedClient.default.healthHealthGet() as Promise<{ status: string; device: string; models_loaded: boolean }>;
 }
 
 /**
@@ -85,8 +89,7 @@ export interface ModelsHealth {
 }
 
 export async function checkModelsHealth(): Promise<ModelsHealth> {
-  const resp = await client.get<ModelsHealth>('/health/models');
-  return resp.data;
+  return generatedClient.default.healthModelsHealthModelsGet() as Promise<ModelsHealth>;
 }
 
 export async function inpaintImage(
@@ -95,13 +98,55 @@ export async function inpaintImage(
   prompt: string,
   projectId?: string,
 ): Promise<string> {
-  const resp = await client.post<{ inpaintResultUrl: string }>('/api/aicss/inpaint', {
-    imageUrl,
-    maskDataUrl,
-    prompt,
-    projectId: projectId || undefined,
-  });
-  return resp.data.inpaintResultUrl;
+  const resp = await generatedClient.aicss.inpaintImageApiAicssInpaintPost({
+    requestBody: {
+      imageUrl,
+      maskDataUrl,
+      prompt,
+      projectId: projectId || undefined,
+    } as any,
+  }) as { inpaintResultUrl?: string; imageUrl?: string };
+  return resp.inpaintResultUrl ?? resp.imageUrl ?? '';
+}
+
+export interface OcclusionHole {
+  objectId: string;
+  maskDataUrl: string;
+  polygon: [number, number][];
+  whiteRatio: number;
+  occluderIds: string[];
+  mode: string;
+}
+
+export interface OcclusionHolesResult {
+  holes: OcclusionHole[];
+  mergedMaskDataUrl: string | null;
+  mode: string;
+  count: number;
+}
+
+/** 从 Analyze 物体列表自动生成遮挡空洞 mask（不跑 LaMa）。 */
+export async function computeOcclusionHoles(params: {
+  objects: Array<{
+    id: string;
+    maskDataUrl: string;
+    depth?: number;
+    polygon?: [number, number][];
+  }>;
+  imageWidth: number;
+  imageHeight: number;
+  targetObjectIds?: string[];
+  mode?: 'peel' | 'occluded_interior';
+}): Promise<OcclusionHolesResult> {
+  return generatedClient.aicss.occlusionHolesApiAicssOcclusionHolesPost({
+    requestBody: {
+      objects: params.objects,
+      imageWidth: params.imageWidth,
+      imageHeight: params.imageHeight,
+      targetObjectIds: params.targetObjectIds,
+      mode: params.mode ?? 'peel',
+    } as any,
+  }) as unknown as Promise<OcclusionHolesResult>;
 }
 
 export async function applyPaperStyle(
@@ -109,14 +154,18 @@ export async function applyPaperStyle(
   params?: Partial<PaperDioramaParams>,
 ): Promise<string> {
   const merged = { ...DEFAULT_PAPER_DIORAMA_PARAMS, ...params };
-  const resp = await client.post<{ styledImageUrl: string }>('/api/aicss/paper-style', {
-    imageUrl,
-    colorLevels: merged.colorLevels,
-    styleStrength: merged.styleStrength,
-    edgeLow: 50,
-    edgeHigh: 150,
-  });
-  return resp.data.styledImageUrl;
+  const resp = await generatedClient.aicss.paperStyleTransferApiAicssPaperStylePost({
+    requestBody: {
+      imageUrl,
+      colorLevels: merged.colorLevels,
+      styleStrength: merged.styleStrength,
+      edgeLow: 50,
+      edgeHigh: 150,
+    } as any,
+  }) as { paperStyleUrl?: string; styledImageUrl?: string };
+  // OpenAPI snapshot names this field `paperStyleUrl`; older backend builds
+  // returned `styledImageUrl`. Accept either to stay forward + backward compatible.
+  return resp.paperStyleUrl ?? resp.styledImageUrl ?? '';
 }
 
 export interface PaperDioramaResult {
@@ -139,16 +188,28 @@ export async function generatePaperDiorama(
   params?: Partial<PaperDioramaParams>,
 ): Promise<PaperDioramaResult> {
   const merged = { ...DEFAULT_PAPER_DIORAMA_PARAMS, ...params };
-  const resp = await client.post<PaperDioramaResult>('/api/aicss/paper-diorama', {
-    imageUrl,
-    maskDataUrl,
-    thicknessMin: merged.thicknessMin,
-    thicknessMax: merged.thicknessMax,
-    outlineWidth: merged.outlineWidth,
-    colorLevels: merged.colorLevels,
-    styleStrength: merged.styleStrength,
-  });
-  return resp.data;
+  const data = await generatedClient.aicss.paperDioramaGenerateApiAicssPaperDioramaPost({
+    requestBody: {
+      imageUrl,
+      maskDataUrl,
+      thicknessMin: merged.thicknessMin,
+      thicknessMax: merged.thicknessMax,
+      outlineWidth: merged.outlineWidth,
+      colorLevels: merged.colorLevels,
+      styleStrength: merged.styleStrength,
+    } as any,
+  }) as any;
+  // Map generated camelCase → existing snake_case contract consumed by
+  // App.tsx / DepthSplitPanel.tsx / DioramaSettingsPanel.tsx. Read both names
+  // defensively so the wrapper keeps working even if the backend still emits
+  // legacy snake_case fields.
+  return {
+    paper_style_url: data.paperStyleUrl ?? data.paper_style_url ?? '',
+    thickness_url: data.thicknessGrayUrl ?? data.thickness_url ?? '',
+    normal_map_url: data.normalMapUrl ?? data.normal_map_url ?? '',
+    outlined_url: data.outlinedUrl ?? data.outlined_url ?? '',
+    thickness_gray_url: data.thicknessGrayUrl ?? data.thickness_gray_url ?? '',
+  };
 }
 
 // "Layer（图层）" vs "Object（物体）" 的语义区别：
@@ -164,16 +225,24 @@ export async function generatePaperLayer(
   params?: Partial<PaperDioramaParams>,
 ): Promise<PaperDioramaResult> {
   const merged = { ...DEFAULT_PAPER_DIORAMA_PARAMS, ...params };
-  const resp = await client.post<PaperDioramaResult>('/api/aicss/paper-layer', {
-    layerImageUrl,
-    layerMaskUrl: layerMaskUrl,
-    thicknessMin: merged.thicknessMin,
-    thicknessMax: merged.thicknessMax,
-    outlineWidth: merged.outlineWidth,
-    colorLevels: merged.colorLevels,
-    styleStrength: merged.styleStrength,
-  });
-  return resp.data;
+  const data = await generatedClient.aicss.paperLayerGenerateApiAicssPaperLayerPost({
+    requestBody: {
+      layerImageUrl,
+      layerMaskUrl: layerMaskUrl,
+      thicknessMin: merged.thicknessMin,
+      thicknessMax: merged.thicknessMax,
+      outlineWidth: merged.outlineWidth,
+      colorLevels: merged.colorLevels,
+      styleStrength: merged.styleStrength,
+    } as any,
+  }) as any;
+  return {
+    paper_style_url: data.paperStyleUrl ?? data.paper_style_url ?? '',
+    thickness_url: data.thicknessGrayUrl ?? data.thickness_url ?? '',
+    normal_map_url: data.normalMapUrl ?? data.normal_map_url ?? '',
+    outlined_url: data.outlinedUrl ?? data.outlined_url ?? '',
+    thickness_gray_url: data.thicknessGrayUrl ?? data.thickness_gray_url ?? '',
+  };
 }
 
 // ─── Layer Region support ─────────────────────────────────────────────────────────
@@ -204,5 +273,3 @@ export async function extractRegionBillboard(
 
   return generateBillboard(imageUrl, region.id, boundingBox, region.polygon);
 }
-
-// "Layer（图层）" vs "Object（物体）" 的语义区别：

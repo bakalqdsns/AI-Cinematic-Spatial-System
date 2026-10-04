@@ -14,6 +14,8 @@ import { zForRegion } from '../utils/depthUtils';
 import { ExportPanel } from './ExportPanel';
 import { CameraPathPlayer } from './CameraPathPlayer';
 import { ShotPlaybackControls, type PlaybackState } from './ShotPlaybackControls';
+import { LightingPanel } from './LightingPanel';
+import { LIGHTING_PRESETS, type LightSpec, type LightingPreset } from '../lighting/presets';
 
 // Scene dimensions (world units)
 const SCENE_WIDTH = 20;
@@ -51,13 +53,90 @@ function disposeCache() {
 }
 
 // Directional light for paper diorama shading
+//
+// T13: reads `lightingPreset` + `lightingCustom` from the store. When a preset
+// is selected, renders the 3 lights (key/fill/rim) per the spec; otherwise
+// falls back to the original hardcoded 3 directional lights.
+//
+// Three.js light-type mapping:
+//   SUN  → directionalLight (parallel rays, position used as direction)
+//   AREA → directionalLight (fallback; rectAreaLight requires
+//          RectAreaLightUniformsLib init — skipped to avoid extra deps)
+//   SPOT → spotLight (position + target=origin, with angle/penumbra defaults)
+//
+// Color: backend stores linear RGB 0-1; we convert to a THREE.Color.
+// Energy: backend's Blender energy is in watts; we scale to a three.js
+// intensity by a fixed factor (0.4) tuned for paper-diorama scale.
 function PaperDioramaLighting() {
+  const lightingPreset = useAppStore((s) => s.lightingPreset);
+  const lightingCustom = useAppStore((s) => s.lightingCustom);
+
+  // Resolve the effective preset: custom overrides take priority, else lookup.
+  const preset: LightingPreset | null = useMemo(() => {
+    if (lightingCustom) return lightingCustom;
+    if (lightingPreset) return LIGHTING_PRESETS[lightingPreset] ?? null;
+    return null;
+  }, [lightingPreset, lightingCustom]);
+
+  // Fallback: original hardcoded lights.
+  if (!preset) {
+    return (
+      <>
+        <ambientLight intensity={0.8} />
+        <directionalLight position={[5, 8, 10]} intensity={1.2} color="#fff8e1" />
+        <directionalLight position={[-4, -3, 5]} intensity={0.3} color="#e3f2fd" />
+      </>
+    );
+  }
+
   return (
     <>
-      <ambientLight intensity={0.8} />
-      <directionalLight position={[5, 8, 10]} intensity={1.2} color="#fff8e1" />
-      <directionalLight position={[-4, -3, 5]} intensity={0.3} color="#e3f2fd" />
+      <ambientLight intensity={0.35} />
+      <PresetLight role="key" spec={preset.key} />
+      <PresetLight role="fill" spec={preset.fill} />
+      <PresetLight role="rim" spec={preset.rim} />
     </>
+  );
+}
+
+// Energy scaling: Blender watt → three.js intensity. Empirically tuned so
+// the preset energies (0.3–6.0) map to reasonable three.js intensities.
+const ENERGY_SCALE = 0.4;
+
+// Render a single LightSpec as the appropriate three.js light.
+// Uses `key` for React reconciliation; position derived from spec.location.
+function PresetLight({ role, spec }: { role: 'key' | 'fill' | 'rim'; spec: LightSpec }) {
+  const intensity = spec.energy * ENERGY_SCALE;
+  const color = useMemo(() => new THREE.Color(spec.color[0], spec.color[1], spec.color[2]), [spec.color]);
+  const position: [number, number, number] = spec.location ?? [5, 5, 8];
+
+  // SPOT → spotLight pointing at origin.
+  if (spec.type === 'SPOT') {
+    return (
+      <spotLight
+        // `key` ensures React swaps the light object when type/role changes
+        key={`${role}-spot`}
+        position={position}
+        intensity={intensity * 4} // spotLight falls off faster; compensate
+        color={color}
+        angle={Math.PI / 4}
+        penumbra={0.5}
+        distance={0}
+        target-position={[0, 0, 0]}
+      />
+    );
+  }
+
+  // SUN & AREA → directionalLight (AREA fallback). directionalLight in three.js
+  // uses position - target as the direction; we point at origin.
+  return (
+    <directionalLight
+      key={`${role}-${spec.type.toLowerCase()}`}
+      position={position}
+      intensity={intensity}
+      color={color}
+      target-position={[0, 0, 0]}
+    />
   );
 }
 
@@ -580,6 +659,9 @@ export function Viewer3D({ currentShot = null }: Viewer3DProps = {}) {
       )}
 
       <ExportPanel canvasRef={{ current: glCanvas }} />
+
+      {/* T13: Lighting panel overlay — preset/mood selector + per-light tuning */}
+      <LightingPanel />
     </div>
   );
 }

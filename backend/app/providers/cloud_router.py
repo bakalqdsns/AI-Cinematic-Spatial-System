@@ -35,12 +35,11 @@ def _get_provider_for_component(component: str) -> BaseProvider:
     """
     Look up the BaseProvider instance for the given component (llm|vlm|image|video).
 
-    Reads the component's current provider config from settings; instantiates the
-    provider on first use and caches it for subsequent calls.
+    Reads the component's current provider config from the runtime values
+    store (``settings_manager``); instantiates the provider on first use and
+    caches it for subsequent calls.
     """
-    from app.config import settings
-
-    cfg = settings.get_provider_config(component)
+    cfg = _get_provider_config(component)
     name = cfg["provider"]
     cache_key = (component, name)
 
@@ -76,9 +75,87 @@ def invalidate_cache(component: Optional[str] = None) -> None:
 
 
 def get_model_id(component: str) -> str:
-    """Return the model ID for the given component from current settings."""
-    from app.config import settings
-    return settings.get_model_id(component)
+    """Return the model ID for the given component from current runtime settings."""
+    return _get_provider_config(component).get("model") or ""
+
+
+# ── Provider config resolution (reads from settings_manager) ─────────────────
+# This mirrors `Settings.get_provider_config` but reads live values from the
+# runtime values store instead of the immutable `config.settings` singleton, so
+# hot-reloaded provider/model/key changes take effect without restart.
+
+_COMPONENT_TO_FIELDS = {
+    "llm":   ("cloud_llm_provider",   "dashscope_llm_api_key",   "dashscope_llm_model",   "toapi_llm_model",   "toapi_llm_api_key"),
+    "vlm":   ("cloud_vlm_provider",   "dashscope_vlm_api_key",   "dashscope_vlm_model",   None,                None),
+    "image": ("cloud_image_provider", "dashscope_image_api_key", "dashscope_image_model", "toapi_image_model", "toapi_llm_api_key"),
+    "video": ("cloud_video_provider", "dashscope_video_api_key", None,                    "toapi_video_model", "toapi_llm_api_key"),
+}
+
+
+def _get_provider_config(component: str) -> dict:
+    """Resolve the active provider config block for ``component`` from runtime values.
+
+    Returns a dict suitable for instantiating a BaseProvider:
+        {
+            "provider":      "toapi",
+            "type":           "openai_compatible",
+            "api_key":        "sk-xxx",
+            "base_url":       "https://toapis.com/v1",
+            "extra_headers":  {...},
+            "extra_json":     {...},
+            "model":          "gpt-5.6-terra",
+        }
+
+    Falls back to legacy single-provider fields when the unified ``providers``
+    registry has no entry matching the chosen provider name.
+    """
+    from app.services.settings_manager import get as _get
+
+    fields = _COMPONENT_TO_FIELDS.get(component)
+    if fields is None:
+        raise ValueError(f"Unknown component: {component!r}")
+    prov_field, ds_key_field, ds_model_attr, toapi_model_attr, toapi_key_field = fields
+
+    chosen_name = _get(prov_field, "dashscope") or "dashscope"
+    providers = _get("providers") or []
+    for p in providers:
+        if p.get("name") == chosen_name:
+            models = p.get("models") or {}
+            model = models.get(component) or ""
+            return {
+                "provider": chosen_name,
+                "type": p.get("type", "openai_compatible"),
+                "api_key": p.get("api_key", ""),
+                "base_url": p.get("base_url", ""),
+                "extra_headers": p.get("extra_headers"),
+                "extra_json": p.get("extra_json"),
+                "model": model,
+            }
+
+    # Legacy fallback: synthesize a provider block on the fly
+    legacy_type = "openai_compatible" if chosen_name == "toapi" else "dashscope"
+    legacy_model = ""
+    legacy_key = ""
+    legacy_url = ""
+    if chosen_name == "toapi":
+        legacy_model = _get(toapi_model_attr, "") or "" if toapi_model_attr else ""
+        legacy_key = _get(toapi_key_field, "") or "" if toapi_key_field else ""
+        legacy_url = "https://toapis.com/v1"
+    elif chosen_name == "dashscope":
+        if ds_model_attr:
+            legacy_model = _get(ds_model_attr, "") or ""
+        if ds_key_field:
+            legacy_key = _get(ds_key_field, "") or ""
+        # DashScope SDK uses its own base; URL not strictly needed.
+    return {
+        "provider": chosen_name,
+        "type": legacy_type,
+        "api_key": legacy_key,
+        "base_url": legacy_url,
+        "extra_headers": None,
+        "extra_json": None,
+        "model": legacy_model,
+    }
 
 
 # ── Public dispatch API ────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
-import type { PolygonPoint, LayerRegion } from '../types';
+import type { PolygonPoint, LayerRegion, DepthLayerKey } from '../types';
 import { LAYER_COLORS, DEPTH_LAYER_THRESHOLDS } from '../types';
 import { loadDepthMapImageData, sampleDepthAtPolygon, autoAssignDepthLayer } from '../utils/depthUtils';
 
@@ -30,7 +30,7 @@ interface Props {
 export function usePolygonDraw({ imageWidth, imageHeight, onDrawComplete }: Props) {
   const [drawMode, setDrawMode] = useState<DrawMode>('idle');
   const [points, setPoints] = useState<PolygonPoint[]>([]);
-  const [previewDepthLayer, setPreviewDepthLayer] = useState<string | null>(null);
+  const [previewDepthLayer, setPreviewDepthLayer] = useState<DepthLayerKey | null>(null);
   const samplingRef = useRef(false);
 
   const analysisResult = useAppStore((s) => s.analysisResult);

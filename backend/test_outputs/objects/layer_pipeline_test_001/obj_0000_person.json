@@ -1,0 +1,23 @@
+{
+  "object_id": "obj_person_0",
+  "label": "person",
+  "score": 0.6594063639640808,
+  "bbox": [
+    124,
+    194,
+    515,
+    690
+  ],
+  "depth_mean": 14.853293418884277,
+  "depth_min": 0.6165679693222046,
+  "depth_max": 36.23261260986328,
+  "layer_hint": "foreground",
+  "z_offset": -2.0,
+  "cutout": "obj_0000_person.png",
+  "meta": {
+    "area_px": 58076,
+    "vertical_pos": 0.5755208333333334,
+    "sam_score": 0.6594063639640808,
+    "aspect": 0.7883064516129032
+  }
+}

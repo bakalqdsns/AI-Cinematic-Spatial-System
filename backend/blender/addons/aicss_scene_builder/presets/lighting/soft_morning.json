@@ -1,0 +1,26 @@
+{
+  "name": "Soft Morning",
+  "description": "柔和晨光 — 低角度暖白主光 + 大面积柔补光，整体明亮通透。",
+  "key": {
+    "type": "SUN",
+    "energy": 2.5,
+    "color": [1.0, 0.92, 0.78],
+    "location": [10.0, -10.0, 6.0],
+    "rotation": [1.0, 0.0, 0.7]
+  },
+  "fill": {
+    "type": "AREA",
+    "energy": 2.0,
+    "color": [0.95, 0.97, 1.0],
+    "size": 9.0,
+    "location": [-9.0, -7.0, 6.0],
+    "rotation": [0.9, 0.0, -0.6]
+  },
+  "rim": {
+    "type": "SPOT",
+    "energy": 1.2,
+    "color": [1.0, 0.95, 0.85],
+    "location": [0.0, 8.0, 7.0],
+    "rotation": [-0.8, 0.0, 0.0]
+  }
+}

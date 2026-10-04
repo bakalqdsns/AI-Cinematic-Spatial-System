@@ -13,7 +13,7 @@ from __future__ import annotations
 try:
     import bpy
     from bpy.types import Operator
-    from bpy.props import StringProperty, FloatProperty
+    from bpy.props import StringProperty, FloatProperty, BoolProperty
     _HAS_BPY = True
 except ImportError:
     _HAS_BPY = False
@@ -23,6 +23,7 @@ except ImportError:
 
     def StringProperty(**kw): return None  # type: ignore[no-redef]
     def FloatProperty(**kw): return None  # type: ignore[no-redef]
+    def BoolProperty(**kw): return None  # type: ignore[no-redef]
 
 
 class AICSS_OT_apply_paper_material(Operator):
@@ -34,6 +35,8 @@ class AICSS_OT_apply_paper_material(Operator):
         roughness: 0.5–1.0, default 0.9 (matches paper visual roughness).
         normal_strength: 0.0–1.0, default 0.8 (Phase 2: pulled from the
             manifest's normalMapUrl).
+        subsurface: 0.0–1.0, default 0.15 (T12 — SSS 透纸感).
+        use_fibre: bool, default False (T12 — 纤维法线噪声叠加).
     """
     bl_idname = "aicss.apply_paper_material"
     bl_label = "Apply Paper Material"
@@ -54,6 +57,18 @@ class AICSS_OT_apply_paper_material(Operator):
         default=0.8,
         min=0.0,
         max=1.0,
+    )
+    subsurface: FloatProperty(
+        name="Subsurface (SSS)",
+        default=0.15,
+        min=0.0,
+        max=1.0,
+        description="Subsurface scattering weight — 逆光边缘透纸感",
+    )
+    use_fibre: BoolProperty(
+        name="Paper Fibre",
+        default=False,
+        description="叠加细密噪声到法线，模拟纸纤维质感",
     )
 
     @classmethod
@@ -78,6 +93,8 @@ class AICSS_OT_apply_paper_material(Operator):
                 image_path=self.image_path or obj.get("aicss_layer_png"),
                 roughness=self.roughness,
                 normal_strength=self.normal_strength,
+                subsurface=self.subsurface,
+                use_fibre=self.use_fibre,
             )
             applied += 1
 

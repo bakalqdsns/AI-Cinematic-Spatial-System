@@ -38,6 +38,12 @@ interface ScriptStore {
   // ─── Scene assets (auto-generated keyframe sets per scene) ────────────────
   sceneAssets: Record<string, SceneAsset>;
   isGeneratingSceneAsset: Record<string, boolean>;
+  // Per-scene flag for the asynchronous `POST /layers/export` round-trip.
+  isLayeringScene: Record<string, boolean>;
+  // Per-scene error message from the last `layerScene` attempt. Cleared on
+  // success or when a new attempt starts. Lives independently of the global
+  // `error` field so other actions don't blow it away.
+  layerErrors: Record<string, string>;
   selectedSceneId: string | null;
 
   // ─── Loading flags ─────────────────────────────────────────────────────────
@@ -49,7 +55,7 @@ interface ScriptStore {
   // ─── UI state ──────────────────────────────────────────────────────────────
   selectedShotId: string | null;
   selectedCharacterId: string | null;
-  activeTab: 'script' | 'storyboard' | 'characters' | 'motion';
+  activeTab: 'script' | 'storyboard' | 'characters' | 'scenes' | 'motion' | 'timeline';
 
   // ─── Project context ───────────────────────────────────────────────────────
   projectId: string | null;
@@ -84,6 +90,11 @@ interface ScriptStore {
   resolveCharacterVisualPrompts: (charIds?: string[]) => Promise<void>;
   resolveSceneVisualPrompts: (sceneIds?: string[]) => Promise<void>;
   generateSceneAsset: (sceneId: string, location: string, time: string, atmosphere: string, visualPrompt: string, projectId?: string) => Promise<void>;
+  // Asynchronous endpoint approach for module 3 depth layers. Caller picks which
+  // keyframe to use as the source (typically 'wide'). Result is written into
+  // `sceneAssets[sceneId].layeredImages`; throws on network/server error so the
+  // UI can surface a toast.
+  layerScene: (sceneId: string, source?: 'wide' | 'closeup' | 'mood') => Promise<void>;
   selectScene: (sceneId: string | null) => void;
 
   // Auto-batch: triggered automatically after /parse completes. The backend
@@ -128,6 +139,8 @@ const initialState = {
   isGeneratingCharacter: {} as Record<string, boolean>,
   isGeneratingMotion: {} as Record<string, boolean>,
   isGeneratingSceneAsset: {} as Record<string, boolean>,
+  isLayeringScene: {} as Record<string, boolean>,
+  layerErrors: {} as Record<string, string>,
   selectedShotId: null as string | null,
   selectedCharacterId: null as string | null,
   selectedSceneId: null as string | null,
@@ -137,6 +150,12 @@ const initialState = {
   isResolvingPrompts: false,
   error: null as string | null,
 };
+
+// Per-scene AbortController registry. Not part of `ScriptStore` state — these
+// are imperative handles that let `layerScene` cancel an in-flight request when
+// the user re-triggers the action (or navigates away) before the previous one
+// resolves. Keyed by `sceneId`.
+const layerAbortControllers = new Map<string, AbortController>();
 
 export const useScriptStore = create<ScriptStore>((set, get) => ({
   ...initialState,
@@ -307,7 +326,19 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
           const entry = chMap[id];
           if (!entry) continue;
           if (entry.status === 'done' && entry.asset) {
-            const a = entry.asset as unknown as CharacterAsset;
+            // Service layer (getBatchStatus) is a thin pass-through of the
+            // generated OpenAPI client response, so `entry.asset` retains the
+            // backend's snake_case field names at runtime. We accept both
+            // snake_case (runtime) and camelCase (defensive) shapes here.
+            const a = entry.asset as unknown as {
+              visual_prompt?: string;
+              visualPrompt?: string;
+              reference_image?: string;
+              referenceImage?: string;
+              three_view_images?: Record<string, string>;
+              threeViewImages?: Record<string, string>;
+              variations?: CharacterAsset['variations'];
+            };
             newAssets[id] = {
               characterId: id,
               visualPrompt: a.visual_prompt || a.visualPrompt || entry.visual_prompt || '',
@@ -418,7 +449,17 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
           const entry = sceneMap[id];
           if (!entry) continue;
           if (entry.status === 'done' && entry.asset) {
-            const a = entry.asset as unknown as SceneAsset;
+            // Service layer (getSceneBatchStatus) is a thin pass-through of the
+            // generated OpenAPI client response, so `entry.asset` retains the
+            // backend's snake_case field names at runtime. We accept both
+            // snake_case (runtime) and camelCase (defensive) shapes here.
+            const a = entry.asset as unknown as {
+              visual_prompt?: string;
+              visualPrompt?: string;
+              keyframe_images?: Record<string, string>;
+              keyframeImages?: Record<string, string>;
+              variations?: SceneAsset['variations'];
+            };
             newAssets[id] = {
               sceneId: id,
               visualPrompt: a.visual_prompt || a.visualPrompt || entry.visual_prompt || '',
@@ -501,7 +542,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         scriptData: parsedScript,
         shotsPerScene: 6,
         language: parsedScript.language,
-        projectId: resolvedProjectId,
+        projectId: resolvedProjectId ?? undefined,
       });
 
       set({
@@ -695,6 +736,114 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         isGeneratingSceneAsset: { ...state.isGeneratingSceneAsset, [sceneId]: false },
         error: err instanceof Error ? err.message : 'Scene keyframe generation failed',
       }));
+    }
+  },
+
+  // ─── Module 3 — depth layer export via async endpoint ─────────────────────
+  //
+  // Strategy A (asynchronous endpoint): user explicitly triggers this action;
+  // we POST the chosen keyframe to `/api/aicss/layers/export`, then write the
+  // 4 RGBA layer PNGs back into `sceneAssets[sceneId].layeredImages`. The
+  // server is stateless, so re-running simply overwrites the previous result.
+  layerScene: async (sceneId, source = 'wide') => {
+    const asset = get().sceneAssets[sceneId];
+    const imageUrl = asset?.keyframeImages?.[source];
+    if (!imageUrl) {
+      const msg = `Scene ${sceneId} has no '${source}' keyframe to layer`;
+      console.warn('[useScriptStore] layerScene:', msg);
+      set(state => ({
+        layerErrors: { ...state.layerErrors, [sceneId]: msg },
+      }));
+      return;
+    }
+    // Clear any prior per-scene error + global error before starting.
+    set(state => ({
+      isLayeringScene: { ...state.isLayeringScene, [sceneId]: true },
+      layerErrors: { ...state.layerErrors, [sceneId]: '' },
+      error: null,
+    }));
+    // Cancel any in-flight request for this scene (avoid stale overwrite).
+    const prevController = layerAbortControllers.get(sceneId);
+    if (prevController) {
+      prevController.abort();
+    }
+    const controller = new AbortController();
+    layerAbortControllers.set(sceneId, controller);
+    try {
+      const result = await scriptService.exportSceneLayers(
+        { imageUrl },
+        { signal: controller.signal },
+      );
+      // Guard: backend may return a partial response if depth model failed.
+      // Treat an all-empty layers map as an error so the UI can surface it.
+      const layerKeys: Array<'sky' | 'background' | 'midground' | 'foreground'> = [
+        'sky', 'background', 'midground', 'foreground',
+      ];
+      const anyLayer = layerKeys.some(k => result.layers?.[k]?.dataUri);
+      if (!anyLayer) {
+        throw new Error(
+          'Backend returned no layers — DepthAnything may have failed; check server logs.',
+        );
+      }
+      // Drop the controller only if it's still the active one for this scene.
+      if (layerAbortControllers.get(sceneId) === controller) {
+        layerAbortControllers.delete(sceneId);
+      }
+      set(state => {
+        const current = state.sceneAssets[sceneId];
+        if (!current) {
+          return {
+            isLayeringScene: { ...state.isLayeringScene, [sceneId]: false },
+          };
+        }
+        return {
+          sceneAssets: {
+            ...state.sceneAssets,
+            [sceneId]: {
+              ...current,
+              layeredImages: {
+                sky: result.layers.sky,
+                background: result.layers.background,
+                midground: result.layers.midground,
+                foreground: result.layers.foreground,
+                zOffsets: result.zOffsets,
+                width: result.width,
+                height: result.height,
+                source,
+                generatedAt: new Date().toISOString(),
+              },
+            },
+          },
+          isLayeringScene: { ...state.isLayeringScene, [sceneId]: false },
+          layerErrors: { ...state.layerErrors, [sceneId]: '' },
+        };
+      });
+    } catch (err) {
+      // AbortError is expected on cancellation — don't surface it as an error.
+      const isAbort = err instanceof Error && /aborted/i.test(err.message);
+      if (!isAbort) {
+        const msg = err instanceof Error ? err.message : 'Scene layer export failed';
+        console.error('[useScriptStore] layerScene error:', err);
+        set(state => ({
+          isLayeringScene: { ...state.isLayeringScene, [sceneId]: false },
+          layerErrors: { ...state.layerErrors, [sceneId]: msg },
+          // Keep global `error` clear too — per-scene error is shown inline.
+          error: null,
+        }));
+      } else {
+        // Restore the layering flag for the new controller (the new request
+        // owns the slot now); the previous request just got cancelled.
+        set(state => ({
+          isLayeringScene: {
+            ...state.isLayeringScene,
+            [sceneId]: !!layerAbortControllers.get(sceneId),
+          },
+        }));
+      }
+      // Always clear the controller slot on completion/cancel.
+      if (layerAbortControllers.get(sceneId) === controller) {
+        layerAbortControllers.delete(sceneId);
+      }
     }
   },
 

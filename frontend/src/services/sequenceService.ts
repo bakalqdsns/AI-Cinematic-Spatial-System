@@ -1,9 +1,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AICSS Sequence Service — v2 API for frame sequence processing
-// Handles sequence analysis, cross-frame tracking, and WebSocket progress
+// AICSS Sequence Service — v2 API for frame sequence processing.
+//
+// Thin wrapper around the generated OpenAPI client (`generated/v2Sequence`).
+// The v2 sequence endpoints already speak camelCase, so the wrappers below
+// just forward arguments and cast the response to the existing frontend types
+// — no field mapping required. `createSequenceWebSocket` stays handwritten
+// because the OpenAPI spec only describes HTTP endpoints, not the WS upgrade.
 // ─────────────────────────────────────────────────────────────────────────────
-
-import axios from 'axios';
 import type {
   AnalyzeSequenceRequest,
   AnalyzeFromScriptRequest,
@@ -12,62 +15,50 @@ import type {
   CrossFrameObjectDetail,
   SequenceMetadata,
 } from '../types/sequence';
-
-const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
-
-const client = axios.create({
-  baseURL: DEFAULT_BACKEND,
-  timeout: 30 * 60 * 1000,  // 30 minutes — covers Z-Image + LLM pipelines
-});
+import { generatedClient, DEFAULT_BACKEND } from './generatedClient';
 
 // ─── Sequence Analysis ─────────────────────────────────────────────────────────
 
 export async function analyzeSequence(
   request: AnalyzeSequenceRequest
 ): Promise<SequenceResult> {
-  const resp = await client.post<SequenceResult>(
-    '/api/aicss/v2/sequences',
-    request
-  );
-  return resp.data;
+  return generatedClient.v2Sequence.analyzeSequenceApiAicssV2SequencesPost({
+    requestBody: request as any,
+  }) as unknown as Promise<SequenceResult>;
 }
 
 export async function analyzeFromScript(
   request: AnalyzeFromScriptRequest
 ): Promise<SequenceResult> {
-  const resp = await client.post<SequenceResult>(
-    '/api/aicss/v2/sequences/from-script',
-    request
-  );
-  return resp.data;
+  return generatedClient.v2Sequence.analyzeFromScriptApiAicssV2SequencesFromScriptPost({
+    requestBody: request as any,
+  }) as unknown as Promise<SequenceResult>;
 }
 
 // ─── Query Endpoints ──────────────────────────────────────────────────────────
 
 export async function getSequence(sequenceId: string): Promise<SequenceResult> {
-  const resp = await client.get<SequenceResult>(
-    `/api/aicss/v2/sequences/${sequenceId}`
-  );
-  return resp.data;
+  return generatedClient.v2Sequence.getSequenceApiAicssV2SequencesSequenceIdGet({
+    sequenceId,
+  }) as unknown as Promise<SequenceResult>;
 }
 
 export async function getSceneLinks(
   sequenceId: string
 ): Promise<SceneLinksResponse> {
-  const resp = await client.get<SceneLinksResponse>(
-    `/api/aicss/v2/sequences/${sequenceId}/scene-links`
-  );
-  return resp.data;
+  return generatedClient.v2Sequence.getSceneLinksApiAicssV2SequencesSequenceIdSceneLinksGet({
+    sequenceId,
+  }) as unknown as Promise<SceneLinksResponse>;
 }
 
 export async function getCrossFrameObject(
   sequenceId: string,
   globalId: string
 ): Promise<CrossFrameObjectDetail> {
-  const resp = await client.get<CrossFrameObjectDetail>(
-    `/api/aicss/v2/sequences/${sequenceId}/objects/${globalId}`
-  );
-  return resp.data;
+  return generatedClient.v2Sequence.getCrossFrameObjectApiAicssV2SequencesSequenceIdObjectsGlobalIdGet({
+    sequenceId,
+    globalId,
+  }) as unknown as Promise<CrossFrameObjectDetail>;
 }
 
 // ─── WebSocket Progress ────────────────────────────────────────────────────────

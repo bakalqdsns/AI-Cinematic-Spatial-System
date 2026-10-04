@@ -2,9 +2,9 @@
 
 > **适用范围**：AICinematicSpatialSystem 后端 (`backend/app`)
 >
-> **评估日期**：2026-07-27
+> **评估日期**：2026-07-27；**对照修订**：2026-09-26
 >
-> **相关文件**：`config.py`、`model_manager.py`、`gpu_concurrency.py`、`main.py`、各模型 Loader 文件
+> 完成度以 `docs/PROJECT_STATUS.md` 为准。模型 ID 与调用路径以当前 `backend/app` 代码为准。
 
 ---
 
@@ -107,39 +107,38 @@ depth_buckets = {
 
 | 模型 | 用途 | 调用状态 | API Key |
 |------|------|----------|---------|
-| **wan2.7-i2v** | 视频生成 | ✅ 生产使用中 | ✅ 必需 |
-| **wanx-v1** | 文生图 | ❌ 代码存在但未调用 | 未显式传递 |
-| **wanx2.1-imageedit** | 图像编辑 | ❌ **已废弃**，改用本地 LaMa | N/A |
-| **VLM (视觉语言模型)** | 场景分析 | ❌ **已废弃**，改用本地 Qwen3-VL | N/A |
+| **wan2.5-i2v-preview** | 云端图生视频 | ✅ `DashScopeFilmProvider._model` | `dashscope_video_api_key`，否则 `DASHSCOPE_VIDEO_API_KEY` / `DASHSCOPE_API_KEY` |
+| **wanx-v1** | 云端文生图 | ✅ `settings.dashscope_image_model` 默认值；`dashscope_client` / `DashScopeProvider` 走 `ImageSynthesis` | 图像用 key |
+| **wanx2.1-imageedit** | 图像编辑 | 修复端点已改本地 LaMa（`POST /api/aicss/inpaint`）。`settings.dashscope_model` 默认值仍是该 ID | 视调用路径 |
+| **Qwen3-VL / DashScope VLM** | 场景分析 | 按 `vlm_mode` 在本地 Qwen3-VL 与云端 `MultiModalConversation` 之间切换，并非已废弃 | 云端模式需要 |
 
-> **注意**：脚本解析（`script_parser.py`）默认走 DashScope 云端，若调用失败则自动降级到本地 llama.cpp Qwen2.5-7B-Instruct Q4_K_M GGUF。
+另外还有 `local_wan`（本地 wan2.1-i2v）和 `svd` 两个视频 Provider，以及 `HappyHorseProvider`。
 
-### 2.2 唯一生产调用：wan2.7-i2v 视频生成
+> **注意**：脚本解析（`script_parser.py`）按 `model_mode` 走云端或本地 llama.cpp。云端失败时的启发式 fallback 在 `script_parser.py`。
+>
+> **与基准文件的模型名差异**：`PROJECT_STATUS.md` 模块 2 仍写动作视频模型为 `wan2.7-i2v`。当前 `video_adapter.py` 的 DashScope 实现是 `VideoSynthesis` + `wan2.5-i2v-preview`，不是 `FilmConcurrentRequest` / `dashscope.Film`。
+
+### 2.2 云端视频：wan2.5-i2v-preview
 
 **文件**: [backend/app/services/video_adapter.py](backend/app/services/video_adapter.py)
 
-**类**: `DashScopeFilmProvider`（第 77-163 行）
+**类**: `DashScopeFilmProvider`
 
 ```python
-# 导入
-import dashscope
-from dashscope.api.entities.dashscope import FilmConcurrentRequest
+from dashscope import VideoSynthesis
 
-# 创建任务
-request = FilmConcurrentRequest(model="wan2.7-i2v", prompt=prompt)
-request.add_clip_first_frame(base64_str, width, height)
-request.add_clip_last_frame(base64_str, width, height)
-task_resp = dashscope.Film.call(
-    request=request,
-    api_key=os.getenv("DASHSCOPE_API_KEY", ""),
+task_resp = VideoSynthesis.call(
+    model="wan2.5-i2v-preview",
+    prompt=prompt,
+    first_frame_url=data_uri,   # 可选
+    last_frame_url=data_uri,    # 可选
+    api_key=api_key,
 )
-
-# 轮询状态
-task_status = dashscope.Film.fetch(task_id=task_resp.output.task_id)
-video_url = task_status.output.video.video_url
+status_resp = VideoSynthesis.fetch(task=task_id, api_key=api_key)
+video_url = status_resp.output.video.video_url
 ```
 
-**API Key 注入方式**: 通过环境变量 `DASHSCOPE_API_KEY` 注入，代码中默认值为空字符串（**必须设置，否则请求失败**）。
+**API Key 解析顺序**：`settings.dashscope_video_api_key` → `DASHSCOPE_VIDEO_API_KEY` → `DASHSCOPE_API_KEY`。
 
 **错误处理**:
 
@@ -151,9 +150,11 @@ video_url = task_status.output.video.video_url
 | 网络异常 | 捕获并返回 `None` |
 | 视频下载失败 | 捕获并返回 `None` |
 
-### 2.3 未调用代码
+### 2.3 残留辅助函数（业务路径不走这里）
 
-#### `generate_image`（wanx-v1 文生图）
+`inpaint_utils.generate_image` / `generate_video` 仍留着旧的 `wanx-v1` 与 `FilmConcurrentRequest` 示例，仓库内没有调用点。线上文生图走 `dashscope_client` / `DashScopeProvider`，图生视频走 `video_adapter.DashScopeFilmProvider`。
+
+#### `generate_image`（残留）
 
 **文件**: [backend/app/utils/inpaint_utils.py](backend/app/utils/inpaint_utils.py) 第 274-304 行
 
@@ -168,9 +169,9 @@ response = ImageSynthesis.call(
 )
 ```
 
-**状态**: 代码存在但未在任何业务逻辑中被调用，仅作保留。
+**状态**: 无调用点。不要把它当成「wanx-v1 未接入」的证据。
 
-#### `generate_video`（wan2.7-i2v 视频）
+#### `generate_video`（残留的 Film API）
 
 **文件**: [backend/app/utils/inpaint_utils.py](backend/app/utils/inpaint_utils.py) 第 307-351 行
 
@@ -181,7 +182,7 @@ request = FilmConcurrentRequest(model="wan2.7-i2v", prompt=prompt)
 task_response = dashscope.Film.call(request=request)
 ```
 
-**状态**: 代码存在但未在任何业务逻辑中被调用，仅作保留。实际视频生成通过 `video_adapter.py` 中的 `DashScopeFilmProvider` 实现。
+**状态**: 无调用点。实际视频生成是 `VideoSynthesis` + `wan2.5-i2v-preview`。
 
 ### 2.4 配置存储
 

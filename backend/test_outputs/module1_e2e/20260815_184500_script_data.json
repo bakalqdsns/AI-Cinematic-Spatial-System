@@ -1,0 +1,69 @@
+{
+  "normalized_script": "\n场景1\n内景。教室 - 傍晚\n画面：\n放学后的教室。阳光从西侧的窗户斜射进来，在课桌上投下长长的橙色光斑。\n林知夏（17岁，短发，校服，神情安静）独自坐在靠窗倒数第二排的位置。她面前摊着一本数学练习册，老师的脚步声从走廊经过。林知夏迅速合上练习册。\n特写：练习册的空白页上，画着一个未完成的漫画肖像——是一个女孩子的半身像，短发、校服，眼睛画得很细致，但嘴和下半张脸只勾了轮廓线，没有完成。\n林知夏（低声，声音沙哑）：\n\"……我想起来了。\"\n",
+  "script_data": {
+    "title": "Untitled",
+    "genre": "drama",
+    "logline": "场景1 内景。教室 - 傍晚 画面： 放学后的教室。阳光从西侧的窗户斜射进来，在课桌上投下长长的橙色光斑。 林知夏（1",
+    "characters": [
+      {
+        "id": "char-1",
+        "name": "林知夏",
+        "gender": "",
+        "age": "",
+        "personality": "",
+        "visual_prompt": "",
+        "reference_image": null
+      }
+    ],
+    "scenes": [
+      {
+        "id": "scene-1",
+        "location": "Unknown Location",
+        "time": "Day",
+        "atmosphere": "",
+        "estimated_shots": 4,
+        "visual_prompt": ""
+      }
+    ],
+    "story_paragraphs": [
+      {
+        "id": "para-1",
+        "text": "场景1",
+        "scene_ref_id": "scene-1",
+        "paragraph_type": "action",
+        "speaker_id": "",
+        "emotion": "",
+        "contains_action": true
+      },
+      {
+        "id": "para-2",
+        "text": "内景。教室 - 傍晚",
+        "scene_ref_id": "scene-1",
+        "paragraph_type": "action",
+        "speaker_id": "",
+        "emotion": "",
+        "contains_action": true
+      },
+      {
+        "id": "para-3",
+        "text": "画面： 放学后的教室。阳光从西侧的窗户斜射进来，在课桌上投下长长的橙色光斑。 林知夏（17岁，短发，校服，神情安静）独自坐在靠窗倒数第二排的位置。她面前摊着一本数学练习册，老师的脚步声从走廊经过。林知夏迅速合上练习册。",
+        "scene_ref_id": "scene-1",
+        "paragraph_type": "dialogue",
+        "speaker_id": "",
+        "emotion": "",
+        "contains_action": true
+      },
+      {
+        "id": "para-4",
+        "text": "特写：练习册的空白页上，画着一个未完成的漫画肖像——是一个女孩子的半身像，短发、校服，眼睛画得很细致，但嘴和下半张脸只勾了轮廓线，没有完成。 林知夏（低声，声音沙哑）： \"……我想起来了。\"",
+        "scene_ref_id": "scene-1",
+        "paragraph_type": "dialogue",
+        "speaker_id": "",
+        "emotion": "",
+        "contains_action": true
+      }
+    ],
+    "language": "chinese"
+  },
+  "project_id": "20260815_104510_Untitled"
+}

@@ -1,15 +1,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings service — fetches / mutates runtime settings on the AICSS backend.
-// Mirrors the OpenAPI contract of `app/endpoints_settings.py`.
+//
+// Thin wrapper around the generated OpenAPI client (`generated/settings` and
+// `generated/cloudProviders`). The settings endpoints return free-form JSON
+// (`Record<string, any>`) per the OpenAPI spec, so the wrappers below just
+// cast the response to the existing frontend interfaces — no field mapping
+// required (the wire format is already camelCase / snake_case mixed exactly
+// as the existing `RuntimeSettings` interface expects).
 // ─────────────────────────────────────────────────────────────────────────────
-import axios from 'axios';
-
-const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
-
-const client = axios.create({
-  baseURL: DEFAULT_BACKEND,
-  timeout: 30_000,
-});
+import { generatedClient } from './generatedClient';
 
 export interface ProviderConfig {
   name: string;
@@ -92,13 +91,13 @@ export type SettingsPatch = Partial<{
 }>;
 
 export async function fetchSettings(): Promise<RuntimeSettings> {
-  const resp = await client.get<RuntimeSettings>('/api/aicss/settings');
-  return resp.data;
+  return generatedClient.settings.getSettingsApiAicssSettingsGet() as unknown as Promise<RuntimeSettings>;
 }
 
 export async function updateSettings(patch: SettingsPatch): Promise<RuntimeSettings> {
-  const resp = await client.post<RuntimeSettings>('/api/aicss/settings', patch);
-  return resp.data;
+  return generatedClient.settings.postSettingsApiAicssSettingsPost({
+    requestBody: patch as any,
+  }) as unknown as Promise<RuntimeSettings>;
 }
 
 // ── Provider registry API ──────────────────────────────────────────────────────
@@ -113,13 +112,26 @@ export interface ProviderTypeInfo {
 }
 
 export async function listProviderTypes(): Promise<ProviderTypeInfo[]> {
-  const resp = await client.get<ProviderTypeInfo[]>('/api/aicss/providers/types');
-  return resp.data;
+  return generatedClient.cloudProviders.getProviderTypesApiAicssProvidersTypesGet() as unknown as Promise<ProviderTypeInfo[]>;
 }
 
 export async function pingProvider(component: string, name: string): Promise<boolean> {
-  const resp = await client.post<{ alive: boolean }>('/api/aicss/providers/ping', {
-    component, name,
-  });
-  return resp.data.alive;
+  const resp = await generatedClient.cloudProviders.pingProviderApiAicssProvidersPingPost({
+    requestBody: { component, name } as any,
+  }) as { alive: boolean };
+  return resp.alive;
+}
+
+export interface SettingsStoreInfo {
+  path: string;
+  override_count: number;
+  error?: string;
+}
+
+export async function fetchSettingsStore(): Promise<SettingsStoreInfo> {
+  return generatedClient.settings.getSettingsStoreApiAicssSettingsStoreGet() as unknown as Promise<SettingsStoreInfo>;
+}
+
+export async function resetSettingsStore(): Promise<{ success: boolean; message: string }> {
+  return generatedClient.settings.resetSettingsStoreApiAicssSettingsStoreDelete() as unknown as Promise<{ success: boolean; message: string }>;
 }

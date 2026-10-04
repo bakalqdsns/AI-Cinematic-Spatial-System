@@ -803,7 +803,7 @@ def generate_character_action_sequences(
             # Build curve from paragraph emotions
             raw_curve = [
                 EMOTION_INTENSITY.get(
-                    para_map.get(s.scene_id, StoryParagraph("", "", "", "", "", "action", "", "", False)).emotion,
+                    para_map.get(s.scene_id, StoryParagraph()).emotion,
                     0.5,
                 )
                 for s in char_shots

@@ -94,6 +94,40 @@ async def post_settings(payload: SettingsUpdate) -> dict:
         raise HTTPException(status_code=500, detail=f"Failed to update settings: {exc}")
 
 
+@router.get("/store")
+async def get_settings_store() -> dict:
+    """Return the location of the on-disk settings store + override count.
+
+    Used by the frontend to show "your preferences are persisted at …" and
+    to provide a "reset to defaults" button.
+    """
+    try:
+        from app.services.settings_store import settings_file_path, load_overrides
+        return {
+            "path": settings_file_path(),
+            "override_count": len(load_overrides()),
+        }
+    except Exception as exc:
+        _log.warning("[settings] store lookup failed: %s", exc)
+        return {"path": "", "override_count": 0, "error": str(exc)}
+
+
+@router.delete("/store")
+async def reset_settings_store() -> dict:
+    """Delete the persisted overrides file. Runtime settings are not changed
+    (use a settings update with explicit values to revert them)."""
+    try:
+        from app.services.settings_store import SETTINGS_FILE, save_overrides
+        if SETTINGS_FILE.exists():
+            SETTINGS_FILE.unlink()
+        # Also re-write an empty file so subsequent loads return clean state.
+        save_overrides({})
+        return {"success": True, "message": "Persisted settings reset."}
+    except Exception as exc:
+        _log.warning("[settings] reset failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ── Cloud provider registry endpoints ──────────────────────────────────────────
 
 provider_router = APIRouter(prefix="/api/aicss/providers", tags=["Cloud Providers"])

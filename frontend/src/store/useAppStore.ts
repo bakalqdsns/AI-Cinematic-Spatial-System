@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import { DEFAULT_DEPTH_SPLIT_THRESHOLDS } from '../utils/depthSplit';
 import { DEFAULT_PAPER_DIORAMA_PARAMS } from '../types';
+import type { LightingPreset } from '../lighting/presets';
 import type {
   AicssResult,
   LayerAssignments,
@@ -130,6 +131,14 @@ interface AppState {
   parallaxEnabled: boolean;
   parallaxIntensity: number;
 
+  // Lighting (T13) — 情绪→光照预设。Viewer3D 的 PaperDioramaLighting 据此渲染。
+  // lightingPreset: 选中的预设名（与后端 presets/lighting/<name>.json 同名），
+  //                null 时回退到硬编码默认灯。
+  // lightingCustom: 用户在 LightingPanel 中微调后的预设覆盖（含 key/fill/rim
+  //                 三段完整 LightSpec）。Viewer3D 优先使用 custom，其次 preset。
+  lightingPreset: string | null;
+  lightingCustom: LightingPreset | null;
+
   // Auto-generate state (one-click pipeline)
   autoGenPhase: 'idle' | 'analyzing' | 'splitting' | 'generating' | 'done' | 'error';
   autoGenProgress: number;
@@ -238,6 +247,10 @@ interface AppState {
   setParallaxEnabled: (enabled: boolean) => void;
   setParallaxIntensity: (intensity: number) => void;
 
+  // Lighting (T13)
+  setLightingPreset: (name: string | null) => void;
+  setLightingCustom: (preset: LightingPreset | null) => void;
+
   setVlmHint: (hint: string | null) => void;
   setAutoGenPhase: (phase: AppState['autoGenPhase']) => void;
   setAutoGenProgress: (progress: number) => void;
@@ -309,6 +322,8 @@ const initialState = {
   outlineEnabled: true,
   parallaxEnabled: false,
   parallaxIntensity: 0.5,
+  lightingPreset: null as string | null,
+  lightingCustom: null as LightingPreset | null,
   autoGenPhase: 'idle' as const,
   autoGenProgress: 0,
   autoGenError: null,
@@ -477,9 +492,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   undoLastStripStep: () =>
     set((state) => {
       if (state.stripStack.length === 0) return {};
+      const removed = state.stripStack[state.stripStack.length - 1];
       const stack = state.stripStack.slice(0, -1);
-      // Restore currentImage* to the previous step's baseImageDataUrl.
-      // If stack is now empty, restore to originalImageUrl.
+      // Restore currentImage* to the previous step's inpaint result (or original).
       const baseImageUrl =
         stack.length > 0
           ? stack[stack.length - 1].inpaintResultUrl
@@ -488,21 +503,36 @@ export const useAppStore = create<AppState>((set, get) => ({
         stack.length > 0
           ? stack[stack.length - 1].inpaintResultUrl.split(',')[1] || ''
           : state.originalImageBase64;
+      // Also drop the billboard baked for this peel step.
+      const nextBillboards = { ...state.billboardAssets };
+      if (removed?.regionId) {
+        delete nextBillboards[removed.regionId];
+      }
       return {
         stripStack: stack,
         currentImageUrl: baseImageUrl,
         currentImageBase64: baseImageBase64,
+        billboardAssets: nextBillboards,
       };
     }),
 
   resetStripStack: () =>
-    set((state) => ({
-      stripStack: [],
-      currentImageUrl: state.originalImageUrl,
-      currentImageBase64: state.originalImageBase64,
-      drawMode: 'idle',
-      drawPoints: [],
-    })),
+    set((state) => {
+      const nextBillboards = { ...state.billboardAssets };
+      for (const step of state.stripStack) {
+        if (step.regionId) {
+          delete nextBillboards[step.regionId];
+        }
+      }
+      return {
+        stripStack: [],
+        currentImageUrl: state.originalImageUrl,
+        currentImageBase64: state.originalImageBase64,
+        drawMode: 'idle' as const,
+        drawPoints: [],
+        billboardAssets: nextBillboards,
+      };
+    }),
 
   setStripping: (v) => set({ isStripping: v }),
   setStripError: (msg) => set({ stripError: msg }),
@@ -644,6 +674,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   setParallaxEnabled: (enabled) => set({ parallaxEnabled: enabled }),
 
   setParallaxIntensity: (intensity: number) => set({ parallaxIntensity: intensity }),
+
+  // Lighting (T13)
+  setLightingPreset: (name) => set({ lightingPreset: name }),
+  setLightingCustom: (preset) => set({ lightingCustom: preset }),
 
   setAutoGenPhase: (phase) => set({ autoGenPhase: phase }),
   setAutoGenProgress: (progress) => set({ autoGenProgress: progress }),

@@ -6,12 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "gen:api": "node scripts/gen-api.mjs",
+    "check:schema": "node scripts/check-schema.mjs"
   },
   "devDependencies": {
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.184.1",
     "@vitejs/plugin-react": "^6.0.2",
+    "openapi-typescript-codegen": "^0.29.0",
     "typescript": "~6.0.2",
     "vite": "^8.0.12"
   },

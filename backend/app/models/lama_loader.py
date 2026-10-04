@@ -78,8 +78,11 @@ class LaMaModel:
                 return matches[0]
         return None
 
-    def ensure_downloaded(self) -> str:
+    def ensure_downloaded(self, progress_key: str | None = None) -> str:
         """Ensure the LaMa checkpoint is on disk; downloads via simple_lama_inpainting's helper if missing.
+
+        progress_key: when supplied, real-time download progress is pushed to
+                      the download-jobs registry under this key.
 
         Returns the absolute path to the cached checkpoint.
         """
@@ -107,9 +110,20 @@ class LaMaModel:
                 resp = _requests.get(DEFAULT_LAMA_URL, timeout=timeout_s, stream=True)
                 resp.raise_for_status()
                 downloaded_path = os.path.join(self.checkpoint_dir, LAMA_FILENAME + ".part")
+                total = int(resp.headers.get("Content-Length", 0))
+                written = 0
                 with open(downloaded_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=8192):
+                        if not chunk:
+                            continue
                         f.write(chunk)
+                        written += len(chunk)
+                        if progress_key and (written % (1 << 20) < 8192):
+                            try:
+                                from app.services.download_progress import report_file_progress
+                                report_file_progress(progress_key, LAMA_FILENAME, written, total)
+                            except Exception:
+                                pass
                 os.replace(downloaded_path, os.path.join(self.checkpoint_dir, LAMA_FILENAME))
                 print(f"[LaMa] Downloaded: {os.path.join(self.checkpoint_dir, LAMA_FILENAME)}")
                 return os.path.join(self.checkpoint_dir, LAMA_FILENAME)

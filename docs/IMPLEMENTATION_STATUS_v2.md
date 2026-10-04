@@ -3,7 +3,7 @@
 > 本文档详细记录 AICSS 系统中**已完全实施**的各功能模块，包括数据模型、API 协议、前后端实现细节、目录结构及调用流程。
 >
 > 适用版本：v2
-> 最后更新：2026-07-21
+> 最后更新：2026-09-26（对照 `PROJECT_STATUS.md` 与当前代码核对；完成度以该基准文件为准，本文不改基准）
 
 ---
 
@@ -44,33 +44,53 @@
 backend/
 ├── app/
 │   ├── main.py                          # FastAPI 入口，路由挂载，模型启动加载
-│   ├── config.py                         # 全局配置（设备/模型路径/工作空间）
-│   ├── endpoints.py                      # 核心分析 API（analyze/depth/segment/layers…）
-│   ├── endpoints_projects.py             # 项目管理 API
-│   ├── endpoints_sequence.py             # 序列分析 API
-│   ├── endpoints_shots.py                # 镜头管理 API（v2）
-│   ├── endpoints_script.py               # 剧本/分镜/动作 API（v2）
-│   ├── endpoints_mesh.py                # 3D mesh 导出 API（v2.1）
+│   ├── config.py                        # 全局配置（设备/模型路径/工作空间）
+│   ├── endpoints.py                     # 核心分析 API（analyze/depth/segment/layers/inpaint…）
+│   ├── endpoints_projects.py            # 项目管理 API
+│   ├── endpoints_sequence.py            # 序列分析 API
+│   ├── endpoints_shots.py               # 镜头管理 + shot 归档 API（v2）
+│   ├── endpoints_script.py              # 剧本/分镜/动作/相机路径 API（v2）
+│   ├── endpoints_mesh.py                # 3D mesh 导出 API
+│   ├── endpoints_layers.py              # 图层 PNG 导出（5 层：sky/background/midground/foreground/ground）
+│   ├── endpoints_models.py              # 模型状态与下载
+│   ├── endpoints_settings.py            # 运行时配置
+│   ├── endpoints_llm.py                 # 本地 llama-server 控制
+│   ├── providers/                       # DashScope / OpenAI 兼容 Provider 注册表
 │   ├── services/
-│   │   ├── script_parser.py             # 剧本解析服务（两段式 LLM pipeline）
-│   │   ├── shot_generator.py            # 分镜生成服务
-│   │   ├── character_generator.py        # 角色资产生成
-│   │   ├── motion_extractor.py          # 动作视频→帧→抠像 pipeline
-│   │   ├── project_store.py             # 持久化存储服务
-│   │   ├── project_store_mesh.py       # 3D mesh 持久化服务（v2.1）
-│   │   └── mesh_exporter.py            # Blender Headless 导出服务（v2.1）
+│   │   ├── script_parser.py             # 剧本解析（两段式 LLM）
+│   │   ├── shot_generator.py            # 分镜生成
+│   │   ├── scene_generator.py           # 场景关键帧
+│   │   ├── auto_scene_view.py           # 场景三关键帧批量
+│   │   ├── auto_three_view.py           # 角色三视图批量
+│   │   ├── character_generator.py       # 角色资产生成
+│   │   ├── motion_extractor.py          # 动作视频→帧→抠像（含绿幕、羽化、首尾帧一致性）
+│   │   ├── camera_path_generator.py     # 运镜 → 相机路径
+│   │   ├── layer_exporter.py            # 5 层 RGBA 导出
+│   │   ├── occlusion_holes.py           # 自动遮挡空洞
+│   │   ├── shot_archiver.py             # shot 级 ZIP 归档
+│   │   ├── project_store.py             # 持久化（含 v3 角色/场景子目录）
+│   │   ├── project_store_mesh.py        # mesh 持久化
+│   │   ├── mesh_exporter.py             # Blender Headless 导出（含 strip-stack / regions / 位移厚度）
+│   │   ├── settings_manager.py          # 运行时配置
+│   │   ├── settings_store.py            # ~/.aicss/settings.json
+│   │   ├── settings_observer.py         # model_mode 级联
+│   │   ├── download_jobs.py             # 模型下载任务
+│   │   └── download_progress.py         # 下载进度
 │   ├── models/
-│   │   ├── model_manager.py             # 模型加载器（单例）
-│   │   ├── depth_loader.py              # DepthAnything-V2-Large
-│   │   ├── sam2_loader.py               # SAM2 自动分割 + 边缘贴合
-│   │   ├── grounding_dino_loader.py     # Grounding-DINO 零样本检测
-│   │   └── qwen3vl_loader.py            # Qwen3-VL-4B-Instruct
+│   │   ├── model_manager.py
+│   │   ├── depth_loader.py
+│   │   ├── sam2_loader.py
+│   │   ├── grounding_dino_loader.py
+│   │   ├── qwen3vl_loader.py
+│   │   ├── lama_loader.py               # LaMa（在 models/，不在 utils/）
+│   │   └── z_image_loader.py
 │   └── utils/
-│       ├── spatial_utils.py             # 空间分层、遮挡关系推断
-│       ├── inpaint_utils.py             # WanEdit 图像修复 / LaMa 本地修复
-│       ├── lama_loader.py               # LaMa 本地图像修复模型
-│       └── paper_diorama.py             # 纸片风格纹理生成
-└── logs/                                # 运行日志（自动创建）
+│       ├── spatial_utils.py
+│       ├── inpaint_utils.py
+│       └── paper_diorama.py
+├── blender/addons/aicss_scene_builder/  # Blender 插件（导入图层、纸张材质、灯光、相机）
+├── scripts/archive_shot.py              # 分镜归档 CLI
+└── logs/
 ```
 
 ### 1.3 前端目录结构
@@ -78,15 +98,19 @@ backend/
 ```
 frontend/src/
 ├── components/
-│   ├── ScriptEditor.tsx                 # 剧本编辑器（4-tab UI）
-│   ├── Viewer3D.tsx                    # Three.js 3D 查看器
+│   ├── ScriptEditor.tsx                 # 剧本编辑器（含 ScenesTab / Storyboard 归档与分层）
+│   ├── Viewer3D.tsx                    # Three.js 3D 查看器（含相机路径播放）
+│   ├── CameraPathPlayer.tsx           # 运镜路径播放
+│   ├── ShotPlaybackControls.tsx        # 运镜播放控制
+│   ├── SettingsPanel.tsx               # 运行时设置 + ProviderRegistry
 │   ├── ExportPanel.tsx                 # 导出面板
 │   ├── DepthSplitPanel.tsx             # 深度分层面板
 │   └── ...
 ├── services/
-│   ├── scriptService.ts                # 剧本 API 客户端
-│   ├── aicssService.ts                 # AICSS 分析 API 客户端
-│   └── sequenceService.ts              # 序列 API 客户端
+│   ├── scriptService.ts                # 剧本 / 分层 / 归档 API
+│   ├── aicssService.ts                 # AICSS 分析 API
+│   ├── settingsService.ts              # 设置 API
+│   └── sequenceService.ts              # 序列 API
 ├── store/
 │   ├── useAppStore.ts                  # 全局状态（API key 等）
 │   ├── useScriptStore.ts               # 剧本/分镜状态（Zustand）
@@ -451,7 +475,7 @@ generate_motion_sequence()
 
 - **ffmpeg 依赖**：必须在系统 PATH 中可用，否则视频抽帧失败
 - **人物选择 heuristic**：使用最大面积 mask，非真实人物检测，可能在复杂场景中选错
-- **首尾帧一致性**：当前未实现首尾帧一致性检查
+- **首尾帧一致性**：已实现。`motion_extractor.verify_keyframe_consistency()` 使用三级策略（NCC ≥ 0.70 / MSE ≤ 0.30 / ORB），结果写入 `MotionSequence` 并经 `serialize_motion_sequence()` 暴露。
 
 ---
 
@@ -861,13 +885,33 @@ class ArtifactFile:
 | GET | `/api/aicss/v2/meshes/{id}/download` | 下载 mesh 文件 |
 | DELETE | `/api/aicss/v2/meshes/{id}` | 删除 mesh 导出 |
 
+### 8.8 基准文件已记录、本文早先索引未列出的端点
+
+下列端点在当前代码中已挂载，完成度见 `PROJECT_STATUS.md`：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/aicss/layers/export` | 5 层 RGBA PNG（含 ground） |
+| POST | `/api/aicss/occlusion-holes` | 自动遮挡空洞 |
+| POST | `/api/aicss/v2/scripts/camera-path` | 运镜数据 → 相机路径 |
+| GET | `/api/aicss/v2/scripts/characters/batch-status` | 角色三视图批量状态 |
+| GET | `/api/aicss/v2/scripts/scenes/batch-status` | 场景关键帧批量状态 |
+| POST | `/api/aicss/v2/scripts/scenes/generate-asset` | 场景资产生成 |
+| GET/POST | `/api/aicss/v2/projects/{pid}/shots/{sid}/archive` | shot ZIP 归档 |
+| GET | `/api/aicss/models/status` | 模型下载状态与进度 |
+| POST | `/api/aicss/models/download/{name}` | 触发模型下载 |
+| GET/POST | `/api/aicss/settings` | 读取 / 热更新运行时配置（更新为 POST，不是 PATCH） |
+| GET/DELETE | `/api/aicss/settings/store` | 持久化路径查询 / 重置 |
+
+项目目录在 v1/v2 之外已有 v3：`characters/<角色名>/<动作>/` 与 `scenes/<场景名>/`。归档 CLI 为 `backend/scripts/archive_shot.py`。
+
 ---
 
 ## 9. 前端组件说明
 
 ### 9.1 ScriptEditor（`ScriptEditor.tsx`）
 
-剧本编辑器主组件，托管 4 个标签页：
+剧本编辑器主组件。除下列 4 个标签外，当前代码还有场景标签（ScenesTab）：关键帧网格、`生成分层`（`layerScene`）、以及分镜本上的「导出归档」。
 
 **标签页 1 — 剧本数据（ScriptTab）**
 

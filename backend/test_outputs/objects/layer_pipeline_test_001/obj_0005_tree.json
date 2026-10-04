@@ -1,0 +1,23 @@
+{
+  "object_id": "obj_tree_4",
+  "label": "tree",
+  "score": 0.3365088403224945,
+  "bbox": [
+    0,
+    276,
+    201,
+    558
+  ],
+  "depth_mean": 8.909016609191895,
+  "depth_min": 2.043823719024658,
+  "depth_max": 14.644323348999023,
+  "layer_hint": "background",
+  "z_offset": -12.0,
+  "cutout": "obj_0005_tree.png",
+  "meta": {
+    "area_px": 29824,
+    "vertical_pos": 0.54296875,
+    "sam_score": 0.3365088403224945,
+    "aspect": 0.7127659574468085
+  }
+}

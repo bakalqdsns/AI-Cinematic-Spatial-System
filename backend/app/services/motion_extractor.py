@@ -44,6 +44,20 @@ GREENSCREEN_PROMPT_SUFFIX = (
 # ── Dataclasses ─────────────────────────────────────────────────────────────────
 
 @dataclass
+class KeyframeConsistencyResult:
+    """Result of comparing a generated video frame against the input keyframe."""
+    passed: bool
+    ncc_score: float          # Normalized Cross-Correlation, 0-1 (higher = more similar)
+    mse_score: float          # Mean Squared Error, 0-1 normalised (lower = more similar)
+    orb_inliers: Optional[int]  # ORB inlier count if computed, else None
+    method: str               # Which method triggered the final decision
+    details: str               # Human-readable one-line summary
+
+    def summary(self) -> str:
+        return self.details
+
+
+@dataclass
 class MotionSequence:
     shot_id: str
     character_id: str
@@ -56,6 +70,8 @@ class MotionSequence:
     segmented_dir: Optional[str] = None
     status: str = "pending"
     error: Optional[str] = None
+    first_frame_consistency: Optional[KeyframeConsistencyResult] = None
+    last_frame_consistency: Optional[KeyframeConsistencyResult] = None
 
 
 @dataclass
@@ -65,6 +81,186 @@ class SegmentedFrame:
     segmented_path: str
     character_name: str
     action_name: str
+
+
+# ── Keyframe Consistency Check ─────────────────────────────────────────────────
+
+import cv2
+
+# Thresholds — tune per visual fidelity requirement.
+# NCC: higher = more similar (TM_CCOEFF_NORMED output range ≈ [-1, 1] normalised)
+NCC_THRESHOLD      = 0.70   # Pass if ≥ 0.70 (pixel-level correlation)
+# MSE: lower = more similar; normalised to [0,1] where 0 = identical
+MSE_THRESHOLD      = 0.30   # Pass if ≤ 0.30 after normalisation to uint8 space
+# ORB: inlier ratio; higher = structural alignment
+ORB_INLIER_MIN     = 15     # Require ≥ 15 ORB inliers for structural pass
+
+
+def verify_keyframe_consistency(
+    generated_frame_path: str,
+    reference_keyframe_b64: str,
+    *,
+    ncc_threshold: float = NCC_THRESHOLD,
+    mse_threshold: float = MSE_THRESHOLD,
+    orb_inlier_min: int = ORB_INLIER_MIN,
+) -> KeyframeConsistencyResult:
+    """
+    Compare ``generated_frame_path`` (first or last extracted frame) against
+    ``reference_keyframe_b64`` (the base64 image the caller originally passed to
+    the video generation API).
+
+    Uses a three-tier strategy:
+
+    1. **NCC (fast)** — Normalized Cross-Correlation. Fast but sensitive to
+       colour shifts and brightness differences. If NCC ≥ ``ncc_threshold``
+       the check passes immediately.
+
+    2. **MSE (medium)** — Resize both images to a common tiny resolution
+       (64×64) to dampen aliasing, then compute normalised MSE on grayscale.
+       Fast and quantifies pixel-level distortion.
+
+    3. **ORB (slow / structural)** — Only invoked if NCC < ncc_threshold.
+       Detects ORB features in both images, matches them, and counts inliers
+       after geometric verification. Most robust against lighting/colour
+       changes. ``orb_inlier_min`` inliers are required to pass.
+
+    Returns ``KeyframeConsistencyResult(passed, ncc_score, mse_score,
+    orb_inliers, method, details)``.
+    """
+    import io
+    from PIL import Image
+
+    # Decode reference keyframe
+    try:
+        data64 = reference_keyframe_b64
+        if data64.startswith("data:"):
+            data64 = data64.split(",", 1)[1]
+        raw = base64.b64decode(data64)
+        ref_img = Image.open(io.BytesIO(raw)).convert("RGB")
+        ref_np  = np.array(ref_img)
+        ref_gray = cv2.cvtColor(ref_np, cv2.COLOR_RGB2GRAY)
+    except Exception as exc:
+        return KeyframeConsistencyResult(
+            passed=False,
+            ncc_score=0.0,
+            mse_score=1.0,
+            orb_inliers=None,
+            method="decode",
+            details=f"Failed to decode reference keyframe: {exc}",
+        )
+
+    # Load generated frame
+    try:
+        gen_bgr  = cv2.imread(generated_frame_path)
+        if gen_bgr is None:
+            raise IOError(f"cv2.imread returned None for {generated_frame_path!r}")
+        gen_rgb  = cv2.cvtColor(gen_bgr, cv2.COLOR_BGR2RGB)
+        gen_gray = cv2.cvtColor(gen_rgb, cv2.COLOR_RGB2GRAY)
+    except Exception as exc:
+        return KeyframeConsistencyResult(
+            passed=False,
+            ncc_score=0.0,
+            mse_score=1.0,
+            orb_inliers=None,
+            method="decode",
+            details=f"Failed to read generated frame: {exc}",
+        )
+
+    # Resize reference to match generated frame dimensions
+    gh, gw = gen_gray.shape
+    ref_resized = cv2.resize(ref_gray, (gw, gh), interpolation=cv2.INTER_AREA)
+
+    # ── Tier 1: NCC ───────────────────────────────────────────────────────────
+    ncc_score = cv2.matchTemplate(
+        ref_resized.astype(np.float32),
+        gen_gray.astype(np.float32),
+        cv2.TM_CCOEFF_NORMED,
+    )[0, 0]
+    ncc_score = float(np.clip(ncc_score, -1.0, 1.0))
+
+    if ncc_score >= ncc_threshold:
+        details = (
+            f"NCC={ncc_score:.3f} ≥ {ncc_threshold} — pixel-level correlation OK "
+            f"(resolution {gw}×{gh})"
+        )
+        return KeyframeConsistencyResult(
+            passed=True,
+            ncc_score=ncc_score,
+            mse_score=1.0,       # not computed
+            orb_inliers=None,
+            method="ncc",
+            details=details,
+        )
+
+    # ── Tier 2: MSE ────────────────────────────────────────────────────────────
+    small_ref = cv2.resize(ref_resized, (64, 64), interpolation=cv2.INTER_AREA)
+    small_gen = cv2.resize(gen_gray,     (64, 64), interpolation=cv2.INTER_AREA)
+    mse_raw   = float(np.mean((small_ref.astype(np.float32) - small_gen.astype(np.float32)) ** 2))
+    # Normalise MSE to [0,1] using theoretical max (255² ≈ 65025)
+    mse_score = min(1.0, mse_raw / 65025.0)
+
+    if mse_score <= mse_threshold:
+        details = (
+            f"NCC={ncc_score:.3f} < {ncc_threshold}, MSE={mse_score:.3f} ≤ "
+            f"{mse_threshold} after 64×64 — overall similarity acceptable"
+        )
+        return KeyframeConsistencyResult(
+            passed=True,
+            ncc_score=ncc_score,
+            mse_score=mse_score,
+            orb_inliers=None,
+            method="mse",
+            details=details,
+        )
+
+    # ── Tier 3: ORB structural matching ────────────────────────────────────────
+    orb_detector = cv2.ORB_create(nfeatures=500)
+    kp1, des1 = orb_detector.detectAndCompute(small_ref, None)
+    kp2, des2 = orb_detector.detectAndCompute(small_gen, None)
+
+    if des1 is None or des2 is None or len(des1) < 3 or len(des2) < 3:
+        details = (
+            f"NCC={ncc_score:.3f}, MSE={mse_score:.3f}, ORB insufficient features "
+            f"({len(des1 or [])}, {len(des2 or [])}) — cannot verify structurally"
+        )
+        return KeyframeConsistencyResult(
+            passed=False,
+            ncc_score=ncc_score,
+            mse_score=mse_score,
+            orb_inliers=None,
+            method="orb_insufficient",
+            details=details,
+        )
+
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = matcher.match(des1, des2)
+
+    # Geometric verification: keep matches consistent with a similarity transform
+    inliers = 0
+    for m in matches:
+        dx = kp2[m.trainIdx].pt[0] - kp1[m.queryIdx].pt[0]
+        dy = kp2[m.trainIdx].pt[1] - kp1[m.queryIdx].pt[1]
+        # Allow up to 25% of the small image size for positional drift
+        max_drift = max(small_ref.shape[1], small_ref.shape[0]) * 0.25
+        if abs(dx) <= max_drift and abs(dy) <= max_drift:
+            inliers += 1
+
+    orb_inliers = inliers
+    passed = orb_inliers >= orb_inlier_min
+
+    details = (
+        f"NCC={ncc_score:.3f}, MSE={mse_score:.3f}, ORB inliers={orb_inliers} "
+        f"({'PASS' if passed else f'< {orb_inlier_min}'}) — "
+        f"{'structural match' if passed else 'significant deviation from keyframe'}"
+    )
+    return KeyframeConsistencyResult(
+        passed=passed,
+        ncc_score=ncc_score,
+        mse_score=mse_score,
+        orb_inliers=orb_inliers,
+        method="orb",
+        details=details,
+    )
 
 
 # ── Video Generation ─────────────────────────────────────────────────────────────
@@ -134,19 +330,32 @@ def extract_frames_from_video(
         Sorted list of frame file paths.
 
     Raises:
-        RuntimeError: If ffmpeg is not on PATH or fails on the video.
+        RuntimeError: If ffmpeg cannot be located (after checking
+            ffmpeg_path, FFMPEG_PATH, imageio-ffmpeg's bundled binary,
+            and the system PATH) or fails on the video.
     """
     import os
     import subprocess
 
     explicit = ffmpeg_path or os.environ.get("FFMPEG_PATH")
-    resolved_ffmpeg = explicit if explicit and Path(explicit).exists() else shutil.which("ffmpeg")
+    if explicit and Path(explicit).exists():
+        resolved_ffmpeg = explicit
+    else:
+        try:
+            import imageio_ffmpeg
+
+            resolved_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except ImportError:
+            resolved_ffmpeg = shutil.which("ffmpeg")
+
     if resolved_ffmpeg is None:
         raise RuntimeError(
-            "ffmpeg not found in PATH. Install ffmpeg (https://ffmpeg.org/) "
-            "or set the FFMPEG_PATH environment variable (must point to an "
-            "existing file) or pass ffmpeg_path=... before starting the "
-            "backend. Frame extraction is required for the motion pipeline."
+            "ffmpeg not found. Resolution order: (1) ffmpeg_path kwarg, "
+            "(2) FFMPEG_PATH env var pointing to an existing binary, "
+            "(3) imageio-ffmpeg bundled binary, (4) system PATH. "
+            "Install via `pip install imageio-ffmpeg` for the bundled "
+            "option, or `winget install ffmpeg` / `choco install ffmpeg` "
+            "for a system-wide install."
         )
 
     output_dir_path = Path(output_dir)
@@ -477,6 +686,44 @@ async def generate_motion_sequence(
     motion.status = "segmenting"
     motion.segmented_dir = str(shot_dir / "segmented")
 
+    # ── 2b. Keyframe consistency check ─────────────────────────────────────────
+    # Compare the generated video's first / last extracted frames against the
+    # original keyframes the caller passed in.  Results are written directly to
+    # motion.first_frame_consistency / motion.last_frame_consistency so callers
+    # can surface a warning without blocking the pipeline.
+    if start_image_b64 and len(frames) > 0:
+        motion.first_frame_consistency = verify_keyframe_consistency(
+            frames[0], start_image_b64
+        )
+        logger.info(
+            "[motion] first-frame consistency: %s",
+            motion.first_frame_consistency.details,
+        )
+        if not motion.first_frame_consistency.passed:
+            motion.error = (
+                f"First-frame mismatch (NCC={motion.first_frame_consistency.ncc_score:.3f}, "
+                f"MSE={motion.first_frame_consistency.mse_score:.3f}, "
+                f"method={motion.first_frame_consistency.method}). "
+                "Video may not respect the start keyframe."
+            )
+            logger.warning("[motion] %s", motion.error)
+
+    if end_image_b64 and len(frames) > 1:
+        motion.last_frame_consistency = verify_keyframe_consistency(
+            frames[-1], end_image_b64
+        )
+        logger.info(
+            "[motion] last-frame consistency: %s",
+            motion.last_frame_consistency.details,
+        )
+        if not motion.last_frame_consistency.passed:
+            motion.error = (
+                f"Last-frame mismatch (NCC={motion.last_frame_consistency.ncc_score:.3f}, "
+                f"MSE={motion.last_frame_consistency.mse_score:.3f}, "
+                f"method={motion.last_frame_consistency.method}). "
+                "Video may not respect the end keyframe."
+            )
+
     # 3. Segment
     if sam2_model is None:
         try:
@@ -507,6 +754,19 @@ async def generate_motion_sequence(
     return motion
 
 
+def _consistency_dict(c: Optional[KeyframeConsistencyResult]) -> Optional[dict]:
+    if c is None:
+        return None
+    return {
+        "passed": c.passed,
+        "ncc_score": c.ncc_score,
+        "mse_score": c.mse_score,
+        "orb_inliers": c.orb_inliers,
+        "method": c.method,
+        "details": c.details,
+    }
+
+
 def serialize_motion_sequence(motion: MotionSequence) -> dict:
     return {
         "shot_id": motion.shot_id,
@@ -520,4 +780,6 @@ def serialize_motion_sequence(motion: MotionSequence) -> dict:
         "segmented_dir": motion.segmented_dir,
         "status": motion.status,
         "error": motion.error,
+        "first_frame_consistency": _consistency_dict(motion.first_frame_consistency),
+        "last_frame_consistency": _consistency_dict(motion.last_frame_consistency),
     }

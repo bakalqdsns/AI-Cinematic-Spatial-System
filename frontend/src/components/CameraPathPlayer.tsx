@@ -30,8 +30,8 @@ import {
   interpolateCameraPath,
   applyCameraKeyframe,
   type CameraKeyframe,
-  type PlaybackState,
 } from '../utils/cameraAnimation';
+import type { PlaybackState } from './ShotPlaybackControls';
 
 export interface CameraPathPlayerProps {
   shot: Shot | null;

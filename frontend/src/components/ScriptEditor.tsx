@@ -10,10 +10,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useMemo, useState } from 'react';
 import { useScriptStore } from '../store/useScriptStore';
+import { useAppStore } from '../store/useAppStore';
 import type {
   ScriptLanguage, Character, CharacterAsset, Shot,
   ScriptData, SceneAsset, Scene,
 } from '../types/script';
+import { TimelinePanel } from './timeline/TimelineEditor';
 
 const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
   { value: 'chinese', label: '中文' },
@@ -21,7 +23,7 @@ const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
   { value: 'japanese', label: '日本語' },
 ];
 
-type TabId = 'script' | 'storyboard' | 'characters' | 'scenes' | 'motion';
+type TabId = 'script' | 'storyboard' | 'characters' | 'scenes' | 'motion' | 'timeline';
 
 export const ScriptEditor: React.FC = () => {
   const {
@@ -54,6 +56,9 @@ export const ScriptEditor: React.FC = () => {
     resolveSceneVisualPrompts,
     selectedSceneId, selectScene,
     generateSceneAsset,
+    layerScene,
+    isLayeringScene,
+    layerErrors,
     projectId,
     isResolvingPrompts,
   } = useScriptStore();
@@ -83,6 +88,7 @@ export const ScriptEditor: React.FC = () => {
     { id: 'characters', label: '角色资产' },
     { id: 'scenes', label: '场景资产' },
     { id: 'motion', label: '动作序列' },
+    { id: 'timeline', label: '时间线' },
   ];
 
   return (
@@ -198,14 +204,18 @@ export const ScriptEditor: React.FC = () => {
         {activeTab === 'motion' && (
           <MotionTab shots={shots} parsedScript={parsedScript} />
         )}
+        {activeTab === 'timeline' && <TimelinePanel />}
         {activeTab === 'scenes' && (
           <ScenesTab
             parsedScript={parsedScript}
             sceneAssets={sceneAssets}
             isGeneratingSceneAsset={isGeneratingSceneAsset}
+            isLayeringScene={isLayeringScene}
+            layerErrors={layerErrors}
             selectedSceneId={selectedSceneId}
             onSelectScene={selectScene}
             onGenerateSceneAsset={generateSceneAsset}
+            onLayerScene={layerScene}
             onUpdatePrompt={updateSceneVisualPrompt}
             onResolvePrompt={resolveSceneVisualPrompts}
           />
@@ -364,7 +374,7 @@ const ScriptTab: React.FC<ScriptTabProps> = ({
                         <span>分镜 {shotCount || scene.estimatedShots || 0}</span>
                         {asset && (
                           <span className="text-emerald-400">
-                            ✓ {Object.keys(asset.keyframeImages || {}).filter(k => asset.keyframeImages?.[k]).length}/3 视图
+                            ✓ {Object.keys(asset.keyframeImages || {}).filter(k => asset.keyframeImages?.[k as 'wide' | 'closeup' | 'mood']).length}/3 视图
                           </span>
                         )}
                       </div>
@@ -429,6 +439,31 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState<Partial<Shot>>({});
+  const [archiving, setArchiving] = useState(false);
+  const [archiveMsg, setArchiveMsg] = useState<string | null>(null);
+  const projectId = useScriptStore((s) => s.projectId);
+
+  const handleArchiveShot = async (shot: Shot) => {
+    if (!projectId) {
+      setArchiveMsg('请先解析剧本以获得 projectId');
+      return;
+    }
+    setArchiving(true);
+    setArchiveMsg(null);
+    try {
+      const { archiveShot, downloadShotArchive } = await import('../services/scriptService');
+      // T13: pass the lighting preset selected in LightingPanel so the backend
+      // can stamp it into the shot archive manifest's `lightingPreset` field.
+      const lightingPreset = useAppStore.getState().lightingPreset;
+      const meta = await archiveShot(projectId, shot.id, shot.sceneId, lightingPreset);
+      await downloadShotArchive(projectId, shot.id, meta.fileName);
+      setArchiveMsg(`已打包 ${meta.fileName}（${meta.fileCount} 个文件）`);
+    } catch (err) {
+      setArchiveMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setArchiving(false);
+    }
+  };
 
   // ── Group shots by sceneId, preserving script's scene order ─────────────
   type ShotGroup = { sceneId: string; scene: Scene | undefined; shots: Shot[] };
@@ -633,24 +668,39 @@ const StoryboardTab: React.FC<StoryboardTabProps> = ({
                   </button>
                 </>
               ) : (
-                <button
-                  onClick={() => {
-                    setEditForm({
-                      shotSize: selectedShot.shotSize,
-                      cameraMovement: selectedShot.cameraMovement,
-                      durationSeconds: selectedShot.durationSeconds,
-                      actionSummary: selectedShot.actionSummary,
-                      dialogue: selectedShot.dialogue,
-                    });
-                    setIsEditing(true);
-                  }}
-                  className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
-                >
-                  编辑
-                </button>
+                <>
+                  <button
+                    onClick={() => {
+                      setEditForm({
+                        shotSize: selectedShot.shotSize,
+                        cameraMovement: selectedShot.cameraMovement,
+                        durationSeconds: selectedShot.durationSeconds,
+                        actionSummary: selectedShot.actionSummary,
+                        dialogue: selectedShot.dialogue,
+                      });
+                      setIsEditing(true);
+                    }}
+                    className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    onClick={() => { void handleArchiveShot(selectedShot); }}
+                    disabled={archiving || !projectId}
+                    data-testid="archive-shot"
+                    className="px-3 py-1 text-xs bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white rounded transition-colors"
+                    title={!projectId ? '需要 projectId' : '打包 Blender 导入 ZIP'}
+                  >
+                    {archiving ? '打包中…' : '导出归档'}
+                  </button>
+                </>
               )}
             </div>
           </div>
+
+          {archiveMsg && (
+            <p className="text-xs text-gray-400 mb-2 break-all">{archiveMsg}</p>
+          )}
 
           <div className="space-y-3 flex-1">
             {/* Shot size */}
@@ -1126,6 +1176,8 @@ interface ScenesTabProps {
   parsedScript: ScriptData | null;
   sceneAssets: Record<string, SceneAsset>;
   isGeneratingSceneAsset: Record<string, boolean>;
+  isLayeringScene: Record<string, boolean>;
+  layerErrors: Record<string, string>;
   selectedSceneId: string | null;
   onSelectScene: (id: string | null) => void;
   onGenerateSceneAsset: (
@@ -1136,13 +1188,16 @@ interface ScenesTabProps {
     visualPrompt: string,
     projectId?: string,
   ) => Promise<void>;
+  onLayerScene: (sceneId: string, source?: 'wide' | 'closeup' | 'mood') => Promise<void>;
   onUpdatePrompt: (sceneId: string, prompt: string) => void;
   onResolvePrompt: (sceneIds?: string[]) => Promise<void>;
 }
 
 const ScenesTab: React.FC<ScenesTabProps> = ({
   parsedScript, sceneAssets, isGeneratingSceneAsset,
+  isLayeringScene, layerErrors,
   selectedSceneId, onSelectScene, onGenerateSceneAsset,
+  onLayerScene,
   onUpdatePrompt, onResolvePrompt,
 }) => {
   const scenes = parsedScript?.scenes ?? [];
@@ -1210,6 +1265,8 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
         if (!scene) return null;
         const asset = sceneAssets[scene.id];
         const generating = !!isGeneratingSceneAsset[scene.id];
+        const layering = !!isLayeringScene[scene.id];
+        const layerError = layerErrors[scene.id] || '';
         const keyframes = ['wide', 'closeup', 'mood'] as const;
 
         // Resolve chain: parsedScript.scenes[i].visualPrompt (single source
@@ -1297,6 +1354,116 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
                       </div>
                     );
                   })}
+                </div>
+
+                {/* Module 3 — depth layer export (async endpoint). Source is the
+                    'wide' keyframe (the establishing shot — best for SAM2 and
+                    depth bucketing). Re-running simply overwrites the cached
+                    `asset.layeredImages`. */}
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-semibold text-gray-200">深度分层</h3>
+                    <button
+                      type="button"
+                      data-testid={`layer-scene-${scene.id}`}
+                      disabled={layering || !asset?.keyframeImages?.wide}
+                      onClick={() => onLayerScene(scene.id, 'wide')}
+                      className={`text-xs px-3 py-1.5 rounded transition-colors ${
+                        layering
+                          ? 'bg-cyan-900/40 text-cyan-300 cursor-wait'
+                          : asset?.layeredImages
+                          ? 'bg-gray-700 hover:bg-gray-600 text-gray-100'
+                          : 'bg-cyan-700 hover:bg-cyan-600 text-white'
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                      title={
+                        !asset?.keyframeImages?.wide
+                          ? '先生成 wide 关键帧后，才能生成分层'
+                          : layering
+                          ? '正在调用 POST /api/aicss/layers/export（DepthAnything 跑一次）'
+                          : asset?.layeredImages
+                          ? '重新生成分层（覆盖现有结果）'
+                          : '调 POST /api/aicss/layers/export 生成 4 张深度分层 PNG'
+                      }
+                    >
+                      {layering
+                        ? '分层中…'
+                        : asset?.layeredImages
+                        ? '重新分层'
+                        : '生成分层'}
+                    </button>
+                  </div>
+
+                  {/* Per-scene error (shown inline; doesn't clobber other scenes) */}
+                  {layerError && (
+                    <div
+                      data-testid={`layer-error-${scene.id}`}
+                      className="mb-2 text-xs text-red-400 bg-red-950/40 border border-red-900 rounded px-2 py-1"
+                    >
+                      分层失败：{layerError}
+                    </div>
+                  )}
+
+                  {asset?.layeredImages ? (
+                    <>
+                      {/* Layer preview grid */}
+                      <div
+                        data-testid={`layered-images-${scene.id}`}
+                        className="grid grid-cols-4 gap-2"
+                      >
+                        {(['sky', 'background', 'midground', 'foreground'] as const).map(name => {
+                          const layer = asset.layeredImages?.[name];
+                          const zEntry = asset.layeredImages?.zOffsets?.find(z => z.layer === name);
+                          return (
+                            <div key={name} className="text-center">
+                              <div className="text-xs text-gray-400 mb-1 capitalize">
+                                {name}
+                                {zEntry && (
+                                  <span
+                                    className="ml-1 text-[10px] text-gray-500"
+                                    title={`zMin=${zEntry.zMin}, zMax=${zEntry.zMax}`}
+                                  >
+                                    z={zEntry.zOffset.toFixed(1)}
+                                  </span>
+                                )}
+                              </div>
+                              {layer?.dataUri ? (
+                                <img
+                                  src={layer.dataUri}
+                                  alt={`${name} layer`}
+                                  className="w-full aspect-video object-cover rounded border border-gray-700 bg-checker"
+                                  style={{
+                                    backgroundImage:
+                                      "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><rect width='16' height='16' fill='%23444'/><rect width='8' height='8' fill='%23666'/><rect x='8' y='8' width='8' height='8' fill='%23666'/></svg>\")",
+                                  }}
+                                />
+                              ) : (
+                                <div className="w-full aspect-video bg-gray-800 border border-gray-700 rounded flex items-center justify-center text-gray-500 text-xs">
+                                  无
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Meta strip — tells the user which source + when */}
+                      <div className="mt-2 text-[10px] text-gray-500 flex gap-3 flex-wrap">
+                        {asset.layeredImages.source && (
+                          <span>源：<span className="text-gray-300">{asset.layeredImages.source}</span></span>
+                        )}
+                        {asset.layeredImages.width && asset.layeredImages.height && (
+                          <span>尺寸：<span className="text-gray-300">{asset.layeredImages.width}×{asset.layeredImages.height}</span></span>
+                        )}
+                        {asset.layeredImages.generatedAt && (
+                          <span>生成于：<span className="text-gray-300">{new Date(asset.layeredImages.generatedAt).toLocaleTimeString()}</span></span>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-gray-500 italic">
+                      尚未生成分层。点击"生成分层"调用模块 3（POST /api/aicss/layers/export），基于 wide 视图返回 4 张 RGBA PNG（天空 / 背景 / 中景 / 前景）。
+                    </div>
+                  )}
                 </div>
 
                 {/* Variations */}

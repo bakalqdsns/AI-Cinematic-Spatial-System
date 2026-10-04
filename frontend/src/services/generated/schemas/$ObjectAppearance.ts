@@ -1,0 +1,32 @@
+/* generated using openapi-typescript-codegen -- do not edit */
+/* istanbul ignore file */
+/* tslint:disable */
+/* eslint-disable */
+export const $ObjectAppearance = {
+  properties: {
+    frameId: {
+      type: 'string',
+      isRequired: true,
+    },
+    frameIndex: {
+      type: 'number',
+      isRequired: true,
+    },
+    localId: {
+      type: 'string',
+      isRequired: true,
+    },
+    bbox: {
+      type: 'BoundingBox',
+      isRequired: true,
+    },
+    depth: {
+      type: 'number',
+      isRequired: true,
+    },
+    matchConfidence: {
+      type: 'number',
+      isRequired: true,
+    },
+  },
+} as const;

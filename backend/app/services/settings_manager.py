@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any
 
 from app.config import settings
@@ -73,18 +74,105 @@ SENSITIVE_FIELDS = (
 )
 
 
+# ── Runtime values store ───────────────────────────────────────────────────────
+# `_runtime_values` is the single source of truth for runtime settings. It is
+# seeded lazily from `config.settings` defaults on first access (or explicitly
+# during the `lifespan` startup hook) and updated by `update_settings()`.
+# Consumers should read via `settings_manager.get(key)` rather than
+# `from app.config import settings; settings.<key>` so they observe live
+# updates without `config.settings` being mutated.
+#
+# This breaks the previous D-level content coupling where `update_settings()`
+# did `setattr(settings, key, value)` directly on the global singleton. The
+# `config.settings` instance is now treated as an immutable startup default
+# source only — its fields are never written after initialization.
+_runtime_values: dict[str, Any] = {}
+_runtime_initialized: bool = False
+_runtime_lock = threading.RLock()
+
+
+def _ensure_initialized() -> None:
+    """Seed `_runtime_values` from `config.settings` defaults on first call.
+
+    Idempotent and thread-safe. Subsequent calls are no-ops. After seeding,
+    `_runtime_values` holds a snapshot of every `RUNTIME_FIELDS` entry as it
+    was at startup (possibly overridden by `seed_overrides()` from disk).
+    """
+    global _runtime_initialized
+    if _runtime_initialized:
+        return
+    with _runtime_lock:
+        if _runtime_initialized:
+            return
+        for key in RUNTIME_FIELDS:
+            _runtime_values[key] = getattr(settings, key, None)
+        _runtime_initialized = True
+
+
+def get(key: str, default: Any = None) -> Any:
+    """Read a runtime setting by key.
+
+    Lookup order:
+      1. `_runtime_values` (the live runtime source of truth).
+      2. `getattr(settings, key, default)` — compatibility fallback for
+         fields outside `RUNTIME_FIELDS` (e.g. `image_checkpoint_dir`,
+         `llm_timeout`) that are still defined on `Settings` but never
+         hot-reloaded.
+
+    Consumers should always go through this function (or
+    `settings_manager.get_settings()`) instead of importing `config.settings`
+    directly, so they observe hot-reloaded values without the global
+    singleton being mutated.
+    """
+    _ensure_initialized()
+    if key in _runtime_values:
+        return _runtime_values[key]
+    return getattr(settings, key, default)
+
+
+def set_runtime_value(key: str, value: Any) -> None:
+    """Write a runtime value directly, bypassing observers and hot-reload.
+
+    Used by internal cascade observers (e.g. `ModelModeCascadeObserver`) that
+    need to update dependent settings without re-entering `update_settings()`.
+    External callers should use `update_settings()` instead.
+    """
+    _ensure_initialized()
+    with _runtime_lock:
+        _runtime_values[key] = value
+
+
+def seed_overrides(overrides: dict) -> int:
+    """Apply persisted user overrides at startup without triggering observers.
+
+    Called by `settings_store.apply_overrides()` during the `lifespan` startup
+    hook. Returns the number of overrides that actually changed a value.
+    """
+    _ensure_initialized()
+    applied = 0
+    with _runtime_lock:
+        for key, value in overrides.items():
+            if key not in RUNTIME_FIELDS:
+                continue
+            if _runtime_values.get(key) == value:
+                continue
+            _runtime_values[key] = value
+            applied += 1
+    return applied
+
+
 def _resolve_api_key(component_key: str) -> str:
     """Resolve the API key for a given DashScope component.
 
     Order of precedence:
-      1. The per-component field set via the Settings UI.
+      1. The per-component field set via the Settings UI (read from the
+         runtime values store so hot-reloaded keys take effect immediately).
       2. The generic ``DASHSCOPE_API_KEY`` env var (covers legacy deployments).
       3. Empty string — caller will surface a clear "missing key" error.
     """
-    from app.config import settings as _settings
-    val = getattr(_settings, component_key, "")
+    val = get(component_key, "")
     if val:
-        return val
+        return str(val)
     return os.getenv("DASHSCOPE_API_KEY", "")
 
 
@@ -106,9 +194,10 @@ def _coerce_value(key: str, value: Any) -> Any:
 
 def get_settings() -> dict:
     """Return the current runtime settings. Sensitive fields are masked."""
+    _ensure_initialized()
     result: dict[str, Any] = {}
     for key in RUNTIME_FIELDS:
-        value = getattr(settings, key, None)
+        value = _runtime_values.get(key, getattr(settings, key, None))
         if key in SENSITIVE_FIELDS and value:
             value = "***"
         if key == "providers" and isinstance(value, list):
@@ -131,15 +220,16 @@ def update_settings(updates: dict) -> dict:
 
     Unknown keys are silently ignored so the API is forward-compatible.
 
-    Side effect: notifies all observers registered via
-    ``services.settings_observer.register_observer`` of each effective change.
-    This lets consumers (LLM, ImageGen, CloudRouter) react to changes without
-    needing to poll `config.settings`. The legacy ``setattr(settings, ...)``
-    behaviour is preserved for backward compatibility — observers are additive.
+    State is held in the module-level `_runtime_values` dict — `config.settings`
+    is no longer mutated. Observers registered via
+    ``services.settings_observer.register_observer`` are notified of each
+    effective change so consumers (LLM, ImageGen, CloudRouter) can react
+    without polling any global singleton.
     """
     if not isinstance(updates, dict):
         raise ValueError("settings update must be a JSON object")
 
+    _ensure_initialized()
     changes: dict[str, Any] = {}
     previous: dict[str, Any] = {}
     for key, value in updates.items():
@@ -147,11 +237,11 @@ def update_settings(updates: dict) -> dict:
             continue
         coerced = _coerce_value(key, value)
         # Skip no-op writes to avoid spurious reloads.
-        current = getattr(settings, key, None)
+        current = _runtime_values.get(key, getattr(settings, key, None))
         if coerced == current:
             continue
         previous[key] = current
-        setattr(settings, key, coerced)
+        _runtime_values[key] = coerced
         changes[key] = coerced
 
     if not changes:
@@ -195,7 +285,7 @@ def update_settings(updates: dict) -> dict:
                 invalidate_cache()  # full reset
                 _log.info(
                     "[settings] Providers registry updated: %d entries",
-                    len(settings.providers or []),
+                    len(get("providers") or []),
                 )
         except Exception as exc:
             _log.warning("[settings] Cloud provider switch failed: %s", exc)
@@ -251,12 +341,12 @@ def update_settings(updates: dict) -> dict:
     # so the dropdown always shows a valid selected value.
     if "video_mode" in changes:
         _mode = changes["video_mode"]
-        _cur_provider = getattr(_cfg, "video_provider", "dashscope")
+        _cur_provider = get("video_provider", "dashscope")
         if _mode == "cloud" and _cur_provider not in ("dashscope", "local_wan", "svd"):
-            _cfg.video_provider = "dashscope"
+            set_runtime_value("video_provider", "dashscope")
             _log.info("[settings] video_provider auto-set to 'dashscope' (video_mode=cloud)")
         elif _mode == "local" and _cur_provider == "dashscope":
-            _cfg.video_provider = "local_wan"
+            set_runtime_value("video_provider", "local_wan")
             _log.info("[settings] video_provider auto-set to 'local_wan' (video_mode=local)")
 
     # ── Hot-reload DashScope client ─────────────────────────────────────────
@@ -308,12 +398,12 @@ def update_settings(updates: dict) -> dict:
         try:
             from app.services.local_llm import configure_llm
             configure_llm(
-                base_url=settings.llm_base_url,
-                model=settings.llm_model,
+                base_url=get("llm_base_url"),
+                model=get("llm_model"),
             )
             _log.info(
                 "[settings] LLM client reconfigured: base_url=%s model=%s",
-                settings.llm_base_url, settings.llm_model,
+                get("llm_base_url"), get("llm_model"),
             )
         except Exception as exc:
             _log.warning("[settings] LLM reconfigure failed: %s", exc)
@@ -323,12 +413,12 @@ def update_settings(updates: dict) -> dict:
         try:
             from app.services.image_generator import configure_image_generator
             configure_image_generator(
-                model_id=settings.image_model_id,
-                dtype_name=settings.image_dtype,
+                model_id=get("image_model_id"),
+                dtype_name=get("image_dtype"),
             )
             _log.info(
                 "[settings] Image generator reconfigured: model=%s dtype=%s",
-                settings.image_model_id, settings.image_dtype,
+                get("image_model_id"), get("image_dtype"),
             )
         except Exception as exc:
             _log.warning("[settings] Image generator reconfigure failed: %s", exc)
@@ -342,5 +432,19 @@ def update_settings(updates: dict) -> dict:
         if value is None:
             continue
         os.environ[f"AICSS_{key.upper()}"] = str(value)
+
+    # ── Persist user preferences to ~/.aicss/settings.json ───────────────────
+    # Only changes that are NOT marked "sensitive" go to disk; this avoids
+    # saving API keys by accident. Sensitive fields stay in process env only.
+    persistable = {
+        k: v for k, v in changes.items()
+        if k not in SENSITIVE_FIELDS and v is not None
+    }
+    if persistable:
+        try:
+            from app.services.settings_store import save_overrides
+            save_overrides(persistable)
+        except Exception as exc:
+            _log.warning("[settings] could not persist overrides: %s", exc)
 
     return get_settings()

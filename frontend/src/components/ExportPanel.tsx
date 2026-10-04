@@ -2,7 +2,7 @@
 // ExportPanel — 3D viewport screenshot + 3D mesh export
 // Supports: PNG screenshot | GLB/FBX mesh export (objects, layers, scene)
 // ─────────────────────────────────────────────────────────────────────────────
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { Download, X, Image, Box, Loader2, AlertCircle, CheckCircle2, ChevronDown } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import {
@@ -13,6 +13,7 @@ import {
   downloadMeshFile,
   type MeshExportResponse,
   type BlenderCheckResponse,
+  type StripStep,
 } from '../services/meshExportService';
 import type { DepthLayerKey } from '../types';
 
@@ -21,7 +22,7 @@ interface ExportPanelProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
 }
 
-type ExportScope = 'object' | 'layer' | 'scene';
+type ExportScope = 'objects' | 'layers' | 'scene';
 type ExportFormat = 'png' | 'glb' | 'fbx';
 
 export function ExportPanel({ canvasRef }: ExportPanelProps) {
@@ -41,6 +42,27 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
   const objectDioramaAssets = useAppStore((s) => s.objectDioramaAssets);
   const billboardOffsets = useAppStore((s) => s.billboardOffsets);
   const depthSplitResult = useAppStore((s) => s.depthSplitResult);
+  const stripStack = useAppStore((s) => s.stripStack);
+  const regions = useAppStore((s) => s.regions);
+  const billboardAssets = useAppStore((s) => s.billboardAssets);
+  const currentImageUrl = useAppStore((s) => s.currentImageUrl);
+
+  // Strip mode: active when stripStack has ≥1 completed step.
+  const hasStripStack = stripStack.length > 0;
+  const canExport3D = Boolean(analysisResult) || hasStripStack || regions.length > 0;
+
+  // When strip mode is active, scene is the only meaningful scope.
+  const effectiveScope = useMemo<ExportScope>(() => {
+    if (hasStripStack && scope !== 'scene') {
+      return 'scene';
+    }
+    return scope;
+  }, [hasStripStack, scope]);
+
+  // Warn if user has strip steps but chose a non-scene scope.
+  const scopeWarning = hasStripStack && scope !== 'scene'
+    ? '已剥离图层将以场景模式导出（strip_stack）'
+    : null;
 
   // ── PNG Screenshot ────────────────────────────────────────────────────────────
 
@@ -70,13 +92,13 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
   // ── 3D Mesh Export ──────────────────────────────────────────────────────────
 
   const handleExport3D = useCallback(async () => {
-    if (!analysisResult) return;
+    if (!analysisResult && stripStack.length === 0 && regions.length === 0) return;
 
     const blenderOk = blenderStatus?.available ?? (await checkBlender());
     if (!blenderOk) {
       setExportResult({
         mesh_id: '',
-        scope,
+        scope: effectiveScope as MeshExportResponse['scope'],
         format,
         success: false,
         blender_available: false,
@@ -100,7 +122,10 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
         include_textures: includeTextures,
       };
 
-      if (scope === 'objects') {
+      if (effectiveScope === 'objects') {
+        if (!analysisResult?.objects?.length) {
+          throw new Error('没有可导出的物体，请先完成 Analyze');
+        }
         const objectIds = analysisResult.objects.map((o) => o.id);
         result = await exportMeshObjects({
           analysis_result: analysisResult as unknown as Record<string, unknown>,
@@ -109,19 +134,35 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
           billboard_offsets: billboardOffsets as Record<string, unknown>,
           ...commonParams,
         });
-      } else if (scope === 'layers') {
+      } else if (effectiveScope === 'layers') {
         result = await exportMeshLayers({
           layer_assets: depthLayerDioramaAssets as Record<string, unknown>,
           ...commonParams,
         });
       } else {
         // scene: all layers + objects combined
+        // When stripStack is non-empty, pass it so Blender renders each stripped
+        // region as its own billboard plane instead of the monolithic depth layers.
+        const stripStackPayload: StripStep[] | undefined =
+          stripStack.length > 0 ? stripStack : undefined;
+
+        // Enrich LayerRegion[] with billboardUrl from billboardAssets for Blender.
+        const regionsPayload =
+          regions.length > 0
+            ? regions.map((r) => ({
+                ...r,
+                billboardUrl: billboardAssets[r.id]?.rgbaUrl,
+              }))
+            : undefined;
+
         result = await exportMeshScene({
-          analysis_result: analysisResult as unknown as Record<string, unknown>,
+          analysis_result: (analysisResult ?? {}) as unknown as Record<string, unknown>,
           depth_split_result: depthSplitResult as Record<string, unknown>,
           layer_assets: depthLayerDioramaAssets as Record<string, unknown>,
           object_assets: objectDioramaAssets as Record<string, unknown>,
           billboard_offsets: billboardOffsets as Record<string, unknown>,
+          strip_stack: stripStackPayload,
+          regions: regionsPayload,
           ...commonParams,
         });
       }
@@ -130,14 +171,13 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
 
       // Auto-download if successful
       if (result.success && result.mesh_id && result.file_name) {
-        // Use project_id from result if available, otherwise from store
         const projectId = result.project_id || '';
         downloadMeshFile(result.mesh_id, projectId, result.file_name);
       }
     } catch (err) {
       setExportResult({
         mesh_id: '',
-        scope,
+        scope: effectiveScope as MeshExportResponse['scope'],
         format,
         success: false,
         blender_available: blenderStatus?.available ?? false,
@@ -153,14 +193,15 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
   }, [
     analysisResult, scope, format, includeTextures, blenderStatus,
     checkBlender, depthLayerDioramaAssets, objectDioramaAssets,
-    billboardOffsets, depthSplitResult,
+    billboardOffsets, depthSplitResult, stripStack, regions, billboardAssets,
+    effectiveScope,
   ]);
 
   const scopeLabel = {
-    object: '物体',
-    layer: '层',
+    objects: '物体',
+    layers: '层',
     scene: '场景',
-  }[scope];
+  }[effectiveScope];
 
   const formatLabel = format.toUpperCase();
 
@@ -238,6 +279,25 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
                 </div>
               )}
 
+              {/* Strip mode indicator */}
+              {hasStripStack && (
+                <div className="flex items-center gap-2 px-2 py-1.5 bg-emerald-900/40 border border-emerald-800 rounded-lg">
+                  <div className="flex flex-col gap-0.5 flex-1 min-w-0">
+                    <span className="text-[10px] text-emerald-300 font-medium leading-none">
+                      Strip 逐层剥离模式
+                    </span>
+                    <span className="text-[9px] text-emerald-400/70 leading-none">
+                      {stripStack.length} 层 billboard · 已锁定场景导出
+                    </span>
+                  </div>
+                  {scopeWarning && (
+                    <span className="text-[9px] text-amber-400/80 leading-none max-w-[60%]">
+                      {scopeWarning}
+                    </span>
+                  )}
+                </div>
+              )}
+
               {/* Scope selector */}
               <div>
                 <label className="text-[10px] text-gray-400 mb-1 block">导出范围</label>
@@ -245,12 +305,16 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
                   {(['objects', 'layers', 'scene'] as ExportScope[]).map((s) => (
                     <button
                       key={s}
-                      onClick={() => setScope(s)}
+                      onClick={() => !hasStripStack ? setScope(s) : undefined}
+                      disabled={hasStripStack}
                       className={`px-2 py-1 rounded text-[10px] font-medium transition-colors ${
-                        scope === s
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-gray-800 text-gray-400 hover:text-white'
+                        hasStripStack
+                          ? 'bg-gray-800/50 text-gray-600 cursor-not-allowed'
+                          : scope === s
+                            ? 'bg-purple-600 text-white'
+                            : 'bg-gray-800 text-gray-400 hover:text-white'
                       }`}
+                      title={hasStripStack ? '剥离图层时自动使用场景模式' : undefined}
                     >
                       {s === 'objects' ? '物体' : s === 'layers' ? '层' : '场景'}
                     </button>
@@ -292,7 +356,7 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
               {/* Export button */}
               <button
                 onClick={handleExport3D}
-                disabled={exporting || !analysisResult}
+                disabled={exporting || !canExport3D}
                 className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-green-600 hover:bg-green-500 text-white text-xs font-medium transition-colors disabled:opacity-40"
               >
                 {exporting ? (
@@ -303,7 +367,7 @@ export function ExportPanel({ canvasRef }: ExportPanelProps) {
                 ) : (
                   <>
                     <Box size={14} />
-                    导出 {scopeLabel} ({formatLabel})
+                    导出 {scopeLabel} ({formatLabel}){hasStripStack ? ` · ${stripStack.length} 层 billboard` : ''}
                   </>
                 )}
               </button>

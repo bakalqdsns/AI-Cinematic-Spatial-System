@@ -1,0 +1,14 @@
+{
+  "input": "./openapi.json",
+  "output": "./src/services/generated",
+  "client": "axios",
+  "useOptions": true,
+  "useUnionTypes": true,
+  "exportCore": true,
+  "exportSchemas": true,
+  "exportServices": true,
+  "postfixServices": "",
+  "postfixModels": "",
+  "indent": 2,
+  "name": "AicssClient"
+}

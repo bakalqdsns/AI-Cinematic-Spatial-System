@@ -1,0 +1,14 @@
+{
+  "characters": [
+    {
+      "id": "char-1",
+      "name": "林知夏",
+      "gender": "",
+      "age": "",
+      "personality": "",
+      "visual_prompt": "",
+      "reference_image": null
+    }
+  ],
+  "project_id": null
+}

@@ -1,0 +1,101 @@
+{
+  "scene_id": "scene_strip_stack_e2e_project",
+  "project_id": "strip_stack_e2e_project",
+  "strip_stack_steps": 3,
+  "test_image": "F:\\AICinematicSpatialSystem\\test\\背景.png",
+  "image_size": [
+    1376,
+    768
+  ],
+  "export_result": {
+    "success": true,
+    "mesh_id": "scene_strip_stack_e2e_project",
+    "object_count": 4,
+    "vertex_count": 16,
+    "face_count": 4,
+    "file_size": 2202836,
+    "format": "glb",
+    "error": null,
+    "blender_available": true
+  },
+  "steps": [
+    {
+      "regionId": "strip_0_foreground_person",
+      "depthLayer": "foreground",
+      "depthValue": 90,
+      "colorIndex": 0,
+      "layerPolygon": [
+        [
+          0.165,
+          0.225
+        ],
+        [
+          0.355,
+          0.225
+        ],
+        [
+          0.355,
+          0.9249999999999999
+        ],
+        [
+          0.165,
+          0.9249999999999999
+        ]
+      ],
+      "billboardUrlBytes": 289815,
+      "inpaintResultUrlBytes": 1647812
+    },
+    {
+      "regionId": "strip_1_midground_tree",
+      "depthLayer": "midground",
+      "depthValue": 128,
+      "colorIndex": 1,
+      "layerPolygon": [
+        [
+          0.77,
+          0.23
+        ],
+        [
+          0.95,
+          0.23
+        ],
+        [
+          0.95,
+          0.8099999999999999
+        ],
+        [
+          0.77,
+          0.8099999999999999
+        ]
+      ],
+      "billboardUrlBytes": 220746,
+      "inpaintResultUrlBytes": 1606580
+    },
+    {
+      "regionId": "strip_2_background_sky",
+      "depthLayer": "background",
+      "depthValue": 180,
+      "colorIndex": 2,
+      "layerPolygon": [
+        [
+          0.38,
+          0.03
+        ],
+        [
+          0.64,
+          0.03
+        ],
+        [
+          0.64,
+          0.23
+        ],
+        [
+          0.38,
+          0.23
+        ]
+      ],
+      "billboardUrlBytes": 79233,
+      "inpaintResultUrlBytes": 1607944
+    }
+  ]
+}

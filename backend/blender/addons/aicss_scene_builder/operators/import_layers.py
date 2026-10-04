@@ -116,9 +116,15 @@ class AICSS_OT_import_layers(Operator):
             collection = context.scene.collection
 
         imported = []
+        manifest_dir = os.path.dirname(os.path.abspath(self.manifest_path))
         for layer in LAYER_ORDER:
             png_path = manifest["layers"].get(layer)
-            if not png_path or not os.path.exists(png_path):
+            if not png_path:
+                continue
+            # Resolve relative paths against the manifest directory
+            if not os.path.isabs(png_path):
+                png_path = os.path.join(manifest_dir, png_path)
+            if not os.path.exists(png_path):
                 # Layer is optional (e.g. sky for night scenes) — skip silently.
                 continue
             obj = _create_plane_for_layer(
@@ -139,6 +145,38 @@ class AICSS_OT_import_layers(Operator):
             self.report({'ERROR'}, "No layers were imported — check the manifest")
             return {'CANCELLED'}
 
+        # ── 角色：读 manifest 的 characters[]，创建平面 + 应用纸张材质 ──────
+        # T10: 每个 character 项含 {id, name, framesDir, frameCount, fps}，
+        # 可选 position/scale。我们在指定坐标创建一个 plane，贴上 framesDir
+        # 下的第一帧 PNG 作为静态贴图（动画播放由 T08 的 import_character_frames
+        # operator 负责，这里只做"落位"）。
+        characters = manifest.get("characters") or []
+        placed_chars = 0
+        for ch in characters:
+            try:
+                obj = _create_plane_for_character(
+                    ch, manifest, collection=collection,
+                    scene_width=self.scene_width,
+                    scene_height=self.scene_height,
+                )
+            except Exception as exc:
+                self.report({'WARNING'}, f"Failed to place character {ch.get('id')}: {exc}")
+                continue
+            if obj is not None:
+                placed_chars += 1
+                if self.apply_paper_material:
+                    # 用 framesDir 下第一帧作为贴图（静态落位）
+                    frames_dir = ch.get("framesDir", "")
+                    first_png = _first_frame_in_dir(frames_dir)
+                    if first_png:
+                        apply_paper_material(obj, image_path=first_png)
+
+        if placed_chars:
+            self.report(
+                {'INFO'},
+                f"Placed {placed_chars} character plane(s)",
+            )
+
         # Set the active scene camera if one already exists (don't create
         # a camera here — that's the job of setup_camera).
         self.report(
@@ -146,6 +184,75 @@ class AICSS_OT_import_layers(Operator):
             f"Imported {len(imported)} layers for shot {manifest['shotId']}",
         )
         return {'FINISHED'}
+
+
+def _first_frame_in_dir(frames_dir: str) -> str:
+    """返回 framesDir 下中间帧的绝对路径（角色通常在中间最完整），找不到返回 ""。"""
+    if not frames_dir:
+        return ""
+    try:
+        if not os.path.isdir(frames_dir):
+            return ""
+        frames = sorted(
+            f for f in os.listdir(frames_dir)
+            if f.lower().endswith(".png") and f.lower().startswith("frame_")
+        )
+        if not frames:
+            # 退而求其次：任何 png
+            frames = sorted(f for f in os.listdir(frames_dir) if f.lower().endswith(".png"))
+        if not frames:
+            return ""
+        # 用中间帧（角色通常在中间最完整，第一帧可能刚入画被切边）
+        mid = len(frames) // 2
+        return os.path.join(frames_dir, frames[mid])
+    except Exception:
+        return ""
+
+
+def _create_plane_for_character(ch, manifest, *, collection,
+                                  scene_width, scene_height):
+    """T10: 为一个角色创建一个平面，按 manifest 的 position/scale 落位。
+
+    character 项字段：
+      id (必填), name, framesDir, frameCount, fps
+      position: [x, y, z]  (可选，默认前景层 z)
+      scale:    [sx, sy]   (可选，默认 [4.0, 4.0] BU)
+
+    返回创建的对象，失败返回 None。
+    """
+    from ..utils.scene_utils import Z_OFFSETS
+
+    char_id = ch.get("id") or ch.get("name") or "character"
+    position = ch.get("position")
+    if not position or len(position) < 3:
+        # 默认放在前景层前面一点（z=0），水平居中，确保不被 foreground 遮挡
+        position = [0.0, 0.0, 0.0]
+    scale = ch.get("scale") or [4.0, 4.0]
+
+    bpy.ops.mesh.primitive_plane_add(
+        size=1.0,
+        location=(float(position[0]), float(position[1]), float(position[2])),
+    )
+    obj = bpy.context.active_object
+    obj.name = f"AICSS_Character_{char_id}"
+    # 与 layer plane 一致：法线朝 +Z（朝相机，相机在 +Z 方向）
+    obj.rotation_euler = (0.0, 0.0, 0.0)
+    obj.scale = (float(scale[0]), float(scale[1]), 1.0)
+
+    obj["aicss_role"] = "character"
+    obj["aicss_character_id"] = str(char_id)
+    obj["aicss_character_name"] = str(ch.get("name", char_id))
+    obj["aicss_frames_dir"] = str(ch.get("framesDir", ""))
+    obj["aicss_frame_count"] = int(ch.get("frameCount", 0) or 0)
+    obj["aicss_fps"] = int(ch.get("fps", 24) or 24)
+    obj["aicss_shot_id"] = manifest.get("shotId", "")
+
+    # 移到目标 collection
+    for col in list(obj.users_collection):
+        col.objects.unlink(obj)
+    collection.objects.link(obj)
+
+    return obj
 
 
 def _create_plane_for_layer(layer, png_path, manifest, *,
@@ -168,6 +275,8 @@ def _create_plane_for_layer(layer, png_path, manifest, *,
     )
     obj = bpy.context.active_object
     obj.name = f"AICSS_Layer_{layer}"
+    # plane 默认法线 +Z，相机在 +Z 方向沿 -Z 看，法线 +Z 正好朝相机，无需旋转。
+    obj.rotation_euler = (0.0, 0.0, 0.0)
     obj.scale = (scene_width, scene_height, 1.0)
 
     # Track metadata on the object so other operators / UI panels can

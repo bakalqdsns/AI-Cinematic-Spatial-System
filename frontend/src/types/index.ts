@@ -90,6 +90,9 @@ export const DEPTH_LAYER_THRESHOLDS: Record<DepthLayerKey, number> = {
   midground: 128,  // 128-191 → midground
   background: 64,    // 64-127  → background
   // <64         → sky
+  // sky 的下界为 0（亮度 0-63 落入 sky 层）。autoAssignDepthLayer 用级联比较
+  // 处理 sky（不读取此值），inpaintMask 用它作为 layerLow cutoff。
+  sky: 0,
 };
 
 // LayerRegion: 任意形状的多边形区域，支持 AI 检测物体和用户手绘两种来源。

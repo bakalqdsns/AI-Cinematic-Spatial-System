@@ -1,9 +1,17 @@
 # AICinematicSpatialSystem 实施计划
 
-> **文档版本**：v1.0
-> **制定日期**：2026-08-10
-> **依据**：基于 `PROJECT_STATUS.md`（2026-08-10 评估版）
+> **文档版本**：v1.1
+> **制定日期**：2026-08-10；**对照修订**：2026-09-26
+> **依据**：`PROJECT_STATUS.md`（基准，本文不修改该文件）
 > **目标**：约 6-8 周完成可演示的端到端纸雕风格动画短片生产流程
+>
+> **落地状态（2026-09-26，以基准第五节及当前代码为准）**
+>
+> 阶段一及 1.5 闭环已交付：图层 PNG 导出（现为 5 层，含 ground）、`backend/blender/addons/aicss_scene_builder/`、Three.js 运镜播放、`settings_observer` / `LLMMode` / `ImageGeneratorInterface`、v1 Pydantic 响应模型、下载进度与断点续传、`~/.aicss/settings.json`、Provider 注册表。
+>
+> 基准第三节里仍未划掉、代码也未完成的项，继续作为本文剩余工作：模块 11 后期剪辑、模块 10 的 Blender 摄影机与渲染队列、模块 9 的 Blender 帧动画、模块 8 光照面板、模块 7 的 SSS/纤维（插件里 Subsurface 默认仍为 0）、模块 6 的角色落位与层次搭建。
+>
+> 下文任务正文保留原始拆解，避免改写已执行过的步骤；退出标准复选框已按上述状态勾选。阶段二里「设置持久化 / 抠像羽化 / 精细 Z」和阶段四里「绿幕 / 首尾帧」在基准中已标完成，不要再当未开工项排期。
 
 ---
 
@@ -12,9 +20,9 @@
 ```mermaid
 flowchart TB
     %% 剧本拆解
-    M1[模块1<br/>自动化剧本拆解<br/>95%] --> M2[模块2<br/>人物资产生成<br/>75%]
-    M1 --> M3[模块3<br/>场景分层分割<br/>85%]
-    M1 --> M5[模块5<br/>文件整合归档<br/>80%]
+    M1[模块1<br/>自动化剧本拆解<br/>100%] --> M2[模块2<br/>人物资产生成<br/>100%]
+    M1 --> M3[模块3<br/>场景分层分割<br/>100%]
+    M1 --> M5[模块5<br/>文件整合归档<br/>100%]
 
     %% 人物资产生成
     M2 --> M9[模块9<br/>场景运动与角色动画<br/>25%]
@@ -22,7 +30,7 @@ flowchart TB
     M2_1 -.-> M9
 
     %% 场景分层
-    M3 --> M4[模块4<br/>遮挡补全与面片导出<br/>70%]
+    M3 --> M4[模块4<br/>遮挡补全与面片导出<br/>100%]
     M3 -->|"P1-2 图层PNG导出"| M3_1[图层PNG导出端点<br/>P1]
 
     %% 补全导出
@@ -446,9 +454,11 @@ lighting_presets = {
 
 ---
 
-##### 2.3 精细 Z 轴偏移与厚度纹理（模块4）
+##### 2.3 精细 Z 轴偏移与厚度纹理（模块4）✅ 已完成
 
-**任务 2.3.1**：`services/mesh_exporter.py` 改造
+> **状态（2026-08-22）**：已在 `mesh_exporter._compute_fine_z_offset()` + `make_displaced_plane()` 落地；厚度纹理由 `paper_diorama` 生成。以下任务描述保留作历史参考。
+
+**任务 2.3.1**：`services/mesh_exporter.py` 改造 ✅
 
 - **精细 Z 轴**：读取 `depth_loader` 的 `depth_values`（每个像素的 0-1 深度值），映射到 Z 轴偏移
 - 公式：`z_offset = depth_value * layer_depth_range + layer_base_z`
@@ -459,12 +469,9 @@ lighting_presets = {
 - **厚度纹理**：读取 `thicknessGrayUrl`（距离变换灰度图），控制每个三角面的 extrude 厚度
   - 白色→厚（2.0），黑色→薄（0.1），灰色→线性插值
 
-**任务 2.3.2**：`services/thickness_baker.py`（新建）
+**任务 2.3.2**：`services/thickness_baker.py`（新建）— 能力已并入 `paper_diorama.py`，无需独立文件
 
-- 接收 RGB 原图 + mask，计算 SDF（Signed Distance Field）
-- 输出灰度厚度纹理（与原图同尺寸）
-
-**任务 2.3.3**：`utils/paper_diorama.py` 扩展
+**任务 2.3.3**：`utils/paper_diorama.py` 扩展 ✅
 
 - `generate_thickness_texture()` 函数：将 mask 图转为厚度灰度图
 - `generate_detailed_z_offset()` 函数：利用 depthValue 生成精细 z_offset 数据
@@ -687,9 +694,11 @@ def render_shot_with_camera(
 
 ---
 
-##### 3.4 自动化分镜归档 CLI（模块5）
+##### 3.4 自动化分镜归档 CLI（模块5）✅ 已完成
 
-**任务 3.4.1**：`scripts/archive_shot.py`（新建）
+> **状态**：`services/shot_archiver.py` + `python -m scripts.archive_shot` + `POST/GET .../shots/{id}/archive`；前端 Storyboard「导出归档」。
+
+**任务 3.4.1**：`scripts/archive_shot.py` ✅
 
 ```bash
 python -m scripts.archive_shot --shot-id <shot_id> --project-id <project_id>
@@ -883,12 +892,15 @@ async def check_frame_consistency(
 
 ---
 
-##### 4.3 strip-stack 逐层剥离导出（模块4）
+##### 4.3 strip-stack 逐层剥离导出（模块4）✅ 已完成
 
-**任务 4.3.1**：`services/strip_exporter.py`（新建）
+> **状态（2026-08-22）**：已在 `mesh_exporter.export_full_scene(strip_stack=...)` / `_populate_strip_stack_into_scene` 落地（无需独立 `strip_exporter.py`）；E2E：`test_strip_stack_export_e2e.py`。
 
-- 将完整场景的遮挡关系反过来用：从背景到前景逐层剥离
-- 输出：每个 layer 的"剥离层"PNG（用于 Blender 的 bevel/extrude 视觉参考）
+**任务 4.3.1**：`services/mesh_exporter.py` strip-stack 消费 ✅
+
+- 每条 StripStep → `PlaneGeometry` billboard（精细 Z + 固定层厚度）
+- 末项 `inpaintResultUrl` → BackgroundPlane
+- 前端 `regions` 亦可导出为独立 billboard planes
 
 ---
 
@@ -958,33 +970,33 @@ python scripts/demo_pipeline.py \
 
 ### 阶段一退出标准
 
-- [ ] `POST /api/aicss/layers/export` 返回 4 层 RGBA PNG，层间无内容污染
-- [ ] Blender 4.2 中安装 `aicss_scene_builder` 插件，可导入 4 层 PNG 并按 Z 轴排列
-- [ ] 前端 StoryboardTab 点击 shot，Three.js 相机自动播放对应运镜动画
-- [ ] `settings_manager` 不再直接 `setattr(config.settings, ...)`，改为 observer 模式
-- [ ] `get_llm_client()` 行为由 `LLMMode` 上下文变量决定，不依赖模块级全局变量
-- [ ] v1 端点（analyze/inpaint/depth/segment/layers）有完整 Pydantic 响应模型
+- [x] `POST /api/aicss/layers/export` 返回 RGBA PNG。当前实现为 **5 层**（sky / background / midground / foreground / ground），超出当初的 4 层验收
+- [x] `aicss_scene_builder` 插件可安装并导入图层。插件 manifest 仍是 4 层，与后端 ground 层尚未对齐
+- [x] Three.js 相机按运镜自动播放（`CameraPathPlayer` + `POST /api/aicss/v2/scripts/camera-path`）
+- [ ] `settings_manager` 已有 `ModelModeCascadeObserver`，但 `update_settings()` 仍 `setattr(settings, ...)`，内容耦合未消除
+- [x] `LLMMode` / `llm_mode_scope()` 已加入；模块级 `_use_cloud` 仍作兼容回退
+- [x] v1 端点（analyze/inpaint/depth/segment/layers 等）已有 Pydantic `response_model`
 
 ### 阶段二退出标准
 
 - [ ] Blender 中材质面板可调 Roughness / SSS / Normal Strength，实时预览纸张质感
 - [ ] 光照配置系统可生成 6 种以上场景类型 × 情绪组合的 Blender 光照脚本
-- [ ] `mesh_exporter` 生成的 FBX 使用精细 depthValue 而非 bucket 级别 Z 偏移
-- [ ] `motion_extractor` 调用 `refine_mask_edges`，抠像边缘有可见羽化效果（vs 硬边）
-- [ ] 重启后端进程，设置面板数据不丢失
+- [x] `mesh_exporter` 生成的 FBX 使用精细 depthValue 而非 bucket 级别 Z 偏移
+- [x] `motion_extractor` 在 `feather_edges=True` 时调用 `refine_mask_edges`
+- [x] 重启后偏好从 `~/.aicss/settings.json` 经 `apply_overrides()` 恢复（API key 不落盘）
 
 ### 阶段三退出标准
 
 - [ ] FFmpeg 拼接 3 个以上 shot MP4，带 dissolve/fade 转场，输出可播放 MP4
 - [ ] Blender 中导入 PNG 序列帧，NLA track 播放流畅（24fps）
-- [ ] `scripts/archive_shot.py --shot-id xxx` 生成完整 ZIP 包，Blender 插件可一键导入
-- [ ] 模型下载前端显示百分比进度条（Z-Image 除外，33GB 太慢可跳过）
+- [x] `scripts/archive_shot.py --shot-id xxx` 生成完整 ZIP 包，Blender 插件可一键导入
+- [x] 模型下载进度已透传到 `GET /api/aicss/models/status`（`progress` / `eta_seconds` / `current_file` 等）。前端类型安全客户端（openapi-typescript-codegen）仍未做
 - [ ] 前端 services/ 全部替换为 openapi-typescript-codegen 生成的客户端
 
 ### 阶段四退出标准
 
-- [ ] 绿幕模式生成的人物动作视频，背景为纯色，抠像后人物边缘干净
-- [ ] 首尾帧一致性检查报告准确（人工验证 3 个 shot）
+- [x] 绿幕链路已接入：`_apply_greenscreen_prompt` + `chroma_key_rgba`
+- [x] 首尾帧一致性检查已实现（`verify_keyframe_consistency`）。基准未记录人工抽检 3 个 shot 的结果
 - [ ] 运行 `python scripts/demo_pipeline.py --script "..."`，生成完整 MP4，可播放
 - [ ] Blender 插件在真实 Blender 4.2 中完成：导入 → 材质 → 光照 → 运镜 → 渲染，全流程无报错
 

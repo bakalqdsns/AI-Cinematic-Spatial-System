@@ -14,7 +14,7 @@ Reference: docs/API_PROTOCOL_v2.md Section 7
 
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -224,3 +224,90 @@ async def get_frame_image(
     except Exception as e:
         _log.exception(f"[shots] Failed to get frame image: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get frame image: {e}")
+
+
+class ArchiveShotResponse(BaseModel):
+    projectId: str
+    shotId: str
+    fileName: str
+    fileSize: int
+    fileCount: int
+    downloadUrl: str
+    layerCount: int = 0
+    meshCount: int = 0
+
+
+@router.post(
+    "/v2/projects/{project_id}/shots/{shot_id}/archive",
+    response_model=ArchiveShotResponse,
+)
+async def archive_shot(
+    project_id: str,
+    shot_id: str,
+    scene_id: Optional[str] = None,
+    lighting_preset: Optional[str] = Query(
+        None,
+        description="灯光预设名（如 warm_interior / tense_night），透传给 build_shot_archive 写入 manifest.lightingPreset",
+    ),
+):
+    """
+    将 shot 相关资产打包为 Blender 可导入的 ZIP（写入项目 archives/ 目录）。
+    """
+    from app.services.shot_archiver import build_shot_archive
+
+    try:
+        result = build_shot_archive(
+            project_id,
+            shot_id,
+            scene_id=scene_id,
+            lighting_preset=lighting_preset,
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        _log.exception(f"[shots] archive failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Archive failed: {e}")
+
+    return ArchiveShotResponse(
+        projectId=project_id,
+        shotId=shot_id,
+        fileName=result["fileName"],
+        fileSize=result["fileSize"],
+        fileCount=result["fileCount"],
+        downloadUrl=f"/api/aicss/v2/projects/{project_id}/shots/{shot_id}/archive/download",
+        layerCount=len(result["manifest"].get("layers") or {}),
+        meshCount=len(result["manifest"].get("meshes") or []),
+    )
+
+
+@router.get("/v2/projects/{project_id}/shots/{shot_id}/archive/download")
+async def download_shot_archive(project_id: str, shot_id: str):
+    """下载最近一次生成的 shot archive ZIP（若不存在则现场打包）。"""
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    from app.services.project_store import project_store
+    from app.services.shot_archiver import build_shot_archive
+
+    archives_dir = project_store._project_dir(project_id) / "archives"
+    pattern = f"{project_id}_{shot_id}_archive.zip"
+    zip_path = archives_dir / pattern
+    if not zip_path.is_file():
+        # also accept any matching archive
+        matches = sorted(archives_dir.glob(f"*_{shot_id}_archive.zip")) if archives_dir.is_dir() else []
+        if matches:
+            zip_path = matches[-1]
+        else:
+            try:
+                result = build_shot_archive(project_id, shot_id)
+                zip_path = Path(result["zipPath"])
+            except FileNotFoundError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            except Exception as e:
+                _log.exception(f"[shots] archive-on-download failed: {e}")
+                raise HTTPException(status_code=500, detail=f"Archive failed: {e}")
+
+    return FileResponse(
+        path=str(zip_path),
+        media_type="application/zip",
+        filename=zip_path.name,
+    )

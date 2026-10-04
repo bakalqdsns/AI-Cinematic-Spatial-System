@@ -1,14 +1,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// AICSS Mesh Export Service — calls backend mesh export endpoints
+// AICSS Mesh Export Service — calls backend mesh export endpoints.
+//
+// Thin wrapper around the generated OpenAPI client
+// (`generated/v23DMeshExport`). The mesh export endpoints speak snake_case
+// for both request and response bodies, matching the existing interfaces
+// below — so the wrappers just forward arguments and return the typed
+// response. `downloadMeshFile` / `downloadMeshBlob` stay handwritten because
+// they build browser download URLs / fetch blobs, which the generated client
+// (which returns parsed JSON) doesn't help with.
 // ─────────────────────────────────────────────────────────────────────────────
 import axios from 'axios';
-
-const DEFAULT_BACKEND = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
-
-const client = axios.create({
-  baseURL: DEFAULT_BACKEND,
-  timeout: 600_000, // 10 minutes for Blender export
-});
+import type { PolygonPoint } from '../types';
+import { generatedClient, DEFAULT_BACKEND } from './generatedClient';
 
 export interface MeshExportResponse {
   mesh_id: string;
@@ -73,6 +76,17 @@ export interface ExportLayersRequest {
   include_textures: boolean;
 }
 
+export interface StripStep {
+  regionId: string;
+  baseImageDataUrl: string;
+  inpaintResultUrl: string;
+  billboardUrl?: string;
+  layerPolygon: PolygonPoint[];
+  depthLayer: 'foreground' | 'midground' | 'background' | 'sky';
+  depthValue: number;
+  colorIndex: number;
+}
+
 export interface ExportSceneRequest {
   project_id?: string;
   analysis_result: Record<string, unknown>;
@@ -80,6 +94,8 @@ export interface ExportSceneRequest {
   layer_assets: Record<string, unknown>;
   object_assets: Record<string, unknown>;
   billboard_offsets: Record<string, unknown>;
+  regions?: Record<string, unknown>[];
+  strip_stack?: StripStep[];
   format: 'glb' | 'fbx';
   include_textures: boolean;
 }
@@ -89,8 +105,7 @@ export interface ExportSceneRequest {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function checkBlenderAvailable(): Promise<BlenderCheckResponse> {
-  const resp = await client.get<BlenderCheckResponse>('/api/aicss/v2/meshes/check');
-  return resp.data;
+  return generatedClient.v23DMeshExport.apiCheckBlenderApiAicssV2MeshesCheckGet() as Promise<BlenderCheckResponse>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,31 +115,25 @@ export async function checkBlenderAvailable(): Promise<BlenderCheckResponse> {
 export async function exportMeshObjects(
   request: ExportObjectsRequest
 ): Promise<MeshExportResponse> {
-  const resp = await client.post<MeshExportResponse>(
-    '/api/aicss/v2/meshes/export-objects',
-    request
-  );
-  return resp.data;
+  return generatedClient.v23DMeshExport.apiExportObjectsApiAicssV2MeshesExportObjectsPost({
+    requestBody: request as any,
+  }) as Promise<MeshExportResponse>;
 }
 
 export async function exportMeshLayers(
   request: ExportLayersRequest
 ): Promise<MeshExportResponse> {
-  const resp = await client.post<MeshExportResponse>(
-    '/api/aicss/v2/meshes/export-layers',
-    request
-  );
-  return resp.data;
+  return generatedClient.v23DMeshExport.apiExportLayersApiAicssV2MeshesExportLayersPost({
+    requestBody: request as any,
+  }) as Promise<MeshExportResponse>;
 }
 
 export async function exportMeshScene(
   request: ExportSceneRequest
 ): Promise<MeshExportResponse> {
-  const resp = await client.post<MeshExportResponse>(
-    '/api/aicss/v2/meshes/export-scene',
-    request
-  );
-  return resp.data;
+  return generatedClient.v23DMeshExport.apiExportSceneApiAicssV2MeshesExportScenePost({
+    requestBody: request as any,
+  }) as Promise<MeshExportResponse>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,35 +143,33 @@ export async function exportMeshScene(
 export async function listMeshExports(
   projectId: string
 ): Promise<MeshListResponse> {
-  const resp = await client.get<MeshListResponse>(
-    '/api/aicss/v2/meshes/list',
-    { params: { project_id: projectId } }
-  );
-  return resp.data;
+  return generatedClient.v23DMeshExport.apiListMeshesApiAicssV2MeshesListGet({
+    projectId,
+  }) as unknown as Promise<MeshListResponse>;
 }
 
 export async function getMeshInfo(
   meshId: string,
   projectId: string
 ): Promise<MeshListItem> {
-  const resp = await client.get<MeshListItem>(
-    `/api/aicss/v2/meshes/${meshId}/info`,
-    { params: { project_id: projectId } }
-  );
-  return resp.data;
+  return generatedClient.v23DMeshExport.apiMeshInfoApiAicssV2MeshesMeshIdInfoGet({
+    meshId,
+    projectId,
+  }) as Promise<MeshListItem>;
 }
 
 export async function deleteMeshExport(
   meshId: string,
   projectId: string
 ): Promise<void> {
-  await client.delete(`/api/aicss/v2/meshes/${meshId}`, {
-    params: { project_id: projectId },
+  await generatedClient.v23DMeshExport.apiDeleteMeshApiAicssV2MeshesMeshIdDelete({
+    meshId,
+    projectId,
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Download helpers
+// Download helpers (handwritten — browser blob / anchor downloads)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function downloadMeshFile(
@@ -183,6 +190,6 @@ export async function downloadMeshBlob(
   projectId: string
 ): Promise<Blob> {
   const url = `${DEFAULT_BACKEND}/api/aicss/v2/meshes/${meshId}/download?project_id=${encodeURIComponent(projectId)}`;
-  const resp = await client.get(url, { responseType: 'blob' });
+  const resp = await axios.get(url, { responseType: 'blob' });
   return resp.data;
 }

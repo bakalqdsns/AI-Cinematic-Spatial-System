@@ -58,9 +58,29 @@ class AICSS_PT_panel(Panel):
         box.label(text="Camera", icon='CAMERA_DATA')
         col = box.column(align=True)
         col.operator("aicss.setup_camera", icon='CAMERA_DATA')
+        col.operator("aicss.setup_camera_animation", icon='KEYFRAME_HLT')
 
         # Section 4 — Lighting
         box = layout.box()
         box.label(text="Lighting", icon='LIGHT')
         col = box.column(align=True)
         col.operator("aicss.add_lighting", icon='LIGHT_SUN')
+
+        # Section 5 — Verify
+        box = layout.box()
+        box.label(text="Verify", icon='RENDER_STILL')
+        col = box.column(align=True)
+        col.operator("aicss.verify_cycles", icon='RENDER_ANIMATION')
+
+        # Section 6 — Animation (T08 / T09)
+        box = layout.box()
+        box.label(text="Animation", icon='SEQUENCE')
+        col = box.column(align=True)
+        col.operator("aicss.import_character_frames", icon='IMAGE_SEQ')
+        col.operator("aicss.layer_motion", icon='FORCE_HARMONIC')
+
+        # Section 7 — Render Queue (T07)
+        box = layout.box()
+        box.label(text="Render Queue", icon='RENDER_ANIMATION')
+        col = box.column(align=True)
+        col.operator("aicss.render_queue", icon='FILE_MOVIE')

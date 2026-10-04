@@ -4,7 +4,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import type { DepthSplitThresholds } from '../types';
-import { generateBillboard, inpaintImage, extractRegionBillboard } from '../services/aicssService';
+import { generateBillboard, inpaintImage, extractRegionBillboard, computeOcclusionHoles } from '../services/aicssService';
+import { computeOcclusionAwareMask } from '../utils/inpaintMask';
 import { DEFAULT_DEPTH_SPLIT_THRESHOLDS, splitDepthLayers } from '../utils/depthSplit';
 import { InpaintPreviewDialog } from './InpaintPreviewDialog';
 import { DepthSplitPanel } from './DepthSplitPanel';
@@ -44,7 +45,6 @@ export function SplitControls() {
   const setInpaintLoading = useAppStore((s) => s.setInpaintLoading);
   const inpaintError = useAppStore((s) => s.inpaintError);
   const setInpaintError = useAppStore((s) => s.setInpaintError);
-  const dashscopeApiKey = useAppStore((s) => s.dashscopeApiKey);
   const regions = useAppStore((s) => s.regions);
   const drawMode = useAppStore((s) => s.drawMode);
   const drawPoints = useAppStore((s) => s.drawPoints);
@@ -229,8 +229,8 @@ export function SplitControls() {
   };
 
   // ─── Split & Inpaint ─────────────────────────────────────────────────────
-  // API Key 检查放在最前面：在 UI 交互触发时就尽早失败，避免走到网络请求才发现问题
-  // 注意：检查的是 dashscopeApiKey store 状态，若用户从未设置或未保存，此处直接拦截
+  // 后端 inpaint 走本地 LaMa。优先用 /occlusion-holes 的 SAM mask（peel），
+  // 失败时回退前端多边形 inverse mask。
   const handleSplitAndInpaint = async () => {
     // 防御性：UI 已禁用按钮，但函数本身也要拦截 selectedLayerIndex === null，
     // 避免误传空 mask 给 LaMa。
@@ -239,18 +239,41 @@ export function SplitControls() {
       return;
     }
 
-    if (!dashscopeApiKey) {
-      setInpaintError('请先在顶部输入 DashScope API Key');
-      setInpaintLoading(false);
-      return;
-    }
-
     setInpaintLoading(true);
     setInpaintError(null);
     setInpaintPreview(null);
 
     try {
-      const maskDataUrl = await computeInverseMask();
+      let maskDataUrl: string | null = null;
+      const withMasks = currentLayerObjects.filter((o) => o.maskDataUrl);
+      if (withMasks.length > 0) {
+        try {
+          const dims = await new Promise<{ w: number; h: number }>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+            img.onerror = () => reject(new Error('Failed to load image for occlusion holes'));
+            img.src = effectiveImageUrl;
+          });
+          const holes = await computeOcclusionHoles({
+            objects: withMasks.map((o) => ({
+              id: o.id,
+              maskDataUrl: o.maskDataUrl,
+              depth: o.depth,
+              polygon: o.polygon as [number, number][],
+            })),
+            imageWidth: dims.w,
+            imageHeight: dims.h,
+            targetObjectIds: withMasks.map((o) => o.id),
+            mode: 'peel',
+          });
+          maskDataUrl = holes.mergedMaskDataUrl;
+        } catch (err) {
+          console.warn('occlusion-holes failed, falling back to polygon mask', err);
+        }
+      }
+      if (!maskDataUrl) {
+        maskDataUrl = await computeInverseMask();
+      }
       const prompt = generatePrompt();
       const resultUrl = await inpaintImage(effectiveImageUrl, maskDataUrl, prompt);
       setInpaintPreview(resultUrl);
@@ -268,10 +291,6 @@ export function SplitControls() {
   // For occlusion-aware inpaint, we need the depth map — loaded here inline.
   const handleRegionInpaint = useCallback(async () => {
     if (!effectiveImageUrl || regions.length === 0) return;
-    if (!dashscopeApiKey) {
-      setInpaintError('请先在顶部输入 DashScope API Key');
-      return;
-    }
 
     setInpaintLoading(true);
     setInpaintError(null);
@@ -279,7 +298,6 @@ export function SplitControls() {
 
     try {
       const { loadDepthMapImageData } = await import('../utils/depthUtils');
-      const { computeSimpleMask } = await import('../utils/inpaintMask');
 
       const depthMapUrl = analysisResult?.depthMapUrl;
       const depthData = depthMapUrl
@@ -303,7 +321,7 @@ export function SplitControls() {
     } finally {
       setInpaintLoading(false);
     }
-  }, [effectiveImageUrl, regions, dashscopeApiKey, analysisResult, imageWidth, imageHeight]);
+  }, [effectiveImageUrl, regions, analysisResult, imageWidth, imageHeight]);
 
   // ─── Strip pipeline: peel one layer ──────────────────────────────────────
   // Each invocation:
@@ -329,10 +347,6 @@ export function SplitControls() {
     }
     if (!currentImageUrl) {
       setStripError('没有可剥离的图片');
-      return;
-    }
-    if (!dashscopeApiKey) {
-      setStripError('请先在顶部输入 DashScope API Key');
       return;
     }
 
@@ -429,7 +443,6 @@ export function SplitControls() {
   }, [
     drawPoints,
     currentImageUrl,
-    dashscopeApiKey,
     analysisResult,
     imageWidth,
     imageHeight,
@@ -787,10 +800,10 @@ export function SplitControls() {
           {regions.length > 0 && (
             <button
               onClick={() => { void handleRegionInpaint(); }}
-              disabled={inpaintLoading || !dashscopeApiKey}
+              disabled={inpaintLoading}
               className={`
                 flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
-                ${inpaintLoading || !dashscopeApiKey
+                ${inpaintLoading
                   ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                   : 'bg-orange-600 hover:bg-orange-500 text-white active:scale-95'}
               `}
@@ -811,16 +824,14 @@ export function SplitControls() {
               disabled={
                 isStripping ||
                 drawPoints.length < 3 ||
-                !currentImageUrl ||
-                !dashscopeApiKey
+                !currentImageUrl
               }
               data-testid="strip-next-step"
               className={`
                 flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all
                 ${isStripping ||
                 drawPoints.length < 3 ||
-                !currentImageUrl ||
-                !dashscopeApiKey
+                !currentImageUrl
                   ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                   : 'bg-emerald-600 hover:bg-emerald-500 text-white active:scale-95'}
               `}

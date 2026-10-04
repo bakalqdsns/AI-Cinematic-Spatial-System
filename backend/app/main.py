@@ -73,6 +73,7 @@ from app.endpoints_sequence import router as sequence_router
 from app.endpoints_shots import router as shots_router
 from app.endpoints_script import router as script_router
 from app.endpoints_mesh import router as mesh_router
+from app.endpoints_compose import router as compose_router
 from app.endpoints_llm import router as llm_router
 from app.endpoints_settings import router as settings_router, provider_router
 from app.endpoints_models import router as models_router
@@ -86,6 +87,26 @@ from app.services.llama_server_manager import ensure_server_running
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── Load persisted user preferences from ~/.aicss/settings.json ────────
+    try:
+        from app.services.settings_store import apply_overrides
+        n = apply_overrides()
+        if n:
+            print(f"[AICSS] Loaded {n} user setting override(s) from disk.")
+    except Exception as exc:
+        _log.warning("[AICSS] settings_store.apply_overrides() failed: %s", exc)
+
+    # Auto-register the model-mode cascade observer so user-facing
+    # changes to model_mode also update vlm/image/video_mode (when those
+    # are still at their defaults).
+    try:
+        from app.services.settings_observer import (
+            register_observer, ModelModeCascadeObserver,
+        )
+        register_observer("model_mode_cascade", ModelModeCascadeObserver())
+    except Exception as exc:
+        _log.warning("[AICSS] failed to register ModelModeCascadeObserver: %s", exc)
+
     # Initialize DashScope client for cloud mode
     configure_dashscope_client(
         llm_model=settings.dashscope_llm_model,
@@ -205,6 +226,7 @@ app.include_router(sequence_router, prefix="/api/aicss", tags=["v2 - Sequence"])
 app.include_router(shots_router, prefix="/api/aicss", tags=["v2 - Shots"])
 app.include_router(script_router, prefix="/api/aicss", tags=["v2 - Script & Motion"])
 app.include_router(mesh_router, prefix="/api/aicss", tags=["v2 - 3D Mesh Export"])
+app.include_router(compose_router, tags=["v2 - Compose"])
 app.include_router(llm_router, tags=["LLM Server"])
 app.include_router(settings_router, tags=["Settings"])
 app.include_router(provider_router, tags=["Cloud Providers"])

@@ -96,14 +96,22 @@ def register():
         # Running outside Blender — nothing to register.
         return
 
-    from .operators import import_layers, setup_camera, add_lighting, apply_material
+    from .operators import (
+        import_layers, setup_camera, add_lighting, apply_material,
+        verify_cycles, render_queue, import_character_frames, layer_motion,
+    )
     from .ui.aicss_panel import AICSS_PT_panel
 
     for cls in (
         import_layers.AICSS_OT_import_layers,
         setup_camera.AICSS_OT_setup_camera,
+        setup_camera.AICSS_OT_setup_camera_animation,
         add_lighting.AICSS_OT_add_lighting,
         apply_material.AICSS_OT_apply_paper_material,
+        verify_cycles.AICSS_OT_verify_cycles,
+        render_queue.AICSS_OT_render_queue,
+        import_character_frames.AICSS_OT_import_character_frames,
+        layer_motion.AICSS_OT_layer_motion,
         AICSS_PT_panel,
     ):
         bpy.utils.register_class(cls)
@@ -116,13 +124,21 @@ def unregister():
     except ImportError:
         return
 
-    from .operators import import_layers, setup_camera, add_lighting, apply_material
+    from .operators import (
+        import_layers, setup_camera, add_lighting, apply_material,
+        verify_cycles, render_queue, import_character_frames, layer_motion,
+    )
     from .ui.aicss_panel import AICSS_PT_panel
 
     for cls in (
         AICSS_PT_panel,
+        layer_motion.AICSS_OT_layer_motion,
+        import_character_frames.AICSS_OT_import_character_frames,
+        render_queue.AICSS_OT_render_queue,
+        verify_cycles.AICSS_OT_verify_cycles,
         apply_material.AICSS_OT_apply_paper_material,
         add_lighting.AICSS_OT_add_lighting,
+        setup_camera.AICSS_OT_setup_camera_animation,
         setup_camera.AICSS_OT_setup_camera,
         import_layers.AICSS_OT_import_layers,
     ):

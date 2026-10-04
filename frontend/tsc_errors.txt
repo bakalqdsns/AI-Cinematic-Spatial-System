@@ -1,0 +1,26 @@
+﻿node.exe : npm warn Unknown env config "devdir". This will stop working in the next major version of npm. See `npm help
+ npmrc` for supported config options.
+所在位置 行:1 字符: 1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (npm warn Unknow...config options.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+src/components/CameraPathPlayer.tsx(33,8): error TS2305: Module '"../utils/cameraAnimation"' has no exported member 'PlaybackState'.
+src/components/ExportPanel.tsx(33,51): error TS2345: Argument of type '"layers"' is not assignable to parameter of type 'ExportScope | (() => ExportScope)'.
+src/components/ExportPanel.tsx(125,11): error TS2367: This comparison appears to be unintentional because the types 'ExportScope' and '"objects"' have no overlap.
+src/components/ExportPanel.tsx(137,18): error TS2367: This comparison appears to be unintentional because the types 'ExportScope' and '"layers"' have no overlap.
+src/components/ExportPanel.tsx(319,24): error TS2367: This comparison appears to be unintentional because the types 'ExportScope' and '"objects"' have no overlap.
+src/components/ExportPanel.tsx(319,49): error TS2367: This comparison appears to be unintentional because the types 'ExportScope' and '"layers"' have no overlap.
+src/components/PolygonDrawTool.tsx(116,7): error TS2322: Type 'string' is not assignable to type 'DepthLayerKey'.
+src/components/ScriptEditor.tsx(377,84): error TS7053: Element implicitly has an 'any' type because expression of type 'string' can't be used to index type '{ wide?: string | undefined; closeup?: string | undefined; mood?: string | undefined; }'.
+  No index signature with a parameter of type 'string' was found on type '{ wide?: string | undefined; closeup?: string | undefined; mood?: string | undefined; }'.
+src/components/SplitControls.tsx(310,27): error TS2552: Cannot find name 'computeOcclusionAwareMask'. Did you mean 'computeOcclusionHoles'?
+src/store/useScriptStore.ts(332,31): error TS2551: Property 'visual_prompt' does not exist on type 'CharacterAsset'. Did you mean 'visualPrompt'?
+src/store/useScriptStore.ts(333,33): error TS2551: Property 'reference_image' does not exist on type 'CharacterAsset'. Did you mean 'referenceImage'?
+src/store/useScriptStore.ts(334,34): error TS2551: Property 'three_view_images' does not exist on type 'CharacterAsset'. Did you mean 'threeViewImages'?
+src/store/useScriptStore.ts(443,31): error TS2551: Property 'visual_prompt' does not exist on type 'SceneAsset'. Did you mean 'visualPrompt'?
+src/store/useScriptStore.ts(444,33): error TS2551: Property 'keyframe_images' does not exist on type 'SceneAsset'. Did you mean 'keyframeImages'?
+src/store/useScriptStore.ts(523,9): error TS2322: Type 'string | null' is not assignable to type 'string | undefined'.
+  Type 'null' is not assignable to type 'string | undefined'.
+src/types/index.ts(88,14): error TS2741: Property 'sky' is missing in type '{ foreground: number; midground: number; background: number; }' but required in type 'Record<DepthLayerKey, number>'.

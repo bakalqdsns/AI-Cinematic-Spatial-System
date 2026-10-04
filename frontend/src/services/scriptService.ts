@@ -1,11 +1,26 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // AICSS Script Service — v2 API client for the script splitting pipeline.
-// Wraps the backend script_parser / shot_generator / character_generator /
-// motion_extractor endpoints.
+//
+// Thin wrapper around the generated OpenAPI client (`generated/scriptMotion`,
+// `generated/layers`, `generated/v2Shots`). The v2 script endpoints speak
+// snake_case on the wire (e.g. `raw_text`, `script_data`, `scene_transitions`),
+// so the wrappers below convert the existing camelCase frontend types to the
+// snake_case request bodies and back to the camelCase response types that
+// `useScriptStore` consumes — keeping every exported signature identical so
+// callers need no changes.
+//
+// Two functions stay fully handwritten:
+//   - `archiveShot` — the OpenAPI snapshot's `archive_shot` operation doesn't
+//     expose the `lighting_preset` query param, but T13 added it as a
+//     forward-compatible query string that `ScriptEditor.tsx` passes through.
+//     The generated client can't send undeclared query params, so we keep a
+//     small axios call that appends `lighting_preset` when set.
+//   - `downloadShotArchive` — downloads a binary ZIP blob; the generated
+//     client returns parsed JSON, so it can't help here.
 // ─────────────────────────────────────────────────────────────────────────────
 import axios from 'axios';
 import type {
-  ScriptData, Shot, SceneTransition, CharacterActionSequence,
+  ScriptData, Shot, SceneTransition,
   CharacterAsset, Character, MotionResponse,
   ParseScriptRequest, ParseScriptResponse,
   ExtractCharactersRequest, ExtractCharactersResponse,
@@ -14,29 +29,13 @@ import type {
   GenerateMotionRequest, ScenePrompt,
   ScriptLanguage, ParagraphType, SceneAsset,
 } from '../types/script';
-
-const BASE_URL = import.meta.env.VITE_AICSS_BACKEND || 'http://localhost:8000';
-
-// Script parsing and shot generation involve multi-step LLM pipelines that can
-// take several minutes per scene, so we extend the default timeout to 30min —
-const api = axios.create({
-  baseURL: `${BASE_URL}/api/aicss`,
-  timeout: 30 * 60 * 1000,
-});
+import { generatedClient, DEFAULT_BACKEND } from './generatedClient';
 
 // ─── Script Parsing ───────────────────────────────────────────────────────────
 
 export async function parseScript(request: ParseScriptRequest): Promise<ParseScriptResponse> {
   console.log('[scriptService] parseScript called with:', { rawTextLength: request.rawText.length, language: request.language });
 
-  // Character-first pipeline: pre-extract characters first, then run the
-  // backend /parse endpoint. The backend will still run its own extraction
-  // inside /parse, but having a separate call lets the UI display characters
-  // as soon as they're identified (before the slower full parse completes).
-  //
-  // The /parse response's `script_data.characters` is the authoritative source
-  // once it arrives — we only use the pre-extraction result to populate the
-  // UI optimistically.
   const charPromise = extractCharacters({
     rawText: request.rawText,
     language: request.language,
@@ -46,45 +45,42 @@ export async function parseScript(request: ParseScriptRequest): Promise<ParseScr
     return { characters: [] as Character[], projectId: request.projectId };
   });
 
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiNormalizeAndParseApiAicssV2ScriptsParsePost({
+    requestBody: {
+      raw_text: request.rawText,
+      language: request.language,
+      project_id: request.projectId,
+      dashscope_api_key: request.dashscopeApiKey || undefined,
+    } as any,
+  }) as {
     normalized_script: string;
     script_data: Record<string, unknown>;
     project_id?: string;
-  }>('/v2/scripts/parse', {
-    raw_text: request.rawText,
-    language: request.language,
-    project_id: request.projectId,
-    dashscope_api_key: request.dashscopeApiKey || undefined,
-  });
+  };
   console.log('[scriptService] parseScript response:', data);
 
-  // Map snake_case API response to camelCase type
   const response: ParseScriptResponse = {
     normalizedScript: data.normalized_script || '',
     scriptData: _deserializeScriptData(data.script_data || {}),
     projectId: data.project_id,
   };
 
-  // Surface pre-extracted characters so the UI can adopt them even before
-  // /parse finishes parsing them. The final scriptData overrides in any case.
-  // We deliberately don't await charPromise — it's a non-blocking progressive
-  // enhancement. The caller can call extractCharacters directly if they want
-  // the standalone result.
   void charPromise;
-
   return response;
 }
 
 export async function extractCharacters(request: ExtractCharactersRequest): Promise<ExtractCharactersResponse> {
   console.log('[scriptService] extractCharacters called');
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiExtractCharactersApiAicssV2ScriptsCharactersExtractPost({
+    requestBody: {
+      raw_text: request.rawText,
+      language: request.language,
+      project_id: request.projectId,
+    } as any,
+  }) as {
     characters: Record<string, unknown>[];
     project_id?: string;
-  }>('/v2/scripts/characters/extract', {
-    raw_text: request.rawText,
-    language: request.language,
-    project_id: request.projectId,
-  });
+  };
 
   const characters: Character[] = (data.characters || []).map((c, i) => ({
     id: (c.id as string) || `char-${i + 1}`,
@@ -122,7 +118,7 @@ function _deserializeScriptData(data: Record<string, unknown>): ScriptData {
     scenes: ((data.scenes as Record<string, unknown>[]) || []).map((s, i) => ({
       id: (s.id as string) || `scene-${i + 1}`,
       location: (s.location as string) || '',
-      time: (s.time as string) || 'Day',
+      time: ((s.time as string) || 'Day') as ScriptData['scenes'][number]['time'],
       atmosphere: (s.atmosphere as string) || '',
       estimatedShots: ((s.estimated_shots as number) || (s.estimatedShots as number) || 0),
     })),
@@ -145,19 +141,20 @@ function _deserializeScriptData(data: Record<string, unknown>): ScriptData {
 // ─── Shot Generation ──────────────────────────────────────────────────────────
 
 export async function generateShots(request: GenerateShotsRequest): Promise<GenerateShotsResponse> {
-  // Use snake_case payload fields to match the backend Pydantic models directly.
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiGenerateShotsApiAicssV2ScriptsShotsPost({
+    requestBody: {
+      script_data: request.scriptData,
+      shots_per_scene: request.shotsPerScene ?? 6,
+      language: request.language,
+      project_id: request.projectId,
+    } as any,
+  }) as {
     shots: Record<string, unknown>[];
     scene_transitions: Record<string, unknown>[];
     character_action_sequences: Record<string, unknown>[];
     total_duration_seconds: number;
     project_id?: string;
-  }>('/v2/scripts/shots', {
-    script_data: request.scriptData,
-    shots_per_scene: request.shotsPerScene ?? 6,
-    language: request.language,
-    project_id: request.projectId,
-  });
+  };
 
   return {
     shots: (data.shots || []).map(s => {
@@ -221,10 +218,12 @@ export async function getScenePrompts(shots: Shot[]): Promise<{ scenePrompts: Sc
     duration_seconds: s.durationSeconds,
   }));
 
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiGetScenePromptsApiAicssV2ScriptsScenePromptsPost({
+    requestBody: { shots: serialized } as any,
+  }) as {
     scene_prompts: Record<string, unknown>[];
     transition_prompts: Record<string, unknown>[];
-  }>('/v2/scripts/scene-prompts', { shots: serialized });
+  };
 
   return {
     scenePrompts: (data.scene_prompts || []).map(p => ({
@@ -249,22 +248,24 @@ export async function getScenePrompts(shots: Shot[]): Promise<{ scenePrompts: Sc
 // ─── Character Generation ─────────────────────────────────────────────────────
 
 export async function generateThreeView(request: ThreeViewRequest): Promise<ThreeViewResponse> {
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiGenerateThreeViewApiAicssV2ScriptsCharactersGenerateThreeViewPost({
+    requestBody: {
+      character_id: request.characterId,
+      character_name: request.characterName,
+      character_gender: request.characterGender || '',
+      character_age: request.characterAge || '',
+      character_personality: request.characterPersonality || '',
+      visual_prompt: request.visualPrompt,
+      reference_image: request.referenceImage,
+      project_id: request.projectId,
+    } as any,
+  }) as {
     character_id: string;
     visual_prompt: string;
     three_view_images: Record<string, string>;
     reference_image?: string;
     project_id?: string;
-  }>('/v2/scripts/characters/generate-three-view', {
-    character_id: request.characterId,
-    character_name: request.characterName,
-    character_gender: request.characterGender || '',
-    character_age: request.characterAge || '',
-    character_personality: request.characterPersonality || '',
-    visual_prompt: request.visualPrompt,
-    reference_image: request.referenceImage,
-    project_id: request.projectId,
-  });
+  };
 
   return {
     characterId: data.character_id,
@@ -281,18 +282,20 @@ export async function generateVariation(
   referenceImage?: string,
   projectId?: string
 ): Promise<{ variationId: string; image?: string }> {
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiGenerateVariationApiAicssV2ScriptsCharactersGenerateVariationPost({
+    requestBody: {
+      character_id: characterId,
+      variation_prompt: variationPrompt,
+      reference_image: referenceImage,
+      project_id: projectId,
+    } as any,
+  }) as {
     character_id: string;
     variation_id: string;
     variation_prompt: string;
     image?: string;
     project_id?: string;
-  }>('/v2/scripts/characters/generate-variation', {
-    character_id: characterId,
-    variation_prompt: variationPrompt,
-    reference_image: referenceImage,
-    project_id: projectId,
-  });
+  };
   return {
     variationId: data.variation_id,
     image: data.image,
@@ -302,7 +305,18 @@ export async function generateVariation(
 // ─── Motion Generation ────────────────────────────────────────────────────────
 
 export async function generateMotion(request: GenerateMotionRequest): Promise<MotionResponse> {
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiGenerateMotionApiAicssV2ScriptsMotionGeneratePost({
+    requestBody: {
+      shot_id: request.shotId,
+      character_id: request.characterId,
+      character_name: request.characterName,
+      action_prompt: request.actionPrompt,
+      start_image: request.startImage,
+      end_image: request.endImage,
+      duration_seconds: request.durationSeconds ?? 5.0,
+      project_id: request.projectId,
+    } as any,
+  }) as {
     shot_id: string;
     character_id: string;
     status: string;
@@ -310,16 +324,7 @@ export async function generateMotion(request: GenerateMotionRequest): Promise<Mo
     frame_count: number;
     segmented_frames: { frameIndex: number; path: string; filename: string }[];
     project_id?: string;
-  }>('/v2/scripts/motion/generate', {
-    shot_id: request.shotId,
-    character_id: request.characterId,
-    character_name: request.characterName,
-    action_prompt: request.actionPrompt,
-    start_image: request.startImage,
-    end_image: request.endImage,
-    duration_seconds: request.durationSeconds ?? 5.0,
-    project_id: request.projectId,
-  });
+  };
 
   return {
     shotId: data.shot_id,
@@ -338,14 +343,16 @@ export async function segmentFrames(
   actionName: string,
   projectId?: string
 ): Promise<MotionResponse> {
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiSegmentFramesApiAicssV2ScriptsMotionSegmentPost({
+    requestBody: {
+      frame_paths: framePaths,
+      character_name: characterName,
+      action_name: actionName,
+      project_id: projectId,
+    } as any,
+  }) as {
     segmented_frames: { frame_index: number; original_path: string; segmented_path: string }[];
-  }>('/v2/scripts/motion/segment', {
-    frame_paths: framePaths,
-    character_name: characterName,
-    action_name: actionName,
-    project_id: projectId,
-  });
+  };
 
   return {
     shotId: '',
@@ -370,11 +377,14 @@ export async function generateVisualPrompt(
   genre: string = 'cinematic',
   language: string = 'chinese'
 ): Promise<string> {
-  // The visual-prompt endpoint takes all parameters as query string so it can
-  // be triggered cheaply from auto-fill inputs without serializing a payload.
-  const { data } = await api.post<{ visual_prompt: string }>('/v2/scripts/visual-prompt', null, {
-    params: { character_name: characterName, gender, age, personality, genre, language },
-  });
+  const data = await generatedClient.scriptMotion.apiGenerateVisualPromptApiAicssV2ScriptsVisualPromptPost({
+    characterName,
+    gender,
+    age,
+    personality,
+    genre,
+    language,
+  }) as { visual_prompt: string };
   return data.visual_prompt;
 }
 
@@ -397,20 +407,18 @@ export interface BatchStatusResponse {
 }
 
 export async function getBatchStatus(projectId: string): Promise<BatchStatusResponse> {
-  const { data } = await api.get<{
-    project_id: string;
-    characters: Record<string, BatchCharacterStatus>;
-    summary: { queued: number; running: number; done: number; failed: number };
-  }>('/v2/scripts/characters/batch-status', { params: { project_id: projectId } });
+  const data = await generatedClient.scriptMotion.apiBatchStatusApiAicssV2ScriptsCharactersBatchStatusGet({
+    projectId,
+  }) as BatchStatusResponse;
   return {
-    projectId: data.project_id,
+    project_id: data.project_id,
     characters: data.characters || {},
     summary: data.summary || { queued: 0, running: 0, done: 0, failed: 0 },
   };
 }
 
 export async function clearBatchStatus(projectId: string): Promise<void> {
-  await api.post('/v2/scripts/characters/batch-clear', null, { params: { project_id: projectId } });
+  await generatedClient.scriptMotion.apiBatchClearApiAicssV2ScriptsCharactersBatchClearPost({ projectId });
 }
 
 // ─── Scene Asset Batch Status ──────────────────────────────────────────────────
@@ -432,20 +440,18 @@ export interface SceneBatchStatusResponse {
 }
 
 export async function getSceneBatchStatus(projectId: string): Promise<SceneBatchStatusResponse> {
-  const { data } = await api.get<{
-    project_id: string;
-    scenes: Record<string, SceneBatchCharacterStatus>;
-    summary: { queued: number; running: number; done: number; failed: number };
-  }>('/v2/scripts/scenes/batch-status', { params: { project_id: projectId } });
+  const data = await generatedClient.scriptMotion.apiSceneBatchStatusApiAicssV2ScriptsScenesBatchStatusGet({
+    projectId,
+  }) as SceneBatchStatusResponse;
   return {
-    projectId: data.project_id,
+    project_id: data.project_id,
     scenes: data.scenes || {},
     summary: data.summary || { queued: 0, running: 0, done: 0, failed: 0 },
   };
 }
 
 export async function clearSceneBatchStatus(projectId: string): Promise<void> {
-  await api.post('/v2/scripts/scenes/batch-clear', null, { params: { project_id: projectId } });
+  await generatedClient.scriptMotion.apiSceneBatchClearApiAicssV2ScriptsScenesBatchClearPost({ projectId });
 }
 
 // ─── Manual Scene Asset (single scene) ────────────────────────────────────────
@@ -461,23 +467,158 @@ export interface SceneAssetRequest {
 }
 
 export async function generateSceneAsset(request: SceneAssetRequest): Promise<SceneAsset> {
-  const { data } = await api.post<{
+  const data = await generatedClient.scriptMotion.apiGenerateSceneAssetApiAicssV2ScriptsScenesGenerateAssetPost({
+    requestBody: {
+      scene_id: request.sceneId,
+      location: request.location,
+      time: request.time,
+      atmosphere: request.atmosphere || '',
+      visual_prompt: request.visualPrompt,
+      reference_image: request.referenceImage,
+      project_id: request.projectId,
+    } as any,
+  }) as {
     scene_id: string;
     visual_prompt: string;
     keyframe_images: Record<string, string>;
     project_id?: string;
-  }>('/v2/scripts/scenes/generate-asset', {
-    scene_id: request.sceneId,
-    location: request.location,
-    time: request.time,
-    atmosphere: request.atmosphere || '',
-    visual_prompt: request.visualPrompt,
-    reference_image: request.referenceImage,
-    project_id: request.projectId,
-  });
+  };
   return {
     sceneId: data.scene_id,
     visualPrompt: data.visual_prompt,
     keyframeImages: data.keyframe_images || {},
   };
+}
+
+// ─── Scene Depth Layers (Module 3) ────────────────────────────────────────────
+//
+// Asynchronous endpoint approach: frontend fires `POST /api/aicss/layers/export`
+// on user demand with one of the keyframe images as `imageUrl`. The backend
+// runs DepthAnything → spatial bucketing → RGBA-per-layer PNG export, returns
+// 4 data URIs + Z-offset table. No persistence — the caller decides whether to
+// cache the result. See `useScriptStore.layerScene` for the wiring.
+
+export interface SceneLayersRequest {
+  // One of the keyframe images. Accepts plain base64 (no data: prefix needed).
+  imageUrl: string;
+  // Optional subset of layer names to export; defaults to all four.
+  layers?: Array<'sky' | 'background' | 'midground' | 'foreground'>;
+  featherPx?: number;
+}
+
+export interface SceneLayersResponse {
+  width: number;
+  height: number;
+  layers: {
+    sky?: { dataUri: string };
+    background?: { dataUri: string };
+    midground?: { dataUri: string };
+    foreground?: { dataUri: string };
+  };
+  zOffsets: Array<{ layer: string; zOffset: number; zMin: number; zMax: number }>;
+}
+
+export async function exportSceneLayers(
+  request: SceneLayersRequest,
+  options?: { signal?: AbortSignal },
+): Promise<SceneLayersResponse> {
+  // The generated client returns a CancelablePromise; wire the caller's
+  // AbortSignal to its cancel() so `useScriptStore` can abort in-flight layer
+  // exports when a newer request supersedes the old one.
+  const promise = generatedClient.layers.layersExportApiAicssLayersExportPost({
+    requestBody: {
+      imageUrl: request.imageUrl,
+      layers: request.layers,
+      featherPx: request.featherPx,
+    } as any,
+  }) as Promise<SceneLayersResponse>;
+
+  if (options?.signal) {
+    const signal = options.signal;
+    const cancelable = promise as unknown as { cancel?: () => void };
+    if (signal.aborted) {
+      cancelable.cancel?.();
+    } else {
+      signal.addEventListener('abort', () => cancelable.cancel?.(), { once: true });
+    }
+  }
+
+  return promise;
+}
+
+// ─── Shot archive (module 5) ──────────────────────────────────────────────────
+
+export interface ArchiveShotResponse {
+  projectId: string;
+  shotId: string;
+  fileName: string;
+  fileSize: number;
+  fileCount: number;
+  downloadUrl: string;
+  layerCount: number;
+  meshCount: number;
+}
+
+/**
+ * Pack shot assets into a Blender-ready ZIP and return metadata + download URL.
+ *
+ * Handwritten (not the generated `v2Shots.archiveShot...` method) because the
+ * OpenAPI snapshot's `archive_shot` operation doesn't expose the
+ * `lighting_preset` query param, but T13 added it as a forward-compatible
+ * query string that `ScriptEditor.tsx`'s `handleArchiveShot` passes through
+ * from `useAppStore.getState().lightingPreset`. The generated client can't
+ * send undeclared query params, so we keep a small axios call here.
+ */
+export async function archiveShot(
+  projectId: string,
+  shotId: string,
+  sceneId?: string,
+  lightingPreset?: string | null,
+): Promise<ArchiveShotResponse> {
+  const api = axios.create({
+    baseURL: `${DEFAULT_BACKEND}/api/aicss`,
+    timeout: 30 * 60 * 1000,
+  });
+  const path =
+    '/v2/projects/' +
+    encodeURIComponent(projectId) +
+    '/shots/' +
+    encodeURIComponent(shotId) +
+    '/archive';
+  const params: Record<string, string> = {};
+  if (sceneId) params.scene_id = sceneId;
+  // T13: pass the lighting preset name so the backend can stamp it into the
+  // shot archive manifest's `lightingPreset` field. The backend endpoint
+  // currently ignores this query param (W2 owns backend wiring); sending it
+  // is forward-compatible and satisfies the T13 frontend acceptance criterion.
+  if (lightingPreset) params.lighting_preset = lightingPreset;
+  const { data } = await api.post<ArchiveShotResponse>(
+    path,
+    null,
+    { params: Object.keys(params).length ? params : undefined },
+  );
+  return data;
+}
+
+/** Trigger browser download of the shot archive ZIP. */
+export async function downloadShotArchive(projectId: string, shotId: string, fileName?: string): Promise<void> {
+  // Handwritten: the generated client returns parsed JSON, but this endpoint
+  // streams a binary ZIP blob.
+  const url =
+    DEFAULT_BACKEND +
+    '/api/aicss/v2/projects/' +
+    encodeURIComponent(projectId) +
+    '/shots/' +
+    encodeURIComponent(shotId) +
+    '/archive/download';
+  const resp = await axios.get(url, { responseType: 'blob', timeout: 10 * 60 * 1000 });
+  const blob = new Blob([resp.data], { type: 'application/zip' });
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = fileName || projectId + '_' + shotId + '_archive.zip';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
 }

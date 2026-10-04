@@ -1,0 +1,63 @@
+{
+  "title": "The Dragon's Cave",
+  "genre": "fantasy",
+  "logline": "A lone hero ventures through a mist-shrouded ancient forest and into a dark cave to claim treasure, pursued by a dragon overhead.",
+  "characters": [],
+  "scenes": [
+    {
+      "id": "scene-1",
+      "location": "Ancient Forest",
+      "time": "Day",
+      "atmosphere": "mysterious",
+      "estimated_shots": 2,
+      "visual_prompt": ""
+    },
+    {
+      "id": "scene-2",
+      "location": "Dark Cave",
+      "time": "Night",
+      "atmosphere": "tense",
+      "estimated_shots": 2,
+      "visual_prompt": ""
+    }
+  ],
+  "story_paragraphs": [
+    {
+      "id": "para-1",
+      "text": "EXT. ANCIENT FOREST - DAY",
+      "scene_ref_id": "scene-1",
+      "paragraph_type": "transition",
+      "speaker_id": "",
+      "emotion": "",
+      "contains_action": false
+    },
+    {
+      "id": "para-2",
+      "text": "The hero walks through a misty forest. A dragon flies overhead.",
+      "scene_ref_id": "scene-1",
+      "paragraph_type": "action",
+      "speaker_id": "",
+      "emotion": "",
+      "contains_action": true
+    },
+    {
+      "id": "para-3",
+      "text": "INT. DARK CAVE - NIGHT",
+      "scene_ref_id": "scene-2",
+      "paragraph_type": "transition",
+      "speaker_id": "",
+      "emotion": "",
+      "contains_action": false
+    },
+    {
+      "id": "para-4",
+      "text": "The hero enters a dark cave. Treasure glimmers in the distance.",
+      "scene_ref_id": "scene-2",
+      "paragraph_type": "action",
+      "speaker_id": "",
+      "emotion": "",
+      "contains_action": true
+    }
+  ],
+  "language": "english"
+}

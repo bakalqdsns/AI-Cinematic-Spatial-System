@@ -15,11 +15,16 @@ server-side mirror so:
 
 The actual interpolation lives on the frontend; this module only emits
 the static keyframe table.
+
+T06 扩展：``write_camera_path_to_archive`` 把关键帧序列写入 shot archive
+ZIP 的 manifest.cameraPath 字段，供 Blender 插件
+``aicss.setup_camera_animation`` operator 读取。
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from app.services.shot_generator import CameraMovement, ShotSize
@@ -134,3 +139,31 @@ def build_camera_path(
     # else: unknown movement — fall back to static (just [start]).
 
     return [start, end]
+
+
+def write_camera_path_to_archive(
+    archive_path: Path | str,
+    movement: CameraMovement | str,
+    shot_size: ShotSize | str,
+    duration: float,
+) -> list[dict]:
+    """生成相机路径并写入 shot archive ZIP 的 manifest.cameraPath 字段（T06）。
+
+    Args:
+        archive_path: shot archive ZIP 路径（由 ``shot_archiver.build_shot_archive`` 产出）。
+        movement / shot_size / duration: 见 ``build_camera_path``。
+
+    Returns:
+        写入的 cameraPath 关键帧列表。
+
+    Raises:
+        FileNotFoundError: archive 不存在。
+        ValueError: archive 内无 manifest.json。
+    """
+    from app.services.shot_archiver import update_archive_manifest_field
+
+    camera_path = build_camera_path(movement, shot_size, duration)
+    update_archive_manifest_field(
+        archive_path, "cameraPath", camera_path,
+    )
+    return camera_path

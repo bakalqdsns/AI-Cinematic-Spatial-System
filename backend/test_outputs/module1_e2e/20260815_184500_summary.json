@@ -1,0 +1,64 @@
+{
+  "timestamp": "20260815_184500",
+  "elapsed_seconds": 14.35,
+  "pass": 6,
+  "warn": 5,
+  "fail": 0,
+  "steps": [
+    {
+      "step": "extract_characters",
+      "status": "PASS",
+      "detail": "1 character(s) extracted"
+    },
+    {
+      "step": "extract_characters_field_shape",
+      "status": "PASS",
+      "detail": "All characters carry id/name/visual_prompt fields"
+    },
+    {
+      "step": "parse_script",
+      "status": "PASS",
+      "detail": "1 scene(s), 1 character(s), 4 paragraph(s), project_id=20260815_104510_Untitled"
+    },
+    {
+      "step": "parse_script_prompt_coverage",
+      "status": "WARN",
+      "detail": "characters with visual_prompt: 0/1, scenes with visual_prompt: 0/1"
+    },
+    {
+      "step": "visual_prompt",
+      "status": "WARN",
+      "detail": "HTTP 422 (LLM unavailable or no API key)"
+    },
+    {
+      "step": "generate_shots",
+      "status": "WARN",
+      "detail": "Client exception: 'StoryParagraph' object has no attribute 'scene_id'"
+    },
+    {
+      "step": "batch_status",
+      "status": "PASS",
+      "detail": "project=20260815_104510_Untitled, summary={'queued': 0, 'running': 1, 'done': 0, 'failed': 0}, characters_tracked=1"
+    },
+    {
+      "step": "batch_status_visual_prompt_hydration",
+      "status": "WARN",
+      "detail": "0/1 characters expose a visual_prompt for hydration"
+    },
+    {
+      "step": "parsedScript.characters[*].visual_prompt field exists",
+      "status": "PASS",
+      "detail": "1/1"
+    },
+    {
+      "step": "parsedScript.scenes[*].visual_prompt field exists",
+      "status": "PASS",
+      "detail": "1/1"
+    },
+    {
+      "step": "shots[*].visual_prompts.{scene,action,camera}_prompt all populated",
+      "status": "WARN",
+      "detail": "0/0 shots"
+    }
+  ]
+}

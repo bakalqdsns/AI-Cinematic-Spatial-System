@@ -4,17 +4,23 @@
   "key": {
     "type": "SUN",
     "energy": 3.0,
-    "color": [1.0, 0.96, 0.88]
+    "color": [1.0, 0.96, 0.88],
+    "location": [8.0, -8.0, 12.0],
+    "rotation": [0.6, 0.0, 0.5]
   },
   "fill": {
     "type": "AREA",
     "energy": 1.5,
     "color": [0.8, 0.9, 1.0],
-    "size": 5.0
+    "size": 5.0,
+    "location": [-8.0, -6.0, 8.0],
+    "rotation": [0.7, 0.0, -0.5]
   },
   "rim": {
     "type": "SPOT",
     "energy": 2.0,
-    "color": [1.0, 0.93, 0.8]
+    "color": [1.0, 0.93, 0.8],
+    "location": [0.0, 8.0, 10.0],
+    "rotation": [-0.7, 0.0, 0.0]
   }
 }

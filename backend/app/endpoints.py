@@ -9,6 +9,7 @@ All endpoints for the AICSS inference pipeline:
   POST /api/aicss/scene-graph   — Build scene graph
   POST /api/aicss/billboard     — Generate RGBA billboard texture
   POST /api/aicss/multiface     — Generate 6-face pseudo-3D textures
+  POST /api/aicss/occlusion-holes — Auto occlusion hole masks for LaMa inpaint
 """
 import io
 import base64
@@ -226,8 +227,13 @@ class AnalyzeResponse(BaseModel):
 class InpaintResponse(BaseModel):
     """`POST /api/aicss/inpaint` response."""
     imageUrl: str = Field(..., description="Base64 data URI of the inpainted PNG")
+    inpaintResultUrl: Optional[str] = Field(None, description="Alias of imageUrl, kept for backward compat")
     width: int
     height: int
+    model: Optional[str] = Field(None, description="Model identifier used for inpainting")
+    maskWhiteRatio: Optional[float] = Field(None, description="Ratio of white pixels in the mask")
+    warnings: Optional[list[dict]] = None
+    savedArtifacts: Optional[list[str]] = None
     usedFallback: bool = Field(
         default=False,
         description="True when the call fell back from cloud to local LaMa.",
@@ -279,6 +285,7 @@ class PaperLayerResponse(BaseModel):
 class BillboardResponse(BaseModel):
     """`POST /api/aicss/billboard` response."""
     rgbaUrl: Optional[str] = None
+    billboardUrl: Optional[str] = None  # alias of rgbaUrl, kept for backward compat
     width: int = 0
     height: int = 0
     savedFiles: Optional[list[str]] = None
@@ -346,6 +353,27 @@ class InpaintRequest(BaseModel):
     maskDataUrl: str = Field(..., description="Mask (RGBA), white (alpha=255)=area to inpaint, black (alpha=0)=keep")
     prompt: str = Field(..., description="Inpainting prompt (for compatibility; LaMa performs blind inpainting)")
     projectId: Optional[str] = Field(None, description="Optional project ID — when set, inpaint result is persisted")
+
+
+class OcclusionHolesRequest(BaseModel):
+    """从 Analyze 物体列表自动生成遮挡空洞 mask（不跑 LaMa）。"""
+    objects: list[dict] = Field(..., description="DetectedObject[]（需含 id / maskDataUrl / depth / polygon）")
+    imageWidth: int = Field(..., gt=0)
+    imageHeight: int = Field(..., gt=0)
+    targetObjectIds: Optional[list[str]] = Field(
+        None, description="仅对这些 objectId 生成空洞；省略则全部"
+    )
+    mode: str = Field(
+        "peel",
+        description="peel=整物体 mask；occluded_interior=仅被更近物体遮挡的重叠区",
+    )
+
+
+class OcclusionHolesResponse(BaseModel):
+    holes: list[dict]
+    mergedMaskDataUrl: Optional[str] = None
+    mode: str
+    count: int
 
 
 # ─── Paper Diorama 2.0 request models ─────────────────────────────────────────
@@ -899,7 +927,8 @@ async def generate_billboard(request: BillboardRequest) -> BillboardResponse:
             mask_cropped = mask_np[y1:y2, x1:x2]
 
         rgba = create_rgba_from_masked_image(cropped, mask_cropped)
-        result = {"billboardUrl": pil_to_base64(rgba, fmt="PNG")}
+        rgba_b64 = pil_to_base64(rgba, fmt="PNG")
+        result = {"rgbaUrl": rgba_b64, "billboardUrl": rgba_b64, "width": rgba.size[0], "height": rgba.size[1]}
 
         if request.projectId:
             safe_id = _sanitize_filename(request.objectId)
@@ -1047,6 +1076,9 @@ async def inpaint_image(request: InpaintRequest) -> InpaintResponse:
         result_url = pil_to_base64(result_img)
         result = {
             "inpaintResultUrl": result_url,
+            "imageUrl": result_url,
+            "width": result_img.size[0],
+            "height": result_img.size[1],
             "model": "LaMa (local)",
             "maskWhiteRatio": white_ratio,
         }
@@ -1061,6 +1093,7 @@ async def inpaint_image(request: InpaintRequest) -> InpaintResponse:
             )
             if saved is not None:
                 result["savedArtifacts"] = saved
+                result["savedFiles"] = saved
 
         return result
 
@@ -1069,6 +1102,50 @@ async def inpaint_image(request: InpaintRequest) -> InpaintResponse:
     except Exception as e:
         _log.exception("[inpaint] Error")
         raise HTTPException(status_code=500, detail="Inpainting failed")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/aicss/occlusion-holes — Auto occlusion hole masks for LaMa
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/occlusion-holes", response_model=OcclusionHolesResponse)
+async def occlusion_holes(request: OcclusionHolesRequest) -> OcclusionHolesResponse:
+    """
+    从 Analyze 物体列表自动生成遮挡空洞 mask（不跑 LaMa）。
+
+    peel: 空洞 = 目标物体完整 SAM mask（适合逐层剥离）。
+    occluded_interior: 空洞 = 目标 ∩ 更近遮挡物；无重叠时回退 peel。
+    """
+    mode = (request.mode or "peel").strip().lower()
+    if mode not in ("peel", "occluded_interior"):
+        raise HTTPException(status_code=400, detail="mode must be 'peel' or 'occluded_interior'")
+
+    try:
+        from app.services.occlusion_holes import (
+            compute_occlusion_holes,
+            holes_to_dicts,
+            merge_hole_masks,
+        )
+
+        holes = compute_occlusion_holes(
+            request.objects,
+            image_width=request.imageWidth,
+            image_height=request.imageHeight,
+            target_object_ids=request.targetObjectIds,
+            mode=mode,  # type: ignore[arg-type]
+        )
+        merged = merge_hole_masks(holes, (request.imageWidth, request.imageHeight))
+        return OcclusionHolesResponse(
+            holes=holes_to_dicts(holes),
+            mergedMaskDataUrl=merged,
+            mode=mode,
+            count=len(holes),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        _log.exception("[occlusion-holes] Error")
+        raise HTTPException(status_code=500, detail="Occlusion hole detection failed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1155,6 +1232,16 @@ async def paper_diorama_generate(request: PaperDioramaRequest) -> PaperDioramaRe
             style_strength=request.styleStrength,
         )
 
+        # Normalise keys from snake_case (paper_diorama output) to camelCase (Pydantic v2 response model)
+        textures = {
+            "paperStyleUrl": textures.get("paper_style_url"),
+            "normalMapUrl": textures.get("normal_map_url"),
+            "thicknessGrayUrl": textures.get("thickness_gray_url"),
+            "outlinedUrl": textures.get("outlined_url"),
+            "width": image.width,
+            "height": image.height,
+        }
+
         # Persist if projectId supplied — save the 5 texture PNGs
         if request.projectId:
             # objectId not in PaperDioramaRequest — derive from a hash of the mask
@@ -1163,18 +1250,17 @@ async def paper_diorama_generate(request: PaperDioramaRequest) -> PaperDioramaRe
             safe_id = _sanitize_filename(obj_id)
             files: dict[str, bytes | dict] = {}
             for kind, url in textures.items():
-                if not url.startswith("data:"):
+                if not isinstance(url, str) or not url.startswith("data:"):
                     continue
                 try:
                     b64 = url.split(",", 1)[1]
-                    files[f"{kind.replace('_url', '')}_{safe_id}.png"] = base64.b64decode(b64)
+                    files[f"{kind}_{safe_id}.png"] = base64.b64decode(b64)
                 except Exception:
                     continue
             if files:
                 saved = await _save_project_artifact(request.projectId, "paper", files)
                 if saved is not None:
-                    textures = dict(textures)  # copy
-                    textures["savedArtifacts"] = saved
+                    textures["savedFiles"] = saved
 
         return textures
     except HTTPException:
@@ -1236,23 +1322,34 @@ async def paper_layer_generate(request: PaperLayerRequest) -> PaperLayerResponse
             style_strength=request.styleStrength,
         )
 
+        # Normalise keys from snake_case (paper_diorama output) to camelCase (Pydantic v2 response model)
+        textures = {
+            "paperStyleUrl": textures.get("paper_style_url"),
+            "normalMapUrl": textures.get("normal_map_url"),
+            "thicknessGrayUrl": textures.get("thickness_gray_url"),
+            "outlinedUrl": textures.get("outlined_url"),
+            "width": image.width,
+            "height": image.height,
+            "layerKey": request.layerKey,
+        }
+
         # Persist if projectId supplied — 5 textures named by layerKey
         if request.projectId:
             key = _sanitize_filename(request.layerKey or "default")
-            files: dict[str, bytes | dict] = {}
+            files: dict[str, bytes] = {}
             for kind, url in textures.items():
                 if not isinstance(url, str) or not url.startswith("data:"):
                     continue
                 try:
                     b64 = url.split(",", 1)[1]
-                    files[f"{kind.replace('_url', '')}_{key}.png"] = base64.b64decode(b64)
+                    safe_kind = kind.replace("Url", "").replace("Gray", "Gray")
+                    files[f"{safe_kind}_{key}.png"] = base64.b64decode(b64)
                 except Exception:
                     continue
             if files:
                 saved = await _save_project_artifact(request.projectId, "paper", files)
                 if saved is not None:
-                    textures = dict(textures)
-                    textures["savedArtifacts"] = saved
+                    textures["savedFiles"] = saved
 
         return textures
     except HTTPException:

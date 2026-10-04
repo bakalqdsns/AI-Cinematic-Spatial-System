@@ -34,6 +34,14 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 # Override via HF_ENDPOINT env var.
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
+# When the model_manager detects a complete local snapshot for a model, it
+# flips ``HF_HUB_OFFLINE=1`` at runtime so subsequent ``cached_file`` /
+# ``from_pretrained`` calls short-circuit to disk. We also let users set this
+# from the environment to force offline mode globally (useful in air-gapped
+# CI runs). Default stays "0" so the rest of the codebase can still fetch new
+# models when needed.
+os.environ.setdefault("HF_HUB_OFFLINE", "0")
+
 # ── CUDA diagnostics ──────────────────────────────────────────────────────────
 _cuda_available = torch.cuda.is_available()
 _torch_cuda_ver = getattr(torch.version, "cuda", None)
@@ -110,6 +118,58 @@ class Settings(BaseSettings):
 
     # Segmentation prompt — dot-separated class names to detect
     segmentation_prompt: str = "person.car.building.tree.lamp.door.window.chair.table.road.sky.mountain.water.grass.flower"
+
+    # ── Layer hint rules ─────────────────────────────────────────────────────────
+    # Maps a GroundingDINO label (lowercase) to the layer it should hint toward.
+    # Layers without an entry fall through to the depth-percentile bucket.
+    # `ground` is special-cased in `object_detector.py` (it's routed to the
+    # `ground` layer rather than a depth-banded layer).
+    layer_hint_rules: dict[str, str] = {
+        # Foreground anchors — humans / vehicles / animals
+        "person": "foreground",
+        "pedestrian": "foreground",
+        "people": "foreground",
+        "child": "foreground",
+        "car": "foreground",
+        "truck": "foreground",
+        "van": "foreground",
+        "bus": "foreground",
+        "bicycle": "foreground",
+        "motorcycle": "foreground",
+        "animal": "foreground",
+        "dog": "foreground",
+        "cat": "foreground",
+        "bird": "foreground",
+        # Midground — small free-standing fixtures
+        "lamp": "midground",
+        "sign": "midground",
+        "traffic light": "midground",
+        "pole": "midground",
+        "fire hydrant": "midground",
+        "chair": "midground",
+        "table": "midground",
+        "sofa": "midground",
+        "bed": "midground",
+        "door": "midground",
+        "window": "midground",
+        "small tree": "midground",
+        "flower": "midground",
+        # Background — large static structures
+        "building": "background",
+        "mountain": "background",
+        "tree": "background",
+        "fence": "background",
+        "wall": "background",
+        # Ground / floor — independent layer
+        "ground": "ground",
+        "road": "ground",
+        "floor": "ground",
+        "sidewalk": "ground",
+        "grass": "ground",
+        "sand": "ground",
+        "water": "ground",   # treated as ground plane for lakes/rivers
+        "snow": "ground",
+    }
 
     # DashScope Wanx2.1 Image Edit (deprecated - now using local LaMa)
     dashscope_api_key: str = ""

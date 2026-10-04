@@ -1,0 +1,23 @@
+{
+  "object_id": "obj_grass_7",
+  "label": "grass grass",
+  "score": 0.30834534764289856,
+  "bbox": [
+    1046,
+    636,
+    1376,
+    768
+  ],
+  "depth_mean": 47.17743682861328,
+  "depth_min": 40.4503059387207,
+  "depth_max": 50.0,
+  "layer_hint": "foreground",
+  "z_offset": -2.0,
+  "cutout": "obj_0006_grass_grass.png",
+  "meta": {
+    "area_px": 17656,
+    "vertical_pos": 0.9140625,
+    "sam_score": 0.30834534764289856,
+    "aspect": 2.5
+  }
+}

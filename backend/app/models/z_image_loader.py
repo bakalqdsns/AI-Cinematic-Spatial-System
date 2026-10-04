@@ -26,6 +26,7 @@ import glob
 import os
 import shutil
 import time as _time
+from pathlib import Path
 from typing import Optional
 
 
@@ -137,11 +138,14 @@ class ZImageModel:
 
     # ── Download strategies ──────────────────────────────────────────────────
 
-    def ensure_downloaded(self) -> str:
+    def ensure_downloaded(self, progress_key: str | None = None) -> str:
         """
         Ensure the Z-Image-Turbo snapshot is on disk.  Returns the path to
         the directory that ``ZImagePipeline.from_pretrained(...)`` should be
         pointed at.
+
+        progress_key: when supplied, progress is reported to the
+                      download-jobs registry under this key.
 
         Strategies (in order):
 
@@ -181,6 +185,11 @@ class ZImageModel:
             )
             from huggingface_hub import snapshot_download
 
+            tqdm_class = None
+            if progress_key:
+                from app.services.download_progress import make_tqdm_callback
+                tqdm_class = make_tqdm_callback(progress_key)
+
             for attempt in range(1, max_retries + 1):
                 if attempt > 1:
                     print(f"[ZImage] HF Hub retry {attempt}/{max_retries} …")
@@ -192,6 +201,7 @@ class ZImageModel:
                         allow_patterns=list(_REQUIRED_GLOBS),
                         ignore_patterns=["*.msgpack", "*.h5", "*.onnx", "*.pt"],
                         max_workers=4,
+                        tqdm_class=tqdm_class,
                     )
                     if self.is_downloaded():
                         print(f"[ZImage] HF Hub snapshot ready: {local_dir}")
@@ -226,10 +236,46 @@ class ZImageModel:
                     # under ~/.cache/modelscope/hub/<repo> by default.  We
                     # then re-publish it into our project checkpoint_dir so
                     # the rest of AICSS finds it in one place.
-                    ms_dir = ms_snapshot_download(
-                        model_id=self.model_id,
-                        allow_patterns=list(_REQUIRED_GLOBS),
-                    )
+                    if progress_key:
+                        import threading as _thr
+                        from app.services.download_progress import report_file_progress
+                        stop_flag = _thr.Event()
+
+                        def _ms_progress_watcher():
+                            last_total = 0
+                            while not stop_flag.is_set():
+                                ms_root = Path.home() / ".cache" / "modelscope" / "hub" / self.model_id.replace("/", "--")
+                                try:
+                                    if ms_root.exists():
+                                        # Sum sizes of expected subdirs only.
+                                        bytes_done = 0
+                                        for sub in ("transformer", "text_encoder", "vae", "tokenizer", "scheduler"):
+                                            d = ms_root / sub
+                                            if d.exists():
+                                                for p in d.rglob("*"):
+                                                    if p.is_file():
+                                                        bytes_done += p.stat().st_size
+                                        if bytes_done > last_total:
+                                            report_file_progress(progress_key, self.model_id, bytes_done, bytes_done)
+                                        last_total = bytes_done
+                                except Exception:
+                                    pass
+                                stop_flag.wait(2.0)
+
+                        watcher = _thr.Thread(target=_ms_progress_watcher, daemon=True, name="ms-progress")
+                        watcher.start()
+                        try:
+                            ms_dir = ms_snapshot_download(
+                                model_id=self.model_id,
+                                allow_patterns=list(_REQUIRED_GLOBS),
+                            )
+                        finally:
+                            stop_flag.set()
+                    else:
+                        ms_dir = ms_snapshot_download(
+                            model_id=self.model_id,
+                            allow_patterns=list(_REQUIRED_GLOBS),
+                        )
                     mirror_dir = self._publish_modelscope_snapshot(ms_dir)
                     if self.is_downloaded():
                         print(f"[ZImage] ModelScope snapshot ready: {mirror_dir}")

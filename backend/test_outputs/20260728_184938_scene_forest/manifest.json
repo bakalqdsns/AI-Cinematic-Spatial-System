@@ -1,0 +1,9 @@
+{
+  "scene_id": "scene_forest_001",
+  "visual_prompt": "ancient mystic forest, dense towering ancient trees with gnarled bark and glowing moss, ethereal fog drifting between trunks, golden sunlight shafts piercing through lush green canopy, dappled light on moss-covered stone ruins and twisted roots, soft volumetric lighting, cinematic color grade—amber and emerald tones, misty depth of field, hyper-detailed foliage, fantasy realism, atmospheric perspective, no humans, wide-angle composition, Studio Ghibli meets Roger Deakins, 8K resolution",
+  "keyframes": [
+    "wide",
+    "closeup",
+    "mood"
+  ]
+}

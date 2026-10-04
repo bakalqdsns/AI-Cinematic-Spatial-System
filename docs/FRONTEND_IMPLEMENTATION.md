@@ -1,6 +1,8 @@
 # 前端实现与需求匹配评估报告
 
-> **评估日期**：2026-07-27
+> **评估日期**：2026-07-27；**对照修订**：2026-09-26
+>
+> 完成度以 `docs/PROJECT_STATUS.md` 为准。下表已按当前前端代码修正仍写成“未实现”的条目。
 >
 > **前端技术栈**：React 19 + TypeScript + Vite + TailwindCSS + Zustand + Three.js + @react-three/fiber + Axios
 
@@ -21,6 +23,8 @@
 
 ### 1.1 组件清单
 
+行数是 2026-07-27 的快照，未按当前文件重数。2026-09-26 补上了当时清单里没有的三个组件。
+
 | 组件 | 文件路径 | 功能描述 | 代码行数 |
 |------|----------|----------|----------|
 | `App` | `src/App.tsx` | 主布局：三种模式切换（Single/Sequence/Script） | 665 |
@@ -37,6 +41,9 @@
 | `PolygonDrawTool` | `src/components/PolygonDrawTool.tsx` | 自由多边形绘制 | 291 |
 | `SequencePanel` | `src/components/sequence/SequencePanel.tsx` | 帧序列分析面板 | 271 |
 | `SequencePlayer` | `src/components/sequence/SequencePlayer.tsx` | 帧播放控制器 | 104 |
+| `CameraPathPlayer` | `src/components/CameraPathPlayer.tsx` | 按分镜运镜驱动 Three.js 相机 | — |
+| `ShotPlaybackControls` | `src/components/ShotPlaybackControls.tsx` | 运镜播放 / 暂停 / 拖动 | — |
+| `ProviderRegistry` | `src/components/ProviderRegistry.tsx` | 第三方 Provider 注册（嵌在 SettingsPanel） | — |
 
 ### 1.2 组件与模块对应关系
 
@@ -48,9 +55,12 @@ App.tsx (Single Mode)
 │   ├── DepthSplitPanel.tsx  ──► 模块 3 (分层预览)
 │   └── InpaintPreviewDialog  ──► 模块 4 (补全预览)
 ├── PolygonDrawTool.tsx       ──► 模块 4 (手动选区)
-├── Viewer3D.tsx              ──► 模块 6 (3D预览) + 模块 7 + 模块 8
+├── Viewer3D.tsx              ──► 模块 6 (3D预览) + 模块 7 + 模块 8 + 模块 10
+│   ├── CameraPathPlayer.tsx  ──► 模块 10 (运镜自动播放)
+│   └── ShotPlaybackControls  ──► 模块 10
 ├── DioramaSettingsPanel.tsx  ──► 模块 7 (材质参数)
-└── ExportPanel.tsx           ──► 模块 6 (Blender导出)
+├── SettingsPanel.tsx         ──► 模块 13（含 ProviderRegistry）
+└── ExportPanel.tsx           ──► 模块 6 (mesh 导出)
 
 App.tsx (Script Mode)
 └── ScriptEditor.tsx
@@ -205,6 +215,7 @@ parseScript()
 | `generateBillboard` | `POST /api/aicss/billboard` | 模块 4 |
 | `generateMultiface` | `POST /api/aicss/multiface` | 模块 4 |
 | `inpaintImage` | `POST /api/aicss/inpaint` | 模块 4 |
+| `computeOcclusionHoles` | `POST /api/aicss/occlusion-holes` | 模块 4 |
 | `applyPaperStyle` | `POST /api/aicss/paper-style` | 模块 7（已废弃） |
 | `generatePaperDiorama` | `POST /api/aicss/paper-diorama` | 模块 7 |
 | `generatePaperLayer` | `POST /api/aicss/paper-layer` | 模块 7 |
@@ -303,16 +314,16 @@ parseScript()
 
 | # | 模块 | 前端覆盖度 | 主要组件 | 状态 | 缺口 |
 |---|------|:----------:|---------|------|------|
-| 1 | 自动化剧本拆解 | 95% | ScriptEditor (5 Tab) | ✅ | 网格化分镜表展示组件 |
-| 2 | 人物资产生成与动作提取 | 85% | ScriptEditor CharactersTab + MotionTab | ✅ | Motion 后续动画绑定 |
-| 3 | 场景分层分割 | 95% | SplitControls + ImageCanvas + depthSplit.ts | ✅ | 无明显缺口 |
-| 4 | 遮挡区域补全与三维面片导出 | 90% | SplitControls + ExportPanel + inpaintMask.ts | ⚠️ | 剥离流水线 undo 未覆盖 billboard |
-| 5 | 文件整合与分镜归档 | 50% | db.ts (IndexedDB) | ⚠️ | 无完整项目保存/加载 |
-| 6 | Blender 场景自动搭建 | 40% | ExportPanel + meshExportService.ts | ⚠️ | 仅导出，无 Blender 自动化脚本 |
-| 7 | 纸张材质统一应用 | 95% | DioramaSettingsPanel + Viewer3D | ✅ | 无明显缺口 |
-| 8 | 环境与光照自动配置 | 25% | Viewer3D (硬编码光源) | ❌ | 无光照预设 UI，无 HDRI 支持 |
-| 9 | 场景运动与角色动画 | 60% | ScriptEditor MotionTab + SequencePlayer | ⚠️ | Blender 角色帧动画缺失 |
-| 10 | 镜头运镜与渲染输出 | 35% | Viewer3D (OrbitControls) | ❌ | 无相机路径 UI，无视频渲染 |
+| 1 | 自动化剧本拆解 | 100% | ScriptEditor (5 Tab) | ✅ | — |
+| 2 | 人物资产生成与动作提取 | 100% | ScriptEditor CharactersTab + MotionTab | ✅ | Motion→Blender 绑定属模块 9 |
+| 3 | 场景分层分割 | 100% | SplitControls + ImageCanvas + depthSplit.ts | ✅ | — |
+| 4 | 遮挡区域补全与三维面片导出 | 100% | SplitControls + ExportPanel + inpaintMask + occlusion-holes | ✅ | — |
+| 5 | 文件整合与分镜归档 | 100% | db.ts + Storyboard 导出归档 + scriptService.archiveShot | ✅ | — |
+| 6 | Blender 场景自动搭建 | 见基准 | ExportPanel + meshExportService.ts | ⚠️ | 前端仍是导出；Blender 插件在 `backend/blender/addons/aicss_scene_builder/`，角色自动落位与层次搭建仍未完成 |
+| 7 | 纸张材质统一应用 | 见基准（模块 50%） | DioramaSettingsPanel + Viewer3D | ⚠️ | 前端预览已有；Blender SSS / 纤维法线仍按基准为缺口 |
+| 8 | 环境与光照自动配置 | 见基准（模块 30%） | Viewer3D (硬编码光源) | ❌ | 无光照预设 UI，无 HDRI 支持 |
+| 9 | 场景运动与角色动画 | 见基准（模块 25%） | ScriptEditor MotionTab + SequencePlayer | ⚠️ | Blender 角色帧动画缺失；Three.js 帧动画未绑定角色 |
+| 10 | 镜头运镜与渲染输出 | 见基准（模块 20%） | CameraPathPlayer + ShotPlaybackControls + OrbitControls | ⚠️ | Three.js 运镜播放已有；Blender 摄影机动画、Cycles 批量渲染、渲染队列仍缺 |
 | 11 | 后期剪辑与成片 | 45% | SequencePanel + SequencePlayer | ⚠️ | 无剪辑时间线，无视频导出 |
 
 ### 5.2 功能覆盖率分析
@@ -330,14 +341,17 @@ parseScript()
 └── 三种编辑模式（Single / Sequence / Script）
 
 前端未实现或缺失的功能：
-├── Blender Python 脚本自动生成
-├── 相机路径编辑器（关键帧/贝塞尔曲线）
-├── 视频渲染输出
-├── 完整视频剪辑时间线
+├── 视频渲染输出 / 成片拼接
+├── 完整视频剪辑时间线与音频轨
 ├── 角色骨骼绑定与 Blender 帧动画
 ├── 光照预设选择器 + HDRI
-├── 完整项目保存/加载（含分镜表 + 角色资产）
 └── 一键端到端执行（剧本 → 成片）
+
+已落地、不再列入缺口：
+├── Three.js 运镜播放（CameraPathPlayer + ShotPlaybackControls + POST /camera-path）
+├── Blender 插件目录 `backend/blender/addons/aicss_scene_builder/`（导入图层 / 材质 / 灯光 / 相机）
+├── 场景「生成分层」与分镜「导出归档」
+└── Provider 注册表 UI
 ```
 
 ---
@@ -346,31 +360,21 @@ parseScript()
 
 ### 6.1 P0 — 阻塞性缺口
 
-#### P0-1: Blender 自动化脚本
+#### ~~P0-1: Blender 独立插件文件~~ 插件目录已存在，场景自动搭建仍不完整
 
-**缺口描述**：前端仅实现了 mesh 文件的导出调用，无 Blender 独立插件或 Python 脚本自动生成功能。
+**现状**：`backend/blender/addons/aicss_scene_builder/` 可安装，能按 manifest 导入图层 PNG、套纸张材质、加灯光和相机。前端 `ExportPanel` 仍只负责 GLB/FBX 下载。
 
-**相关文件**：
-- `services/meshExportService.ts` — 仅调用后端导出端点
-- `components/ExportPanel.tsx` — 仅触发 GLB/FBX 下载
+**仍缺**（与基准模块 6 一致）：
+1. 角色纸片自动落到坐标
+2. 场景层次关系自动构建
+3. Cycles 渲染未完整验证
+4. 插件 manifest 仍按 4 层（sky/background/midground/foreground），后端图层导出已是 5 层（多 ground）
 
-**待实现**：
-1. Blender 场景自动搭建 Python 脚本（自动放置 billboard 到坐标 + 构建层级关系）
-2. Blender 材质节点自动配置（Normal Map + SSS + 纸张纤维）
-3. Blender 光照自动配置脚本
+#### ~~P0-2: Three.js 运镜播放~~ 已实现
 
-#### P0-2: 镜头运镜系统
+**现状**：`CameraPathPlayer`、`ShotPlaybackControls` 已挂到 `Viewer3D`；后端 `POST /api/aicss/v2/scripts/camera-path` 与 `camera_path_generator.py` 已存在。`OrbitControls` 仍用于手动观察。
 
-**缺口描述**：Viewer3D 仅支持手动 OrbitControls 旋转，无相机路径定义和自动运镜播放。
-
-**相关文件**：
-- `components/Viewer3D.tsx` — OrbitControls 手动控制
-- `types/script.ts` — CameraMovement 枚举已定义但未使用
-
-**待实现**：
-1. 相机路径编辑器 UI（关键帧 + 贝塞尔曲线）
-2. 相机路径动画预览播放
-3. 运镜数据 → Three.js 相机路径转换
+**仍缺**：运镜数据 → Blender 摄影机关键帧、多镜头自动渲染、渲染队列（基准模块 10）。
 
 #### P0-3: 视频渲染输出
 
@@ -416,26 +420,17 @@ parseScript()
 
 ### 6.3 P2 — 质量增强缺口
 
-#### P2-1: Strip 流水线 Undo 覆盖范围
+#### ~~P2-1: Strip 流水线 Undo 覆盖范围~~ ✅ 已修复
 
-**缺口描述**：undo 历史仅覆盖 inpaint 图像，未覆盖 billboard 生成结果。
+**原缺口**：undo 历史仅覆盖 inpaint 图像，未覆盖 billboard 生成结果。
 
-**相关文件**：
-- `store/useAppStore.ts` — `pushStripStep()` / `undoLastStripStep()`
-- `components/SplitControls.tsx` — `handleUndo()`
+**修复**：`undoLastStripStep()` / `resetStripStack()` 同步删除对应 `billboardAssets[regionId]`。
 
-**待修复**：`pushStripStep()` 应同时保存 inpaint 图像和 billboard 生成结果。
+#### ~~P2-2: 完整项目保存/加载~~ ✅ 部分完成（模块5归档路径）
 
-#### P2-2: 完整项目保存/加载
+**原缺口**：IndexedDB 仅存储会话数据。
 
-**缺口描述**：IndexedDB 仅存储会话数据（裁剪图），无完整项目保存（含分镜表、角色资产等）。
-
-**相关文件**：
-- `utils/db.ts` — `saveSession()` / `loadSession()`
-
-**待实现**：
-1. 完整项目 JSON 导出（含 ScriptData + Shots + CharacterAssets）
-2. 项目恢复时自动重新生成资产
+**已补**：shot 级 ZIP 归档（后端 CLI/API + Storyboard「导出归档」）覆盖 Blender 导入包场景。完整项目 JSON 往返仍可后续增强，不再阻塞模块 5 完成度。
 
 #### P2-3: ObjectAppearanceDetail.layer 类型不一致
 
@@ -480,6 +475,9 @@ frontend/src/
 │   ├── LayerSelector.tsx                  # 层级选择器
 │   ├── InpaintPreviewDialog.tsx          # 修复预览
 │   ├── PolygonDrawTool.tsx               # 多边形绘制
+│   ├── CameraPathPlayer.tsx              # 运镜播放
+│   ├── ShotPlaybackControls.tsx          # 运镜控制条
+│   ├── ProviderRegistry.tsx              # Provider 注册
 │   └── sequence/
 │       ├── SequencePanel.tsx             # 帧序列分析
 │       └── SequencePlayer.tsx            # 帧播放器

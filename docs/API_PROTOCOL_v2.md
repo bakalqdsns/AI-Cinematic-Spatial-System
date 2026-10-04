@@ -2,7 +2,8 @@
 
 > AI Cinematic Spatial System API Protocol
 > 版本：2.0.0
-> 状态：草稿
+> 状态：部分过时。完成度以 `docs/PROJECT_STATUS.md` 为准。
+> 对照修订：2026-09-26。下文 v1/v2 序列与镜头协议仍可用；文末「后端实现待开始」已作废。深度层在实现中为 5 层，多了 `ground`。修复走本地 LaMa，不是只走 DashScope。
 
 ---
 
@@ -1282,6 +1283,29 @@ interface ErrorEvent {
 | GET | `/health` | 健康检查 |
 | GET | `/` | 服务信息 |
 
+### 10.7 代码已实现、本协议正文未展开的端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/aicss/layers/export` | 5 层 RGBA（含 ground） |
+| POST | `/api/aicss/occlusion-holes` | 遮挡空洞 |
+| POST | `/api/aicss/v2/scripts/parse` | 剧本解析 |
+| POST | `/api/aicss/v2/scripts/shots` | 分镜 |
+| POST | `/api/aicss/v2/scripts/camera-path` | 运镜路径 |
+| POST | `/api/aicss/v2/scripts/scenes/generate-asset` | 场景资产 |
+| GET | `/api/aicss/v2/scripts/scenes/batch-status` | 场景批量状态 |
+| GET | `/api/aicss/v2/scripts/characters/batch-status` | 角色批量状态 |
+| POST | `/api/aicss/v2/scripts/characters/generate-three-view` | 三视图 |
+| POST | `/api/aicss/v2/scripts/motion/generate` | 动作视频 |
+| POST/GET | `/api/aicss/v2/meshes/export-scene` 等 | mesh 导出与下载 |
+| POST/GET | `.../shots/{shotId}/archive` | shot ZIP |
+| GET | `/api/aicss/models/status` | 模型状态 |
+| POST | `/api/aicss/models/download/{name}` | 模型下载 |
+| GET/POST | `/api/aicss/settings` | 运行时配置（更新是 POST） |
+| GET/DELETE | `/api/aicss/settings/store` | 持久化查询 / 重置 |
+
+字段级请求响应以对应 `endpoints_*.py` 的 Pydantic 模型为准，不要只靠本文早期草稿。
+
 ---
 
 ## 附录：存储结构
@@ -1329,6 +1353,6 @@ interface ErrorEvent {
 
 | 阶段 | 状态 | 说明 |
 |------|------|------|
-| 协议设计 | ✅ 完成 | v1 + v2 完整协议 |
-| 后端实现 | 待开始 | |
-| 前端实现 | 待开始 | |
+| 协议设计 | ⚠️ 部分过时 | v1 单图与 v2 序列/镜头仍在；剧本、分层、模型、设置、mesh、归档未写进正文 |
+| 后端实现 | ✅ 已实现 | 见 `backend/app/endpoints*.py`。完成度以 `PROJECT_STATUS.md` 为准 |
+| 前端实现 | ✅ 主路径已实现 | 见 `frontend/src`。后期剪辑时间线仍缺 |

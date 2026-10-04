@@ -157,7 +157,11 @@ class DashScopeFilmProvider(VideoProvider):
             }
 
             if start_image_b64:
-                call_kwargs["first_frame_url"] = b64_to_data_uri(start_image_b64)
+                # wan2.5-i2v requires `img_url` (not `first_frame_url`); pass both
+                # for backward compat with older models that use first_frame_url.
+                _start_uri = b64_to_data_uri(start_image_b64)
+                call_kwargs["img_url"] = _start_uri
+                call_kwargs["first_frame_url"] = _start_uri
             if end_image_b64:
                 call_kwargs["last_frame_url"] = b64_to_data_uri(end_image_b64)
 

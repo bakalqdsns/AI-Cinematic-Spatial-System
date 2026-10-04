@@ -202,8 +202,8 @@ def _load_pipeline(
             # one (which is the common path).
             if not checkpoint_dir:
                 try:
-                    from app.config import settings as _settings
-                    checkpoint_dir = str(_settings.image_checkpoint_dir)
+                    from app.services.settings_manager import get as _get
+                    checkpoint_dir = str(_get("image_checkpoint_dir"))
                 except Exception:
                     pass
             load_path = model_id  # default: trust hub_layout resolution
@@ -329,8 +329,8 @@ def _load_img2img_pipeline(
             logger.info("[ImageGen] Loading Z-Image img2img %s…", model_id)
             if not checkpoint_dir:
                 try:
-                    from app.config import settings as _settings
-                    checkpoint_dir = str(_settings.image_checkpoint_dir)
+                    from app.services.settings_manager import get as _get
+                    checkpoint_dir = str(_get("image_checkpoint_dir"))
                 except Exception:
                     pass
             if checkpoint_dir:
@@ -763,8 +763,8 @@ _img_gen_lock = _threading.Lock()
 def _default_checkpoint_dir() -> Optional[str]:
     """Return the project-wide image_checkpoint_dir, or None if settings unimportable."""
     try:
-        from app.config import settings as _settings
-        return str(_settings.image_checkpoint_dir)
+        from app.services.settings_manager import get as _get
+        return str(_get("image_checkpoint_dir"))
     except Exception:
         return None
 

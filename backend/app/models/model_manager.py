@@ -140,42 +140,42 @@ class ModelManager:
 
     # ── Download-only helpers (no GPU) ─────────────────────────────────────────
 
-    def ensure_depth_downloaded(self) -> None:
+    def ensure_depth_downloaded(self, progress_key: str | None = None) -> None:
         """Fetch DepthAnything checkpoint to disk (no GPU)."""
         if self._depth is not None:
             return  # already loaded
         loader = DepthModel(model_name=settings.depth_model, device="cpu")
-        loader.ensure_downloaded()
+        loader.ensure_downloaded(progress_key=progress_key)
 
-    def ensure_grounding_dino_downloaded(self) -> None:
+    def ensure_grounding_dino_downloaded(self, progress_key: str | None = None) -> None:
         """Fetch Grounding DINO checkpoint to disk (no GPU)."""
         if self._grounding_dino is not None:
             return
         loader = GroundingDinoModel(model_name=settings.grounding_dino_model, device="cpu")
-        loader.ensure_downloaded()
+        loader.ensure_downloaded(progress_key=progress_key)
 
-    def ensure_sam2_downloaded(self) -> None:
+    def ensure_sam2_downloaded(self, progress_key: str | None = None) -> None:
         """Fetch SAM2 checkpoint to disk (no GPU)."""
         if self._sam2 is not None:
             return
         loader = SAM2Model(device="cpu", checkpoint_dir=str(settings.sam2_checkpoint_dir) if settings.sam2_checkpoint_dir else None)
-        loader.ensure_downloaded()
+        loader.ensure_downloaded(progress_key=progress_key)
 
-    def ensure_qwen3vl_downloaded(self) -> None:
+    def ensure_qwen3vl_downloaded(self, progress_key: str | None = None) -> None:
         """Fetch Qwen3-VL checkpoint to disk (no GPU)."""
         if self._qwen3vl is not None:
             return
         loader = Qwen3VLModel(model_name=settings.vlm_model, device="cpu")
-        loader.ensure_downloaded()
+        loader.ensure_downloaded(progress_key=progress_key)
 
-    def ensure_lama_downloaded(self) -> None:
+    def ensure_lama_downloaded(self, progress_key: str | None = None) -> None:
         """Fetch LaMa checkpoint to disk (no GPU)."""
         if self._lama is not None:
             return
         loader = LaMaModel(device="cpu", checkpoint_dir=str(settings.lama_checkpoint_dir) if settings.lama_checkpoint_dir else None)
-        loader.ensure_downloaded()
+        loader.ensure_downloaded(progress_key=progress_key)
 
-    def ensure_z_image_downloaded(self) -> None:
+    def ensure_z_image_downloaded(self, progress_key: str | None = None) -> None:
         """Fetch Z-Image snapshot to disk (no GPU)."""
         if self._z_image is not None:
             return
@@ -183,7 +183,7 @@ class ModelManager:
             model_id=settings.image_model_id,
             checkpoint_dir=str(settings.image_checkpoint_dir),
         )
-        loader.ensure_downloaded()
+        loader.ensure_downloaded(progress_key=progress_key)
 
     # ── Individual load methods ───────────────────────────────────────────────
 
@@ -210,6 +210,27 @@ class ModelManager:
             return
         t0 = time.time()
         print("[ModelManager] Loading Grounding DINO...")
+        # Probe the HF cache: if all expected files are present, force
+        # ``HF_HUB_OFFLINE=1`` so the loader skips the slow "online" phase
+        # and goes straight to ``local_files_only=True``. This avoids
+        # hangs when the network is unreachable (the previous default
+        # would block for HF_HUB_DOWNLOAD_TIMEOUT seconds before falling
+        # back to the local snapshot).
+        import os as _os
+        cache_root = _os.environ.get("HF_HUB_CACHE") or str(
+            (Path(_os.environ.get("HF_HOME", str(CACHE_DIR / "huggingface"))) / "hub")
+        )
+        snapshot_root = Path(cache_root) / "models--IDEA-Research--grounding-dino-base" / "snapshots"
+        cache_complete = (
+            snapshot_root.is_dir()
+            and any((snap / "model.safetensors").is_file() for snap in snapshot_root.iterdir() if snap.is_dir())
+            and any((snap / "preprocessor_config.json").is_file() for snap in snapshot_root.iterdir() if snap.is_dir())
+            and any((snap / "config.json").is_file() for snap in snapshot_root.iterdir() if snap.is_dir())
+        )
+        print(f"[ModelManager] Grounding DINO cache probe: complete={cache_complete} snapshot_root={snapshot_root}")
+        if cache_complete and _os.environ.get("HF_HUB_OFFLINE") != "1":
+            _os.environ["HF_HUB_OFFLINE"] = "1"
+            print("[ModelManager] HF cache complete — switching to HF_HUB_OFFLINE=1 for Grounding DINO")
         try:
             loader = GroundingDinoModel(
                 model_name=settings.grounding_dino_model,

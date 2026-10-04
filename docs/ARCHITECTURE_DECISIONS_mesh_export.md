@@ -2,7 +2,7 @@
 
 > 撰写日期：2026-07-21
 > 适用版本：v2.1
-> 状态：✅ 已实施
+> 状态：✅ 已实施。2026-09-26 补记了 ground 层、PlaneGeometry 与位移厚度，原五项决策不变。
 
 ---
 
@@ -290,8 +290,17 @@ async def _get_lock(project_id: str) -> asyncio.Lock:
 | `background` | -12.0 | 0.12 | 远景 |
 | `midground` | -6.0 | 0.20 | 中景 |
 | `foreground` | -2.0 | 0.30 | 近景（最厚，视觉最突出） |
+| `ground` | -1.5 | — | 2026-08 图层导出新增；地面在前景之下，不覆盖主体 |
 
-**决策依据：** 纸模的视觉规律——近景物体通常最大最厚。用 `position_z` 差 6-8 个单位拉开层次，确保 Z-fighting 不会发生。
+**决策依据：** 纸模的视觉规律——近景物体通常最大最厚。用 `position_z` 差拉开层次，避免 Z-fighting。
+
+2026-08 之后 `export_full_scene` 增加了两条路径，不再只有 BoxGeometry：
+
+- `strip_stack` → billboard PlaneGeometry（`_populate_strip_stack_into_scene`）
+- `regions` → 按 `depthValue` 定位的 PlaneGeometry（`_populate_regions_into_scene`）
+- `make_displaced_plane()` 用厚度图做非均匀厚度
+
+当初「必须是 BoxGeometry」的约束只覆盖早期层/物体导出。
 
 ---
 
@@ -304,3 +313,4 @@ async def _get_lock(project_id: str) -> asyncio.Lock:
 | 2026-07-21 | 独立 mesh_manifest.json | 与 ML 工件 manifest 解耦，避免并发写入竞争 |
 | 2026-07-21 | GLB 优先 | glTF 二进制是跨平台事实标准，Unity glTFast 原生支持 |
 | 2026-07-21 | base64 解码为临时文件 | Blender Headless 不支持 data: URL |
+| 2026-09-26 | 补记：位移厚度、strip-stack、regions、ground 层 | 对照 `mesh_exporter.py` / `layer_exporter.py`，原「仅 BoxGeometry、四层」描述已过时 |

@@ -380,11 +380,11 @@ def get_llm_client() -> "LocalLLMClient | CloudRouterProxy":
     if mode == LLMMode.CLOUD:
         return CloudRouterProxy()
     if _llm_client is None:
-        from app.config import settings as _settings
+        from app.services.settings_manager import get as _get
         _llm_client = LocalLLMClient(
-            base_url=_settings.llm_base_url,
-            model=_settings.llm_model,
-            timeout=_settings.llm_timeout,
+            base_url=_get("llm_base_url"),
+            model=_get("llm_model"),
+            timeout=_get("llm_timeout", 600.0),
         )
     return _llm_client
 
@@ -407,11 +407,12 @@ def set_use_cloud(enabled: bool) -> None:
 
 def set_cloud_provider(provider: str) -> None:
     """Set which cloud provider to use. Legacy entrypoint — sets the
-    `cloud_llm_provider` field on settings so the CloudRouter sees it.
-    Also invalidates the router cache so the change takes effect immediately.
+    `cloud_llm_provider` field in the runtime values store so the CloudRouter
+    sees it. Also invalidates the router cache so the change takes effect
+    immediately.
     """
-    from app.config import settings as _settings
-    _settings.cloud_llm_provider = provider
+    from app.services.settings_manager import set_runtime_value
+    set_runtime_value("cloud_llm_provider", provider)
     from app.providers.cloud_router import invalidate_cache
     invalidate_cache("llm")
     logger.info("[LocalLLM] Cloud provider set to: %s", provider)
@@ -444,15 +445,18 @@ class CloudRouterProxy:
 
     def _get_local_client(self) -> LocalLLMClient:
         if self._local_client is None:
-            from app.config import settings as _settings
+            from app.services.settings_manager import get as _get
+            _base = _get("llm_base_url")
+            _model = _get("llm_model")
+            _timeout = _get("llm_timeout", 600.0)
             self._local_client = LocalLLMClient(
-                base_url=_settings.llm_base_url,
-                model=_settings.llm_model,
-                timeout=_settings.llm_timeout,
+                base_url=_base,
+                model=_model,
+                timeout=_timeout,
             )
             logger.info(
                 "[CloudRouterProxy] Auto-fallback: local client configured for %s/%s",
-                _settings.llm_base_url, _settings.llm_model,
+                _base, _model,
             )
         return self._local_client
 

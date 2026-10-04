@@ -46,11 +46,31 @@ export interface SceneVariation {
   image?: string;
 }
 
+export interface LayeredImage {
+  dataUri: string;
+}
+
 export interface SceneAsset {
   sceneId: string;
   visualPrompt: string;
   keyframeImages: { wide?: string; closeup?: string; mood?: string };
   variations?: SceneVariation[];
+  // Optional depth layers produced by `POST /api/aicss/layers/export`. Populated
+  // lazily on user demand (asynchronous endpoint call — see
+  // `useScriptStore.layerScene`). Each entry is a transparent PNG (RGBA) where
+  // only pixels in that depth layer are visible; `zOffsets` is the Blender-side
+  // positioning hint for that layer.
+  layeredImages?: {
+    sky?: LayeredImage;
+    background?: LayeredImage;
+    midground?: LayeredImage;
+    foreground?: LayeredImage;
+    zOffsets?: Array<{ layer: string; zOffset: number; zMin: number; zMax: number }>;
+    width?: number;
+    height?: number;
+    source?: 'wide' | 'closeup' | 'mood';
+    generatedAt?: string;
+  };
 }
 
 export interface StoryParagraph {

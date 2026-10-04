@@ -3,7 +3,7 @@
 > 本文档详细记录 AICSS 项目中 **3D 网格导出** 功能的完整实施细节，包括架构设计、数据模型、API 协议、导出规格和目录结构。
 >
 > 适用版本：v2.1（新增）
-> 文档更新：2026-07-21
+> 文档更新：2026-09-26（对照 `PROJECT_STATUS.md` 与 `mesh_exporter.py`）
 
 ---
 
@@ -436,11 +436,11 @@ interface BlenderCheckResponse {
 
 | 属性 | 规格 |
 |------|------|
-| 几何体类型 | BoxGeometry（6 面体） |
+| 几何体类型 | 层/物体默认 BoxGeometry；`strip_stack` 与自由选区 `regions` 为 PlaneGeometry；`use_displacement=True` 时 `make_displaced_plane()` 用厚度图做非均匀厚度 |
 | 顶点坐标系统 | Y-up，Blender 默认坐标系 |
 | 场景坐标系 | X: -10 ~ +10, Y: -7.5 ~ +7.5（对应场景 20×15 世界单位） |
-| 深度范围 | 0-50m → Z: -5 ~ +5 世界单位 |
-| 层 Z 位置 | sky=-20, background=-12, midground=-6, foreground=-2 |
+| 深度范围 | 0-50m → Z: -5 ~ +5 世界单位（物体）；图层另有固定 Z 表 |
+| 层 Z 位置 | sky=-20, background=-12, midground=-6, foreground=-2；图层 PNG 导出另有 ground=-1.5 |
 | 层厚度 | sky=0.08, background=0.12, midground=0.20, foreground=0.30（世界单位） |
 | 物体厚度 | 默认 0.05（可配置） |
 | Bevel（斜接） | 宽度 0.005，segments=2，ANGLE 限制 |
@@ -455,7 +455,7 @@ interface BlenderCheckResponse {
 | **Normal Map** | Image Texture (Non-Color) → Normal Map → Normal | `normalMapUrl` |
 | **Roughness** | Principled BSDF → Roughness | 固定 0.9（哑光纸面效果） |
 | **Specular** | Principled BSDF → Specular IOR Level | 固定 0.0（无高光） |
-| **Displacement** | 未实现（可用 thickness_gray 替代） | — |
+| **Displacement** | `make_displaced_plane()`，`use_displacement=True` 时用 `thicknessGrayUrl` | 非均匀几何厚度 |
 
 ### 5.3 纹理处理规格
 

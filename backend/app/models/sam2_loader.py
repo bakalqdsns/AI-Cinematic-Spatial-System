@@ -95,9 +95,13 @@ class SAM2Model:
         cfg = self.SAM2_CONFIGS.get(self.model_size, self.SAM2_CONFIGS["vit_l"])
         return cfg["repo_id"]
 
-    def ensure_downloaded(self) -> str:
+    def ensure_downloaded(self, progress_key: str | None = None) -> str:
         """
         Ensure the SAM2 checkpoint is on disk. Returns the local file path.
+
+        progress_key: when supplied, progress is reported to the
+                      download-jobs registry under this key (for both
+                      HF Hub and Meta-CDN paths).
 
         Download strategy (in order):
           1. HuggingFace Hub (via ``snapshot_download``) — relies on
@@ -169,11 +173,16 @@ class SAM2Model:
                     _log(f"  Retry {attempt}/{max_retries} ...")
                     _time.sleep(2 ** attempt)
                 try:
+                    tqdm_class = None
+                    if progress_key:
+                        from app.services.download_progress import make_tqdm_callback
+                        tqdm_class = make_tqdm_callback(progress_key)
                     local_dir = snapshot_download(
                         repo_id=repo_id,
                         cache_dir=cache_dir,
                         allow_patterns=[f"*{official_name}*", "*.yaml"],
                         ignore_patterns=["*.msgpack", "*.gitattributes"],
+                        tqdm_class=tqdm_class,
                     )
                     pattern = os.path.join(local_dir, "**", official_name)
                     matches = glob.glob(pattern, recursive=True)
@@ -229,6 +238,13 @@ class SAM2Model:
                                     mb_w = written // (1024 * 1024)
                                     mb_t = total // (1024 * 1024)
                                     _log(f"  {pct}%  ({mb_w}/{mb_t} MB)")
+                            # Push to registry at ~1 Hz for the progress bar
+                            if progress_key and (written % (1 << 20) < 8192):
+                                try:
+                                    from app.services.download_progress import report_file_progress
+                                    report_file_progress(progress_key, official_name, written, total)
+                                except Exception:
+                                    pass
                     os.replace(part_file, official_target)
                     size_mb = os.path.getsize(official_target) // (1024 * 1024)
                     _log(f"Downloaded: {official_target} ({size_mb} MB)")
