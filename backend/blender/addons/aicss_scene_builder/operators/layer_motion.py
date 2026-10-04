@@ -45,6 +45,7 @@ _Z_OFFSETS = {
     "background": -12.0,
     "midground": -6.0,
     "foreground": -2.0,
+    "ground": -1.5,
 }
 
 

@@ -66,7 +66,7 @@ print("[1] pipeline_state.json written", flush=True)
 # ── 2. archive shot-3 ──────────────────────────────────────────────────
 print("[2] archive shot-3...", flush=True)
 r = s.post(f"{BASE}/projects/{PROJ_ID}/shots/shot-3/archive",
-           params={"scene_id": "scene-1"}, timeout=120, proxies={"http":None,"https":None})
+           params={"scene_id": "scene-1"}, timeout=3600, proxies={"http":None,"https":None})
 print(f"   HTTP {r.status_code}: {r.text[:300]}", flush=True)
 if r.status_code != 200:
     raise SystemExit(1)

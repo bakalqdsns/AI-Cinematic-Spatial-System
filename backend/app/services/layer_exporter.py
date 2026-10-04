@@ -326,6 +326,84 @@ def export_layers(
     return out
 
 
+def inpaint_occluded_layers(
+    image: Image.Image,
+    layer_imgs: dict[str, Image.Image],
+    depth_meters: Optional[np.ndarray],
+    *,
+    object_assets: Optional[list] = None,
+    ground_asset=None,
+    sky_mask: Optional[np.ndarray] = None,
+) -> dict[str, Image.Image]:
+    """把更近层挡住的区域用 LaMa 补到更远的层上。
+
+    近层自己的像素不动。远层在这些遮挡像素上写入补全结果并变为不透明，
+    镜头错开时露出的是补出来的内容，而不是空白。
+    最近的一层没有更近的遮挡，跳过。
+    """
+    if not layer_imgs:
+        return layer_imgs
+
+    rgb = image.convert("RGB")
+    rgb_np = np.array(rgb)
+    h, w = rgb.size[1], rgb.size[0]
+    use_anchors = bool(object_assets) or (ground_asset is not None) or (sky_mask is not None)
+    if use_anchors:
+        layer_masks = _build_layer_masks(
+            depth_meters=depth_meters,
+            object_assets=object_assets,
+            ground_asset=ground_asset,
+            sky_mask=sky_mask,
+            rgb=rgb_np,
+        )
+    else:
+        layer_masks = {}
+        for layer in layer_imgs:
+            if depth_meters is not None and layer in LAYER_Z_RANGES:
+                z_min, z_max = LAYER_Z_RANGES[layer]
+                layer_masks[layer] = (depth_meters >= z_min) & (depth_meters < z_max)
+            else:
+                layer_masks[layer] = np.ones((h, w), dtype=bool)
+
+    # z 越大越靠近相机（sky=-20 最远，ground=-1.5 最近）
+    names = [name for name in layer_imgs if name in LAYER_Z_OFFSETS]
+    names.sort(key=lambda name: LAYER_Z_OFFSETS[name])
+
+    from app.utils.inpaint_utils import generate_inpaint
+
+    for index, name in enumerate(names):
+        own = layer_masks.get(name)
+        if own is None or own.shape != (h, w):
+            own = np.zeros((h, w), dtype=bool)
+        closer = np.zeros((h, w), dtype=bool)
+        for nearer in names[index + 1:]:
+            nearer_mask = layer_masks.get(nearer)
+            if nearer_mask is not None and nearer_mask.shape == (h, w):
+                closer |= nearer_mask.astype(bool)
+        hole = closer & ~own
+        ratio = float(hole.mean()) if hole.size else 0.0
+        if ratio < 0.001:
+            logger.info("[layers] %s: no occluder to inpaint (%.4f)", name, ratio)
+            continue
+        logger.info("[layers] LaMa fill %s occluded %.1f%%", name, ratio * 100)
+        mask_img = Image.fromarray((hole.astype(np.uint8) * 255), mode="L")
+        try:
+            filled = generate_inpaint(rgb, mask_img, "occluded background")
+        except Exception as exc:
+            logger.warning("[layers] LaMa failed for %s: %s", name, exc)
+            continue
+        filled_np = np.array(filled.convert("RGB"))
+        if filled_np.shape[:2] != (h, w):
+            filled_np = np.array(
+                Image.fromarray(filled_np).resize((w, h), Image.LANCZOS)
+            )
+        layer = np.array(layer_imgs[name].convert("RGBA"))
+        layer[hole, 0:3] = filled_np[hole]
+        layer[hole, 3] = 255
+        layer_imgs[name] = Image.fromarray(layer, mode="RGBA")
+    return layer_imgs
+
+
 def export_layers_to_data_uris(
     image: Image.Image,
     depth_meters: Optional[np.ndarray] = None,

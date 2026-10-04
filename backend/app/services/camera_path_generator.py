@@ -124,7 +124,13 @@ def build_camera_path(
     elif movement_str == "Zoom Out":
         end["fov"] = max(base_fov * 0.65, 20)
     elif movement_str == "Tracking":
-        end["position"] = [base_dist * 0.6, 0.0, base_dist * 0.9]
+        # 水平绕目标偏约 5°。原先 0.6 倍距离大约 34°，分层会被甩开。
+        yaw = math.radians(5.0)
+        end["position"] = [
+            base_dist * math.sin(yaw),
+            0.0,
+            base_dist * math.cos(yaw),
+        ]
     elif movement_str == "Crane Up":
         end["position"] = [0.0, base_dist * 0.5, base_dist * 0.85]
     elif movement_str == "Crane Down":

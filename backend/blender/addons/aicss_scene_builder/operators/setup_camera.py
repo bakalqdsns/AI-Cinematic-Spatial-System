@@ -219,6 +219,7 @@ class AICSS_OT_setup_camera_animation(Operator):
                 )
             except Exception as exc:
                 self.report({'WARNING'}, f"cameraPath empty and setup_camera failed: {exc}")
+
             self.report(
                 {'WARNING'},
                 "Manifest has no cameraPath field — created static camera from manifest.camera",
@@ -270,8 +271,8 @@ class AICSS_OT_setup_camera_animation(Operator):
                 continue
 
             frame = int(round(t * self.fps * duration))
-            if frame < 0:
-                frame = 0
+            if frame < 1:
+                frame = 1
 
             # 位置
             cam_obj.location = (float(pos[0]), float(pos[1]), float(pos[2]))
@@ -285,11 +286,23 @@ class AICSS_OT_setup_camera_animation(Operator):
             # 这里直接算 euler：让 -Z 指向 (dx,dy,dz)，up 为 +Y。
             # 用 mathutils.Vector.to_track_quat 是最稳的方式。
             try:
-                from mathutils import Vector
+                from mathutils import Matrix, Vector
                 direction = Vector((dx, dy, dz))
                 if direction.length > 1e-6:
-                    quat = direction.to_track_quat('-Z', 'Y')
-                    cam_obj.rotation_euler = quat.to_euler()
+                    # 相机朝 -Z，世界上方向锁在 +Y，只偏航不滚转。
+                    forward = direction.normalized()
+                    cam_z = -forward
+                    cam_x = Vector((0.0, 1.0, 0.0)).cross(cam_z)
+                    if cam_x.length < 1e-5:
+                        cam_x = Vector((1.0, 0.0, 0.0))
+                    cam_x.normalize()
+                    cam_y = cam_z.cross(cam_x).normalized()
+                    rot = Matrix((
+                        (cam_x.x, cam_y.x, cam_z.x),
+                        (cam_x.y, cam_y.y, cam_z.y),
+                        (cam_x.z, cam_y.z, cam_z.z),
+                    ))
+                    cam_obj.rotation_euler = rot.to_euler('XYZ')
                     cam_obj.keyframe_insert(data_path="rotation_euler", frame=frame)
             except Exception:
                 # mathutils 在 Blender 内一定可用；失败则跳过旋转

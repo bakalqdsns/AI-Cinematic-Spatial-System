@@ -16,10 +16,12 @@ Z_OFFSETS = {
     "background": -12.0,
     "midground": -6.0,
     "foreground": -2.0,
+    "ground": -1.5,
 }
 
-# Render order — sky is drawn first (deepest), foreground last (closest).
-LAYER_ORDER = ("sky", "background", "midground", "foreground")
+# Render order — sky is drawn first (deepest), ground last (closest floor).
+# Mirrors layer_exporter.LAYER_ORDER.
+LAYER_ORDER = ("sky", "background", "midground", "foreground", "ground")
 
 # Default scene size in Blender units (1 BU = 1 m in our paper-diorama world)
 DEFAULT_SCENE_WIDTH = 20.0
@@ -73,10 +75,10 @@ def normalize_manifest(data):
 
     # We don't require every layer to be present (e.g. sky may be omitted
     # for night scenes), but we do require at least one.
-    if not any(k in layers for k in ("foreground", "midground", "background", "sky")):
+    if not any(k in layers for k in ("foreground", "midground", "background", "sky", "ground")):
         raise ValueError(
             "Manifest `layers` must include at least one of: "
-            "foreground, midground, background, sky"
+            "foreground, midground, background, sky, ground"
         )
 
     z_offsets = data.get("zOffsets")

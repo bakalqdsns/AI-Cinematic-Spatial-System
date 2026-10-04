@@ -137,11 +137,20 @@ def _render_one_shot(manifest_path: str, output_dir: str,
             # 帧序列导入失败不致命——退化为静态角色
             print(f"[AICSS] import_character_frames failed (will use static): {exc}")
 
-        # 2) 相机动画（manifest 无 cameraPath 时 operator 自己会跳过）
+        # 2) 相机动画：读 manifest.cameraPath（由 camera_path_generator 按分镜运镜写出）
         bpy.ops.aicss.setup_camera_animation(
             manifest_path=manifest_path,
             fps=float(fps),
         )
+
+        # 2.5) 图层视差：有 cameraPath 时按深度差速移动各层（T09）
+        try:
+            bpy.ops.aicss.layer_motion(
+                manifest_path=manifest_path,
+                fps=float(fps),
+            )
+        except Exception as exc:
+            print(f"[AICSS] layer_motion failed (layers stay static): {exc}")
 
         # 3) 灯光：优先用 manifest 的 lightingPreset，回退到 warm_interior
         preset = lighting_preset or manifest.get("lightingPreset") or "warm_interior"

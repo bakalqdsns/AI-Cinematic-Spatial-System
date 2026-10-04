@@ -123,11 +123,15 @@ def _collect_layers(staging: Path, project_dir: Path) -> dict[str, str]:
             candidates.extend(root.rglob(f"*{name}*.png"))
             candidates.extend(root.rglob(f"*{name}*.PNG"))
 
+    def _stem_is_layer(stem: str, name: str) -> bool:
+        # 精确匹配。子串会把 background.png 当成 ground（"ground" in "background"）。
+        s = stem.lower()
+        return s == name or s.endswith(f"_{name}") or s.endswith(f"-{name}")
+
     for name in _LAYER_NAMES:
         match = None
         for c in candidates:
-            stem = c.stem.lower()
-            if name in stem and name not in found:
+            if _stem_is_layer(c.stem, name) and name not in found:
                 match = c
                 break
         if match is None:
@@ -310,6 +314,179 @@ def _collect_camera(staging: Path, project_dir: Path, shot_id: str) -> Optional[
     return "camera/camera_keyframes.json"
 
 
+def _read_pipeline_state(project_dir: Path) -> dict:
+    path = project_dir / "pipeline_state.json"
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log.warning("[archive] pipeline_state unreadable: %s", exc)
+        return {}
+
+
+def _shot_record(project_dir: Path, shot_id: str) -> dict:
+    state = _read_pipeline_state(project_dir)
+    for shot in state.get("shots") or []:
+        if str(shot.get("id")) == shot_id:
+            return shot
+    return {}
+
+
+def _scene_type_for(project_dir: Path, scene_id: Optional[str]) -> str:
+    """indoor / outdoor，给 GroundingDINO 选提示词。"""
+    state = _read_pipeline_state(project_dir)
+    for scene in state.get("script_data", {}).get("scenes") or []:
+        if scene_id and str(scene.get("id")) != scene_id:
+            continue
+        text = f"{scene.get('location') or ''} {scene.get('atmosphere') or ''}".lower()
+        if any(k in text for k in ("室", "馆", "厅", "房", "店", "indoor", "cafe", "room")):
+            return "indoor"
+        if scene_id:
+            break
+    return "outdoor"
+
+
+def _find_scene_wide(project_dir: Path, scene_id: Optional[str]) -> Optional[Path]:
+    scenes = project_dir / "scenes"
+    if not scenes.is_dir():
+        return None
+    hits = sorted(scenes.rglob("wide.png"))
+    if not hits:
+        return None
+    if scene_id:
+        for hit in hits:
+            if scene_id in hit.as_posix():
+                return hit
+    return hits[0]
+
+
+_OCCLUSION_FILL_MARK = "occluded_lama_v1"
+
+
+def _layers_already_exported(layers_dir: Path, source: Path) -> bool:
+    if not layers_dir.is_dir():
+        return False
+    needed = [layers_dir / f"{name}.png" for name in _LAYER_NAMES]
+    if not all(p.is_file() and p.stat().st_size > 0 for p in needed):
+        return False
+    mark = layers_dir / "_fill.json"
+    try:
+        payload = json.loads(mark.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if payload.get("method") != _OCCLUSION_FILL_MARK:
+        return False
+    try:
+        src_mtime = source.stat().st_mtime
+    except OSError:
+        return True
+    return all(p.stat().st_mtime >= src_mtime for p in needed)
+
+
+def ensure_depth_layers(project_dir: Path, scene_id: Optional[str] = None) -> list[str]:
+    """按文档路线生成 5 层 RGBA：DepthAnything → GroundingDINO+SAM2 → 地面拟合 → 分层导出。
+
+    写入 ``<project>/layers/{sky,background,midground,foreground,ground}.png``。
+    源图未变且 5 层都在时跳过。模型不可用时记日志并返回空列表，归档仍可继续。
+    """
+    source = _find_scene_wide(project_dir, scene_id)
+    if source is None:
+        _log.info("[archive] no wide.png — skip depth layer export")
+        return []
+
+    layers_dir = project_dir / "layers"
+    if _layers_already_exported(layers_dir, source):
+        _log.info("[archive] depth layers up to date: %s", layers_dir)
+        return [p.name for p in sorted(layers_dir.glob("*.png"))]
+
+    try:
+        from PIL import Image
+        from app.models.model_manager import model_manager
+        from app.services.layer_exporter import export_layers
+    except Exception as exc:
+        _log.warning("[archive] layer pipeline imports failed: %s", exc)
+        return []
+
+    image = Image.open(source).convert("RGB")
+    try:
+        depth_meters = model_manager.depth_model.predict_meters(image, scale=50.0)
+    except Exception as exc:
+        _log.warning("[archive] DepthAnything failed, layers not regenerated: %s", exc)
+        return []
+
+    object_assets: list = []
+    ground_entries: list = []
+    scene_type = _scene_type_for(project_dir, scene_id)
+    try:
+        from app.services.object_detector import detect_objects
+        object_assets, ground_entries = detect_objects(
+            image, depth_meters, scene_type=scene_type,
+        )
+    except Exception as exc:
+        _log.warning("[archive] object detection failed, depth buckets only: %s", exc)
+
+    ground_asset = None
+    try:
+        from app.services.ground_reconstructor import reconstruct_ground
+        ground_asset = reconstruct_ground(
+            image, depth_meters, detections=ground_entries,
+        )
+    except Exception as exc:
+        _log.warning("[archive] ground reconstruction failed: %s", exc)
+
+    try:
+        from app.services.layer_exporter import inpaint_occluded_layers
+        layer_imgs = export_layers(
+            image,
+            depth_meters,
+            object_assets=object_assets or None,
+            ground_asset=ground_asset,
+        )
+        layer_imgs = inpaint_occluded_layers(
+            image,
+            layer_imgs,
+            depth_meters,
+            object_assets=object_assets or None,
+            ground_asset=ground_asset,
+        )
+    except Exception as exc:
+        _log.warning("[archive] export_layers failed: %s", exc)
+        return []
+
+    layers_dir.mkdir(parents=True, exist_ok=True)
+    (layers_dir / "_fill.json").write_text(
+        json.dumps({"method": _OCCLUSION_FILL_MARK}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    written: list[str] = []
+    for name, img in layer_imgs.items():
+        dest = layers_dir / f"{name}.png"
+        img.save(dest, format="PNG")
+        written.append(dest.name)
+        _log.info("[archive] wrote depth layer %s", dest)
+    return written
+
+
+def _camera_path_for_shot(project_dir: Path, shot_id: str) -> tuple[list[dict], float]:
+    """用分镜的运镜 / 景别 / 时长生成 cameraPath。没有分镜记录时返回空路径。"""
+    shot = _shot_record(project_dir, shot_id)
+    if not shot:
+        return [], 5.0
+    duration = float(shot.get("duration_seconds") or 5.0)
+    try:
+        from app.services.camera_path_generator import build_camera_path
+        path = build_camera_path(
+            shot.get("camera_movement") or "Static",
+            shot.get("shot_size") or "Medium Shot",
+            duration,
+        )
+    except Exception as exc:
+        _log.warning("[archive] camera path failed: %s", exc)
+        return [], duration
+    return path, duration
+
+
 def build_shot_archive(
     project_id: str,
     shot_id: str,
@@ -380,6 +557,18 @@ def build_shot_archive(
         # ── scenes (keyframe views) ──────────────────────────────────────────
         file_count += _copy_tree(project_dir / "scenes", staging / "scene")
 
+        # ── 文档路线：深度分层 + 分镜运镜 ──────────────────────────────────
+        # 横条切图不在这里。缺层时跑 DepthAnything / DINO / SAM2 / 地面拟合。
+        try:
+            ensure_depth_layers(project_dir, scene_id)
+        except Exception as exc:
+            _log.warning("[archive] ensure_depth_layers failed: %s", exc)
+
+        if camera_path is None:
+            camera_path, shot_duration = _camera_path_for_shot(project_dir, shot_id)
+        else:
+            shot_duration = float(_shot_record(project_dir, shot_id).get("duration_seconds") or 5.0)
+
         # ── layers / meshes / camera ─────────────────────────────────────────
         layer_map = _collect_layers(staging, project_dir)
         file_count += len(layer_map)
@@ -428,18 +617,27 @@ def build_shot_archive(
                     if role in preset_data
                 } or _DEFAULT_LIGHTING
 
+        cam_fov = 35.0
+        cam_distance = 12.0
+        if camera_path:
+            first = camera_path[0]
+            cam_fov = float(first.get("fov") or cam_fov)
+            pos = first.get("position") or [0.0, 0.0, cam_distance]
+            cam_distance = float(pos[2]) if len(pos) > 2 else cam_distance
+
         manifest: dict[str, Any] = {
             "shotId": shot_id,
             "sceneId": scene_id or shot_id,
             "projectId": project_id,
             "width": width,
             "height": height,
+            "duration": shot_duration,
             "layers": layer_map,
             "zOffsets": [z for z in _DEFAULT_Z_OFFSETS if z["layer"] in layer_map or not layer_map],
             "camera": {
                 "shotType": "wide",
-                "fov": 35.0,
-                "distance": 12.0,
+                "fov": cam_fov,
+                "distance": cam_distance,
                 "target": [0.0, 0.0, 0.0],
                 "keyframesPath": cam_rel,
             },
