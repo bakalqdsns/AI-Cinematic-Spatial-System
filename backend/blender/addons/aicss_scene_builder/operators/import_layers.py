@@ -117,7 +117,10 @@ class AICSS_OT_import_layers(Operator):
 
         imported = []
         manifest_dir = os.path.dirname(os.path.abspath(self.manifest_path))
-        for layer in LAYER_ORDER:
+        layer_names = list(LAYER_ORDER) + [
+            name for name in manifest["layers"].keys() if name not in LAYER_ORDER
+        ]
+        for layer in layer_names:
             png_path = manifest["layers"].get(layer)
             if not png_path:
                 continue

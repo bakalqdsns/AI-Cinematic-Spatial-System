@@ -124,5 +124,5 @@ def layer_z_offset(manifest, layer):
     """
     for entry in manifest.get("zOffsets", []):
         if entry.get("layer") == layer:
-            return float(entry.get("zOffset", Z_OFFSETS[layer]))
-    return Z_OFFSETS[layer]
+            return float(entry.get("zOffset", Z_OFFSETS.get(layer, -8.0)))
+    return float(Z_OFFSETS.get(layer, -8.0))

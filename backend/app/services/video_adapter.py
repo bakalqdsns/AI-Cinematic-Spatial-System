@@ -55,6 +55,10 @@ def _apply_greenscreen_prompt(prompt: str, greenscreen: bool) -> str:
     return f"{prompt}{suffix}"
 
 
+class VideoReferenceNotConfigured(RuntimeError):
+    """整段参考视频的生成模型尚未接入。"""
+
+
 class VideoProvider(ABC):
     """
     Abstract base for all video generation providers.
@@ -92,6 +96,18 @@ class VideoProvider(ABC):
             Local file path to the generated video, or None on failure.
         """
         ...
+
+    async def generate_from_reference_video(
+        self,
+        prompt: str,
+        reference_video_path: str,
+        duration: float = 5.0,
+    ) -> Optional[str]:
+        """用整段参考视频再生成一条视频。具体模型由后续接入的 provider 实现。"""
+        del prompt, reference_video_path, duration
+        raise VideoReferenceNotConfigured(
+            "视频生视频尚未配置：需要接受整段渲染视频作为参考的模型接口"
+        )
 
 
 # ── Provider implementations ──────────────────────────────────────────────────────

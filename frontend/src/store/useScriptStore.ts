@@ -55,7 +55,7 @@ interface ScriptStore {
   // ─── UI state ──────────────────────────────────────────────────────────────
   selectedShotId: string | null;
   selectedCharacterId: string | null;
-  activeTab: 'script' | 'storyboard' | 'characters' | 'scenes' | 'motion' | 'timeline';
+  activeTab: 'script' | 'characters' | 'scenes';
 
   // ─── Project context ───────────────────────────────────────────────────────
   projectId: string | null;
@@ -1028,6 +1028,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
             status: response.status,
             videoPath: response.videoPath,
             frameCount: response.frameCount,
+            segmentedFrames: response.segmentedFrames,
           },
         },
         isGeneratingMotion: {

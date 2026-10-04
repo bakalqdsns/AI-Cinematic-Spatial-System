@@ -311,3 +311,60 @@ async def download_shot_archive(project_id: str, shot_id: str):
         media_type="application/zip",
         filename=zip_path.name,
     )
+
+
+class ConfirmedLayerIn(BaseModel):
+    name: str
+    dataUri: str
+    zOffset: float = -8.0
+    order: int = 1
+
+
+class ConfirmLayersRequest(BaseModel):
+    layers: list[ConfirmedLayerIn] = Field(default_factory=list)
+
+
+@router.post("/v2/projects/{project_id}/shots/{shot_id}/confirmed-layers")
+async def save_confirmed_layers(project_id: str, shot_id: str, request: ConfirmLayersRequest):
+    """保存 Single 面板确认后的分层，归档时优先使用，不再重跑自动分层。"""
+    import base64
+    import re
+    from app.services.shot_archiver import confirmed_layers_dir
+
+    project_dir = project_store._project_dir(project_id)
+    if not project_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+    if not request.layers:
+        raise HTTPException(status_code=400, detail="layers is empty")
+
+    dest = confirmed_layers_dir(project_dir, shot_id)
+    dest.mkdir(parents=True, exist_ok=True)
+    written = []
+    for item in request.layers:
+        name = item.name.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_\-]+", name):
+            raise HTTPException(status_code=400, detail=f"invalid layer name: {name}")
+        raw = item.dataUri
+        if "," in raw:
+            raw = raw.split(",", 1)[1]
+        try:
+            png = base64.b64decode(raw)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"bad image for {name}: {exc}") from exc
+        (dest / f"{name}.png").write_bytes(png)
+        written.append({
+            "name": name,
+            "zOffset": item.zOffset,
+            "order": item.order,
+        })
+    written.sort(key=lambda row: row["order"])
+    (dest / "order.json").write_text(
+        json_dumps(written),
+        encoding="utf-8",
+    )
+    return {"shotId": shot_id, "count": len(written)}
+
+
+def json_dumps(layers: list[dict]) -> str:
+    import json
+    return json.dumps({"layers": layers}, ensure_ascii=False, indent=2)

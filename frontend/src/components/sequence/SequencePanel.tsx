@@ -1,271 +1,94 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// AICSS Sequence Panel — Frame management and playback interface
-// Displays frame thumbnails, current frame details, cross-frame tracking info
-// ─────────────────────────────────────────────────────────────────────────────
-import { useEffect, useRef } from 'react';
-import {
-  Play,
-  Pause,
-  SkipBack,
-  SkipForward,
-  ChevronLeft,
-  ChevronRight,
-  Loader2,
-} from 'lucide-react';
-import { useSequenceStore } from '../../store/useSequenceStore';
+import { useEffect, useState } from 'react';
+import type { Character } from '../../types/script';
+import { useScriptStore } from '../../store/useScriptStore';
+import { useShotWorkflowStore } from '../../store/useShotWorkflowStore';
+import { mediaUrl } from '../../services/scriptService';
+
+const EMPTY_CHARACTERS: Character[] = [];
 
 export function SequencePanel() {
-  const {
-    frames,
-    currentFrameIndex,
-    crossFrameObjects,
-    sceneLinks,
-    selectedGlobalObjectId,
-    isPlaying,
-    playbackSpeed,
-    loading,
-    progress,
-    progressMessage,
-    error,
-    setCurrentFrame,
-    nextFrame,
-    prevFrame,
-    play,
-    pause,
-    setPlaybackSpeed,
-    setSelectedGlobalObjectId,
-  } = useSequenceStore();
+  const shot = useScriptStore((s) => s.shots.find((item) => item.id === s.selectedShotId) ?? null);
+  const characters = useScriptStore((s) => s.parsedScript?.characters) ?? EMPTY_CHARACTERS;
+  const motions = useScriptStore((s) => s.motionSequences);
+  const generating = useScriptStore((s) => s.isGeneratingMotion);
+  const generateMotion = useScriptStore((s) => s.generateMotion);
+  const projectId = useScriptStore((s) => s.projectId);
+  const patch = useShotWorkflowStore((s) => s.patch);
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [activeChar, setActiveChar] = useState<string | null>(null);
 
-  const currentFrame = frames[currentFrameIndex];
-  const playIntervalRef = useRef<number | null>(null);
+  const cast = shot
+    ? characters.filter((character) => shot.characters.includes(character.id))
+    : [];
+  const prompt = shot?.visualPrompts.actionPrompt?.trim() ?? '';
 
-  // 播放逻辑
+  const shotId = shot?.id;
+  const castKey = shot ? shot.characters.join(',') : '';
   useEffect(() => {
-    if (isPlaying) {
-      playIntervalRef.current = window.setInterval(() => {
-        const { currentFrameIndex, frames, nextFrame, pause } = useSequenceStore.getState();
-        if (currentFrameIndex >= frames.length - 1) {
-          pause();
-        } else {
-          nextFrame();
-        }
-      }, 1000 / playbackSpeed);
-    } else {
-      if (playIntervalRef.current) {
-        clearInterval(playIntervalRef.current);
-        playIntervalRef.current = null;
-      }
-    }
+    if (!shotId) return;
+    const ids = castKey ? castKey.split(',') : [];
+    if (ids.length === 0) return;
+    const done = ids.every((id) => {
+      const motion = useScriptStore.getState().motionSequences[`${shotId}_${id}`];
+      return motion?.status === 'done' && motion.frameCount > 0;
+    });
+    const current = useShotWorkflowStore.getState().progress[shotId]?.actionDone;
+    if (current === done) return;
+    patch(shotId, { actionDone: done });
+  }, [shotId, castKey, motions, patch]);
 
-    return () => {
-      if (playIntervalRef.current) {
-        clearInterval(playIntervalRef.current);
-      }
-    };
-  }, [isPlaying, playbackSpeed]);
-
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8">
-        <Loader2 className="w-8 h-8 animate-spin text-blue-500 mb-4" />
-        <p className="text-gray-400">{progressMessage}</p>
-        {progress > 0 && progress < 100 && (
-          <div className="w-48 h-2 bg-gray-700 rounded-full mt-4 overflow-hidden">
-            <div
-              className="h-full bg-blue-500 transition-all"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-        )}
-      </div>
-    );
+  if (!shot) {
+    return <div className="h-full flex items-center justify-center text-gray-500">请在左侧选择一条分镜</div>;
+  }
+  if (!prompt) {
+    return <div className="h-full flex items-center justify-center text-gray-400">这条分镜还没有动作提示。</div>;
   }
 
-  if (error) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8">
-        <p className="text-red-400">错误: {error}</p>
-      </div>
-    );
-  }
-
-  if (frames.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-gray-500">
-        <p>暂无序列数据</p>
-        <p className="text-sm mt-2">请先上传帧序列进行分析</p>
-      </div>
-    );
-  }
+  const currentId = activeChar ?? cast[0]?.id ?? null;
+  const motion = currentId ? motions[`${shot.id}_${currentId}`] : undefined;
+  const frames = motion?.segmentedFrames ?? [];
+  const frame = frames[Math.min(frameIndex, Math.max(frames.length - 1, 0))];
 
   return (
-    <div className="flex h-full">
-      {/* 帧列表 */}
-      <div className="w-48 border-r border-gray-700 overflow-y-auto p-2">
-        <h3 className="text-xs text-gray-500 uppercase mb-2 px-2">
-          Frames ({frames.length})
-        </h3>
-        <div className="space-y-1">
-          {frames.map((frame, idx) => (
-            <button
-              key={frame.frameId}
-              onClick={() => setCurrentFrame(idx)}
-              className={`
-                w-full p-2 rounded text-left text-xs transition-colors
-                ${idx === currentFrameIndex
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}
-              `}
-            >
-              <div className="font-medium">{frame.frameId}</div>
-              <div className="text-gray-500 mt-0.5">
-                {frame.frameType || 'unknown'}
-              </div>
-              <div className="text-gray-600 mt-0.5">
-                {frame.objects?.length || 0} objects
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* 当前帧详情 */}
-      <div className="flex-1 flex flex-col">
-        {/* 播放控制 */}
-        <div className="flex items-center justify-center gap-2 p-3 border-b border-gray-700">
-          <button
-            onClick={prevFrame}
-            disabled={currentFrameIndex === 0}
-            className="p-2 rounded hover:bg-gray-700 disabled:opacity-30"
-          >
-            <SkipBack size={18} />
-          </button>
-          <button
-            onClick={() => setCurrentFrame(0)}
-            disabled={currentFrameIndex === 0}
-            className="p-2 rounded hover:bg-gray-700 disabled:opacity-30"
-          >
-            <ChevronLeft size={18} />
-          </button>
-
-          <button
-            onClick={isPlaying ? pause : play}
-            className="p-2 rounded bg-blue-600 hover:bg-blue-500"
-          >
-            {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-          </button>
-
-          <button
-            onClick={() => setCurrentFrame(frames.length - 1)}
-            disabled={currentFrameIndex === frames.length - 1}
-            className="p-2 rounded hover:bg-gray-700 disabled:opacity-30"
-          >
-            <ChevronRight size={18} />
-          </button>
-          <button
-            onClick={nextFrame}
-            disabled={currentFrameIndex === frames.length - 1}
-            className="p-2 rounded hover:bg-gray-700 disabled:opacity-30"
-          >
-            <SkipForward size={18} />
-          </button>
-
-          <select
-            value={playbackSpeed}
-            onChange={(e) => setPlaybackSpeed(Number(e.target.value))}
-            className="ml-4 px-2 py-1 rounded bg-gray-800 text-sm"
-          >
-            <option value={0.5}>0.5x</option>
-            <option value={1}>1x</option>
-            <option value={2}>2x</option>
-            <option value={4}>4x</option>
-          </select>
-
-          <span className="ml-4 text-sm text-gray-500">
-            {currentFrameIndex + 1} / {frames.length}
-          </span>
-        </div>
-
-        {/* 帧信息 */}
-        <div className="flex-1 p-4 overflow-y-auto">
-          {currentFrame && (
-            <div className="space-y-4">
-              {/* 帧概览 */}
-              <div className="bg-gray-800 rounded-lg p-4">
-                <h4 className="text-sm font-medium mb-2">
-                  Frame: {currentFrame.frameId}
-                </h4>
-                <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
-                  <div>Type: {currentFrame.frameType || 'N/A'}</div>
-                  <div>Objects: {currentFrame.objects?.length || 0}</div>
-                  <div>Scene: {currentFrame.vlmScene || 'N/A'}</div>
-                  <div>Classes: {currentFrame.vlmClasses?.join(', ') || 'N/A'}</div>
-                </div>
-              </div>
-
-              {/* 跨帧物体 */}
-              {crossFrameObjects.length > 0 && (
-                <div className="bg-gray-800 rounded-lg p-4">
-                  <h4 className="text-sm font-medium mb-2">
-                    Tracked Objects ({crossFrameObjects.length})
-                  </h4>
-                  <div className="space-y-1">
-                    {crossFrameObjects.map((obj) => {
-                      const appearsInThisFrame = obj.appearances.some(
-                        (a) => a.frameId === currentFrame.frameId
-                      );
-                      return (
-                        <button
-                          key={obj.globalId}
-                          onClick={() => setSelectedGlobalObjectId(obj.globalId)}
-                          className={`
-                            w-full px-2 py-1 rounded text-left text-xs transition-colors
-                            ${selectedGlobalObjectId === obj.globalId
-                              ? 'bg-purple-600 text-white'
-                              : appearsInThisFrame
-                                ? 'bg-gray-700 text-white'
-                                : 'bg-gray-900 text-gray-500'}
-                          `}
-                        >
-                          <span className="font-mono">{obj.globalId.slice(0, 12)}...</span>
-                          <span className="ml-2">{obj.classLabel}</span>
-                          <span className="ml-2 text-gray-500">
-                            ({obj.appearances.length} frames)
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* 场景关联 */}
-              {sceneLinks.length > 0 && (
-                <div className="bg-gray-800 rounded-lg p-4">
-                  <h4 className="text-sm font-medium mb-2">
-                    Scene Links ({sceneLinks.length})
-                  </h4>
-                  <div className="space-y-1">
-                    {sceneLinks.map((link, idx) => (
-                      <div key={idx} className="flex items-center gap-2 text-xs">
-                        <span className="text-gray-500">{link.sourceFrameId}</span>
-                        <span className="text-gray-600">→</span>
-                        <span className="text-gray-500">{link.targetFrameId}</span>
-                        <span className="ml-auto px-2 py-0.5 rounded bg-gray-700 text-gray-400">
-                          {link.linkType}
-                        </span>
-                        <span className="text-gray-600">
-                          {Math.round(link.confidence * 100)}%
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+    <div className="h-full overflow-y-auto p-4 space-y-4">
+      <p className="text-sm text-gray-300">{prompt}</p>
+      {cast.length === 0 && <p className="text-sm text-gray-500">这条分镜没有角色。</p>}
+      <div className="space-y-2">
+        {cast.map((character) => {
+          const key = `${shot.id}_${character.id}`;
+          const row = motions[key];
+          return (
+            <div key={character.id} className="flex items-center gap-3 border border-gray-800 rounded px-3 py-2">
+              <button type="button" className="text-sm text-gray-100" onClick={() => { setActiveChar(character.id); setFrameIndex(0); }}>
+                {character.name}
+              </button>
+              <span className="text-xs text-gray-500">{row?.status ?? '未生成'}{row ? ` · ${row.frameCount} 帧` : ''}</span>
+              <button
+                type="button"
+                disabled={!!generating[key]}
+                onClick={() => generateMotion(shot.id, character.id, projectId || undefined)}
+                className="ml-auto px-3 py-1 text-xs rounded bg-blue-600 disabled:opacity-50"
+              >
+                {generating[key] ? '生成中…' : '生成动作视频'}
+              </button>
+              {row?.error && <span className="text-xs text-red-400">{row.error}</span>}
             </div>
-          )}
-        </div>
+          );
+        })}
       </div>
+      {frame?.path && (
+        <div className="space-y-2">
+          <img src={mediaUrl(frame.path)} alt="动作帧" className="max-h-80 bg-black rounded" />
+          <input
+            type="range"
+            min={0}
+            max={Math.max(frames.length - 1, 0)}
+            value={Math.min(frameIndex, Math.max(frames.length - 1, 0))}
+            onChange={(e) => setFrameIndex(Number(e.target.value))}
+          />
+          <div className="text-xs text-gray-500">{frameIndex + 1} / {frames.length}</div>
+        </div>
+      )}
     </div>
   );
 }

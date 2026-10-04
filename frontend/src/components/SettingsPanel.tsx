@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Settings, X, Image as ImageIcon, Video, RefreshCw, Check, AlertCircle, Cpu, Cloud, HardDrive, Download, Server } from 'lucide-react';
 import { useSettingsStore } from '../store/useSettingsStore';
+import { useAppStore } from '../store/useAppStore';
 import { ProviderRegistry } from './ProviderRegistry';
 import type { ModelDownloadState, ModelDownloadStatus } from '../store/useSettingsStore';
 import type { RuntimeSettings } from '../services/settingsService';
@@ -101,6 +102,8 @@ export function SettingsPanel() {
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [savedFlash, setSavedFlash] = useState(false);
+  const dashscopeApiKey = useAppStore((s) => s.dashscopeApiKey);
+  const setDashscopeApiKey = useAppStore((s) => s.setDashscopeApiKey);
 
   // First open: hydrate from server and model download status
   useEffect(() => {
@@ -228,6 +231,18 @@ export function SettingsPanel() {
 
           {/* Single-page content: all modules listed vertically, each with its own mode toggle */}
           <div className="p-4 flex flex-col gap-3">
+            <SettingsGroup icon={<ImageIcon size={14} className="text-cyan-400" />} title="补全密钥">
+              <label className="text-[10px] text-gray-500">Inpaint Key（仅补全流程需要）</label>
+              <input
+                type="password"
+                value={dashscopeApiKey}
+                onChange={(e) => setDashscopeApiKey(e.target.value)}
+                placeholder="DashScope API Key"
+                spellCheck={false}
+                className="w-full px-2 py-1.5 rounded bg-gray-800 border border-gray-600 text-gray-200 text-xs"
+              />
+            </SettingsGroup>
+
             {/* Always-local notice */}
             <SettingsGroup icon={<HardDrive size={14} className="text-amber-400" />} title="必本地组件">
               <p className="text-[10px] text-gray-500 leading-relaxed -mt-1">

@@ -487,6 +487,57 @@ def _camera_path_for_shot(project_dir: Path, shot_id: str) -> tuple[list[dict], 
     return path, duration
 
 
+def confirmed_layers_dir(project_dir: Path, shot_id: str) -> Path:
+    return project_dir / "shots" / shot_id / "confirmed_layers"
+
+
+def load_confirmed_layers(project_dir: Path, shot_id: str) -> Optional[dict]:
+    """分镜上人工确认的分层。没有 order.json 时返回 None。"""
+    order_path = confirmed_layers_dir(project_dir, shot_id) / "order.json"
+    if not order_path.is_file():
+        return None
+    try:
+        payload = json.loads(order_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log.warning("[archive] confirmed layers unreadable: %s", exc)
+        return None
+    layers = payload.get("layers") or []
+    if not layers:
+        return None
+    return payload
+
+
+def _stage_confirmed_layers(staging: Path, project_dir: Path, shot_id: str) -> Optional[tuple[dict[str, str], list[dict]]]:
+    payload = load_confirmed_layers(project_dir, shot_id)
+    if payload is None:
+        return None
+    src_dir = confirmed_layers_dir(project_dir, shot_id)
+    layers_out = staging / "layers"
+    layers_out.mkdir(parents=True, exist_ok=True)
+    layer_map: dict[str, str] = {}
+    z_offsets: list[dict] = []
+    for item in payload["layers"]:
+        name = str(item.get("name") or "")
+        if not name or "/" in name or "\\" in name or ".." in name:
+            continue
+        src = src_dir / f"{name}.png"
+        if not src.is_file():
+            _log.warning("[archive] confirmed layer missing: %s", src)
+            continue
+        dest_name = f"{name}.png"
+        shutil.copy2(src, layers_out / dest_name)
+        layer_map[name] = f"layers/{dest_name}"
+        z_offsets.append({
+            "layer": name,
+            "zOffset": float(item.get("zOffset", -8.0)),
+            "zMin": 0.0,
+            "zMax": 9999.0,
+        })
+    if not layer_map:
+        return None
+    return layer_map, z_offsets
+
+
 def build_shot_archive(
     project_id: str,
     shot_id: str,
@@ -558,11 +609,13 @@ def build_shot_archive(
         file_count += _copy_tree(project_dir / "scenes", staging / "scene")
 
         # ── 文档路线：深度分层 + 分镜运镜 ──────────────────────────────────
-        # 横条切图不在这里。缺层时跑 DepthAnything / DINO / SAM2 / 地面拟合。
-        try:
-            ensure_depth_layers(project_dir, scene_id)
-        except Exception as exc:
-            _log.warning("[archive] ensure_depth_layers failed: %s", exc)
+        # 该分镜已有人工确认分层时直接采用，不再重跑自动分层。
+        confirmed = _stage_confirmed_layers(staging, project_dir, shot_id)
+        if confirmed is None:
+            try:
+                ensure_depth_layers(project_dir, scene_id)
+            except Exception as exc:
+                _log.warning("[archive] ensure_depth_layers failed: %s", exc)
 
         if camera_path is None:
             camera_path, shot_duration = _camera_path_for_shot(project_dir, shot_id)
@@ -570,7 +623,11 @@ def build_shot_archive(
             shot_duration = float(_shot_record(project_dir, shot_id).get("duration_seconds") or 5.0)
 
         # ── layers / meshes / camera ─────────────────────────────────────────
-        layer_map = _collect_layers(staging, project_dir)
+        confirmed_z: Optional[list[dict]] = None
+        if confirmed is not None:
+            layer_map, confirmed_z = confirmed
+        else:
+            layer_map = _collect_layers(staging, project_dir)
         file_count += len(layer_map)
         mesh_files = _collect_meshes(staging, project_dir)
         file_count += len(mesh_files)
@@ -633,7 +690,7 @@ def build_shot_archive(
             "height": height,
             "duration": shot_duration,
             "layers": layer_map,
-            "zOffsets": [z for z in _DEFAULT_Z_OFFSETS if z["layer"] in layer_map or not layer_map],
+            "zOffsets": confirmed_z if confirmed_z else [z for z in _DEFAULT_Z_OFFSETS if z["layer"] in layer_map or not layer_map],
             "camera": {
                 "shotType": "wide",
                 "fov": cam_fov,

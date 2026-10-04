@@ -175,6 +175,7 @@ export interface MotionSequence {
   frameCount: number;
   frameDir?: string;
   segmentedDir?: string;
+  segmentedFrames?: { frameIndex: number; path: string; filename: string }[];
   status: MotionStatus;
   error?: string;
 }

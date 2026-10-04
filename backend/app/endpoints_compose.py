@@ -539,3 +539,90 @@ async def api_render_queue(project_id: str, request: RenderQueueRequest) -> Rend
         )
 
 
+@router.get(
+    "/projects/{project_id}/renders/{filename}",
+    response_class=FileResponse,
+    summary="Stream a rendered MP4",
+)
+async def get_rendered_video(project_id: str, filename: str):
+    if os.path.sep in filename or "/" in filename or ".." in filename:
+        raise HTTPException(404, "Not found")
+    from app.services.project_store import WORKSPACE_DIR
+    path = WORKSPACE_DIR / project_id / "renders" / filename
+    if not path.is_file():
+        raise HTTPException(404, "Rendered video not found")
+    return FileResponse(str(path), media_type="video/mp4", filename=filename)
+
+
+@router.get("/media", summary="Stream a workspace or cache media file")
+async def get_media_file(path: str):
+    """只允许读取工作区或缓存目录里的文件，供动作帧预览。"""
+    from app.config import CACHE_DIR
+    from app.services.project_store import WORKSPACE_DIR
+
+    target = Path(path).resolve()
+    roots = [WORKSPACE_DIR.resolve(), Path(CACHE_DIR).resolve()]
+    if not target.is_file() or not any(_is_relative_to(target, root) for root in roots):
+        raise HTTPException(404, "Not found")
+    media = "image/png" if target.suffix.lower() == ".png" else "application/octet-stream"
+    return FileResponse(str(target), media_type=media, filename=target.name)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+class VideoRefineRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+
+
+class VideoRefineResponse(BaseModel):
+    outputPath: str
+    shotId: str
+
+
+@router.post(
+    "/projects/{project_id}/shots/{shot_id}/video-refine",
+    response_model=VideoRefineResponse,
+)
+async def refine_from_render(project_id: str, shot_id: str, request: VideoRefineRequest):
+    """用该分镜的整段渲染视频作为参考，再生成一条视频。
+
+    模型接口尚未接入时返回 501，不会改用抽帧冒充。
+    """
+    from app.services.project_store import WORKSPACE_DIR
+    from app.services.video_adapter import VideoReferenceNotConfigured, get_video_provider
+
+    renders = WORKSPACE_DIR / project_id / "renders"
+    reference = renders / f"{shot_id}.mp4"
+    if not reference.is_file():
+        matches = sorted(renders.glob(f"*{shot_id}*.mp4")) if renders.is_dir() else []
+        matches = [p for p in matches if not p.name.endswith("_refine.mp4")]
+        if not matches:
+            raise HTTPException(status_code=400, detail="当前分镜还没有渲染结果")
+        reference = matches[-1]
+
+    provider = get_video_provider()
+    try:
+        generated = await provider.generate_from_reference_video(
+            request.prompt,
+            str(reference),
+        )
+    except VideoReferenceNotConfigured as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+
+    if not generated:
+        raise HTTPException(status_code=502, detail="视频生视频没有返回文件")
+
+    renders.mkdir(parents=True, exist_ok=True)
+    dest = renders / f"{shot_id}_refine.mp4"
+    shutil.copy2(generated, dest)
+    return VideoRefineResponse(outputPath=str(dest.resolve()), shotId=shot_id)
+
+

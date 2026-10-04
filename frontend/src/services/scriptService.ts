@@ -332,7 +332,14 @@ export async function generateMotion(request: GenerateMotionRequest): Promise<Mo
     status: (data.status as MotionResponse['status']) || 'pending',
     videoPath: data.video_path,
     frameCount: data.frame_count,
-    segmentedFrames: data.segmented_frames || [],
+    segmentedFrames: (data.segmented_frames || []).map((frame) => {
+      const raw = frame as { frameIndex?: number; frame_index?: number; path: string; filename: string };
+      return {
+        frameIndex: raw.frameIndex ?? raw.frame_index ?? 0,
+        path: raw.path,
+        filename: raw.filename,
+      };
+    }),
     projectId: data.project_id,
   };
 }
@@ -596,6 +603,68 @@ export async function archiveShot(
     path,
     null,
     { params: Object.keys(params).length ? params : undefined },
+  );
+  return data;
+}
+
+export interface ConfirmedLayerPayload {
+  name: string;
+  dataUri: string;
+  zOffset: number;
+  order: number;
+}
+
+export async function saveConfirmedLayers(
+  projectId: string,
+  shotId: string,
+  layers: ConfirmedLayerPayload[],
+): Promise<void> {
+  const api = axios.create({ baseURL: `${DEFAULT_BACKEND}/api/aicss`, timeout: 10 * 60 * 1000 });
+  await api.post(
+    `/v2/projects/${encodeURIComponent(projectId)}/shots/${encodeURIComponent(shotId)}/confirmed-layers`,
+    { layers },
+  );
+}
+
+export async function renderShot(
+  projectId: string,
+  shotId: string,
+): Promise<{ outputPath?: string; error?: string; status: string }> {
+  const api = axios.create({ baseURL: `${DEFAULT_BACKEND}/api/aicss/v2`, timeout: 60 * 60 * 1000 });
+  const { data } = await api.post<{
+    results: { shotId: string; status: string; outputPath?: string; error?: string }[];
+    blenderAvailable: boolean;
+  }>(`/projects/${encodeURIComponent(projectId)}/render-queue`, {
+    shotIds: [shotId],
+    samples: 16,
+    resolution: [960, 540],
+    device: 'GPU',
+    fps: 24,
+  });
+  const row = data.results.find((item) => item.shotId === shotId) ?? data.results[0];
+  if (!data.blenderAvailable) {
+    return { status: 'failed', error: '未找到 Blender' };
+  }
+  return { status: row?.status ?? 'failed', outputPath: row?.outputPath, error: row?.error };
+}
+
+export function renderPlaybackUrl(projectId: string, filename: string): string {
+  return `${DEFAULT_BACKEND}/api/aicss/v2/projects/${encodeURIComponent(projectId)}/renders/${encodeURIComponent(filename)}`;
+}
+
+export function mediaUrl(path: string): string {
+  return `${DEFAULT_BACKEND}/api/aicss/v2/media?path=${encodeURIComponent(path)}`;
+}
+
+export async function refineRenderVideo(
+  projectId: string,
+  shotId: string,
+  prompt: string,
+): Promise<{ outputPath: string }> {
+  const api = axios.create({ baseURL: `${DEFAULT_BACKEND}/api/aicss/v2`, timeout: 60 * 60 * 1000 });
+  const { data } = await api.post<{ outputPath: string }>(
+    `/projects/${encodeURIComponent(projectId)}/shots/${encodeURIComponent(shotId)}/video-refine`,
+    { prompt },
   );
   return data;
 }

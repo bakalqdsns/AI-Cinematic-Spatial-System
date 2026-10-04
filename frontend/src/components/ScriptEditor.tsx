@@ -23,7 +23,7 @@ const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
   { value: 'japanese', label: '日本語' },
 ];
 
-type TabId = 'script' | 'storyboard' | 'characters' | 'scenes' | 'motion' | 'timeline';
+type TabId = 'script' | 'characters' | 'scenes';
 
 export const ScriptEditor: React.FC = () => {
   const {
@@ -79,16 +79,12 @@ export const ScriptEditor: React.FC = () => {
 
   const handleGenerateShots = async () => {
     await generateShots(projectId || undefined);
-    setActiveTab('storyboard');
   };
 
   const tabs: { id: TabId; label: string }[] = [
     { id: 'script', label: '剧本数据' },
-    { id: 'storyboard', label: '分镜预览' },
     { id: 'characters', label: '角色资产' },
     { id: 'scenes', label: '场景资产' },
-    { id: 'motion', label: '动作序列' },
-    { id: 'timeline', label: '时间线' },
   ];
 
   return (
@@ -147,11 +143,6 @@ export const ScriptEditor: React.FC = () => {
             }`}
           >
             {tab.label}
-            {tab.id === 'storyboard' && shots.length > 0 && (
-              <span className="ml-1 text-xs bg-blue-900/50 text-blue-300 px-1.5 rounded">
-                {shots.length}
-              </span>
-            )}
             {tab.id === 'characters' && parsedScript && (
               <span className="ml-1 text-xs bg-emerald-900/50 text-emerald-300 px-1.5 rounded">
                 {parsedScript.characters.length}
@@ -177,16 +168,6 @@ export const ScriptEditor: React.FC = () => {
             isGeneratingSceneAsset={isGeneratingSceneAsset}
           />
         )}
-        {activeTab === 'storyboard' && (
-          <StoryboardTab
-            shots={shots}
-            parsedScript={parsedScript}
-            selectedShotId={selectedShotId}
-            onSelectShot={selectShot}
-            onUpdateShot={updateShot}
-            sceneAssets={sceneAssets}
-          />
-        )}
         {activeTab === 'characters' && (
           <CharactersTab
             characters={parsedScript?.characters || []}
@@ -201,10 +182,6 @@ export const ScriptEditor: React.FC = () => {
             isResolvingPrompts={!!isResolvingPrompts}
           />
         )}
-        {activeTab === 'motion' && (
-          <MotionTab shots={shots} parsedScript={parsedScript} />
-        )}
-        {activeTab === 'timeline' && <TimelinePanel />}
         {activeTab === 'scenes' && (
           <ScenesTab
             parsedScript={parsedScript}
