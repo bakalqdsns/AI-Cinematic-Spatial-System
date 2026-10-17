@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import type { Character } from '../../types/script';
 import { useScriptStore } from '../../store/useScriptStore';
 import { useShotWorkflowStore } from '../../store/useShotWorkflowStore';
-import { mediaUrl } from '../../services/scriptService';
+import { imageSrc } from '../../services/projectFiles';
+import { ingestActionVideo, flushRecord } from '../../services/recordService';
+import { CopyPrompt, DropSlot } from '../ManualFill';
+import { checkActionPrompt, PromptIssueList } from '../../services/promptCheck';
 
 const EMPTY_CHARACTERS: Character[] = [];
 
@@ -10,12 +13,13 @@ export function SequencePanel() {
   const shot = useScriptStore((s) => s.shots.find((item) => item.id === s.selectedShotId) ?? null);
   const characters = useScriptStore((s) => s.parsedScript?.characters) ?? EMPTY_CHARACTERS;
   const motions = useScriptStore((s) => s.motionSequences);
-  const generating = useScriptStore((s) => s.isGeneratingMotion);
-  const generateMotion = useScriptStore((s) => s.generateMotion);
   const projectId = useScriptStore((s) => s.projectId);
+  const setMotion = useScriptStore((s) => s.setMotion);
   const patch = useShotWorkflowStore((s) => s.patch);
   const [frameIndex, setFrameIndex] = useState(0);
   const [activeChar, setActiveChar] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const cast = shot
     ? characters.filter((character) => shot.characters.includes(character.id))
@@ -49,36 +53,72 @@ export function SequencePanel() {
   const frames = motion?.segmentedFrames ?? [];
   const frame = frames[Math.min(frameIndex, Math.max(frames.length - 1, 0))];
 
+  const onVideo = async (characterId: string, characterName: string, file: File) => {
+    if (!projectId) {
+      setError('先解析剧本，视频才会写入这个剧本的目录');
+      return;
+    }
+    setBusyId(characterId);
+    setError(null);
+    setActiveChar(characterId);
+    setFrameIndex(0);
+    try {
+      const result = await ingestActionVideo(projectId, shot.id, characterId, file);
+      setMotion({
+        shotId: shot.id,
+        characterId,
+        characterName,
+        actionDescription: prompt,
+        videoPath: result.videoPath,
+        frameCount: result.frameCount,
+        segmentedFrames: result.segmentedFrames,
+        status: result.status,
+        error: result.error || undefined,
+      });
+      if (result.error) setError(result.error);
+      await flushRecord();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto p-4 space-y-4">
-      <p className="text-sm text-gray-300">{prompt}</p>
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-sm text-gray-300 whitespace-pre-wrap">{prompt}</p>
+        <CopyPrompt text={prompt} />
+      </div>
+      <PromptIssueList issues={checkActionPrompt(prompt)} />
       {cast.length === 0 && <p className="text-sm text-gray-500">这条分镜没有角色。</p>}
-      <div className="space-y-2">
+      <div className="space-y-3">
         {cast.map((character) => {
           const key = `${shot.id}_${character.id}`;
           const row = motions[key];
           return (
-            <div key={character.id} className="flex items-center gap-3 border border-gray-800 rounded px-3 py-2">
-              <button type="button" className="text-sm text-gray-100" onClick={() => { setActiveChar(character.id); setFrameIndex(0); }}>
-                {character.name}
-              </button>
-              <span className="text-xs text-gray-500">{row?.status ?? '未生成'}{row ? ` · ${row.frameCount} 帧` : ''}</span>
-              <button
-                type="button"
-                disabled={!!generating[key]}
-                onClick={() => generateMotion(shot.id, character.id, projectId || undefined)}
-                className="ml-auto px-3 py-1 text-xs rounded bg-blue-600 disabled:opacity-50"
-              >
-                {generating[key] ? '生成中…' : '生成动作视频'}
-              </button>
-              {row?.error && <span className="text-xs text-red-400">{row.error}</span>}
+            <div key={character.id} className="border border-gray-800 rounded p-3 space-y-2">
+              <div className="flex items-center gap-3">
+                <button type="button" className="text-sm text-gray-100" onClick={() => { setActiveChar(character.id); setFrameIndex(0); }}>
+                  {character.name}
+                </button>
+                <span className="text-xs text-gray-500">{row?.status ?? '未导入'}{row ? ` · ${row.frameCount} 帧` : ''}</span>
+              </div>
+              <DropSlot
+                label="拖入这个人物的动作视频，只做抽帧和分割"
+                accept="video/*"
+                busy={busyId === character.id}
+                onFile={(file) => { void onVideo(character.id, character.name, file); }}
+              />
+              {row?.error && <p className="text-xs text-red-400">{row.error}</p>}
             </div>
           );
         })}
       </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
       {frame?.path && (
         <div className="space-y-2">
-          <img src={mediaUrl(frame.path)} alt="动作帧" className="max-h-80 bg-black rounded" />
+          <img src={imageSrc(projectId, frame.path)} alt="动作帧" className="max-h-80 bg-black rounded" />
           <input
             type="range"
             min={0}

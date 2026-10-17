@@ -6,6 +6,8 @@ import { useAppStore } from '../store/useAppStore';
 import { LayerSelector } from './LayerSelector';
 import { analyzeImage, inpaintImage } from '../services/aicssService';
 import { saveConfirmedLayers } from '../services/scriptService';
+import { imageSrc } from '../services/projectFiles';
+import { flushRecord } from '../services/recordService';
 import {
   DEFAULT_DEPTH_SPLIT_THRESHOLDS,
   splitDepthLayers,
@@ -26,12 +28,6 @@ interface LayerPng {
   nearRank: number;
 }
 
-function wideUrl(raw?: string): string {
-  if (!raw) return '';
-  if (raw.startsWith('data:') || raw.startsWith('http') || raw.startsWith('blob:')) return raw;
-  return `data:image/png;base64,${raw}`;
-}
-
 function brightness(depth: number): number {
   if (depth <= 1.5) return depth * 255;
   return Math.max(0, Math.min(255, depth));
@@ -50,6 +46,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error('图片加载失败'));
+    if (src.startsWith('http://') || src.startsWith('https://')) img.crossOrigin = 'anonymous';
     img.src = src;
   });
 }
@@ -198,7 +195,7 @@ export function SplitControls() {
   const setAnalysisResult = useAppStore((s) => s.setAnalysisResult);
   const analysisResult = useAppStore((s) => s.analysisResult);
 
-  const sourceUrl = wideUrl(sceneAsset?.keyframeImages?.wide);
+  const sourceUrl = imageSrc(projectId, sceneAsset?.keyframeImages?.wide);
   const [thresholds, setThresholds] = useState<DepthSplitThresholds>(DEFAULT_DEPTH_SPLIT_THRESHOLDS);
   const [bandUrls, setBandUrls] = useState<Record<DepthLayerKey, string> | null>(null);
   const [assignments, setAssignments] = useState<Record<string, number>>({});
@@ -307,6 +304,7 @@ export function SplitControls() {
       })));
       setConfirmed(filled);
       patch(shot.id, { sceneDone: true });
+      await flushRecord();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

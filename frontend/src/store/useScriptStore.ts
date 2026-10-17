@@ -11,6 +11,8 @@ import type {
 } from '../types/script';
 import * as scriptService from '../services/scriptService';
 import { useAppStore } from './useAppStore';
+import { useShotWorkflowStore } from './useShotWorkflowStore';
+import type { ProjectRecord } from '../services/recordService';
 
 interface ScriptStore {
   // ─── Input state ───────────────────────────────────────────────────────────
@@ -110,6 +112,11 @@ interface ScriptStore {
   // ─── Shot mutation (no API call) — keeps shots as the source of truth ──
   updateShot: (shotId: string, updates: Partial<Shot>) => void;
 
+  missingFiles: string[];
+  setCharacterFront: (charId: string, relPath: string) => void;
+  setSceneWide: (sceneId: string, relPath: string) => void;
+  setMotion: (motion: MotionSequence) => void;
+  replaceFromRecord: (record: ProjectRecord) => void;
   reset: () => void;
   loadFromProject: (data: {
     scriptData?: ScriptData;
@@ -146,6 +153,7 @@ const initialState = {
   selectedSceneId: null as string | null,
   activeTab: 'script' as const,
   projectId: null as string | null,
+  missingFiles: [] as string[],
   autoResolvePromptsEnabled: true,
   isResolvingPrompts: false,
   error: null as string | null,
@@ -252,28 +260,12 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         extractedCharacters: finalChars,
         projectId: resolvedProjectId,
         isParsing: false,
+        missingFiles: [],
       });
+      useShotWorkflowStore.getState().replaceAll(resolvedProjectId, {});
+      void import('../services/recordService').then((mod) => mod.flushRecord());
 
-      // Auto-batch: kick off three-view generation for every detected
-      // character (fire-and-forget on the backend). Poll status to update
-      // characterAssets as they complete.
-      if (resolvedProjectId && finalChars.length) {
-        get().pollAutoThreeView(resolvedProjectId, finalChars.map(c => c.id));
-      }
-
-      // Auto-batch: scenes → keyframes (wide / closeup / mood).
-      if (resolvedProjectId && response.scriptData?.scenes?.length) {
-        get().pollAutoSceneAsset(
-          resolvedProjectId,
-          response.scriptData.scenes.map(s => s.id),
-        );
-      }
-
-      // Auto-resolve visual_prompts (LLM-only, no images). Default-on; runs
-      // in parallel with the heavier image auto-batches above. Writes the
-      // resolved prompt back into parsedScript.characters[i].visualPrompt so
-      // the CharactersTab textarea (and list-card preview) populates
-      // immediately, even before three-view finishes.
+      // 解析只保留视觉提示词，不出图。
       if (get().autoResolvePromptsEnabled) {
         void get().resolveCharacterVisualPrompts(finalChars.map(c => c.id));
         if (response.scriptData?.scenes?.length) {
@@ -551,6 +543,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         characterActionSequences: response.characterActionSequences,
         isGeneratingShots: false,
       });
+      void import('../services/recordService').then((mod) => mod.flushRecord());
     } catch (err) {
       set({
         isGeneratingShots: false,
@@ -891,7 +884,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
     if (isResolvingPrompts) return;
     if (!parsedScript?.characters.length) return;
     const targets = (charIds && charIds.length
-      ? parsedScript.characters.filter(c => charIds.includes(c.id) && !c.visualPrompt)
+      ? parsedScript.characters.filter(c => charIds.includes(c.id))
       : parsedScript.characters.filter(c => !c.visualPrompt)
     );
     if (!targets.length) return;
@@ -901,7 +894,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
       const filled = await Promise.all(targets.map(async c => {
         try {
           const prompt = await scriptService.generateVisualPrompt(
-            c.name, c.gender, c.age, c.personality, 'cinematic', language,
+            c.name, c.gender, c.age, c.personality, parsedScript.genre || '', language,
           );
           return { id: c.id, prompt };
         } catch (err) {
@@ -915,7 +908,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         if (!state.parsedScript) return state;
         const patch = (c: Character): Character => {
           const p = filledMap.get(c.id);
-          if (p && !c.visualPrompt) return { ...c, visualPrompt: p };
+          if (p) return { ...c, visualPrompt: p };
           return c;
         };
         return {
@@ -940,22 +933,30 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
   // empty (barring truly blank input) — the textarea + list-card will
   // always have something to show.
   resolveSceneVisualPrompts: async (sceneIds) => {
-    const { parsedScript } = get();
+    const { parsedScript, language } = get();
     if (!parsedScript?.scenes.length) return;
     const targets = (sceneIds && sceneIds.length
-      ? parsedScript.scenes.filter(s => sceneIds.includes(s.id) && !s.visualPrompt)
+      ? parsedScript.scenes.filter(s => sceneIds.includes(s.id))
       : parsedScript.scenes.filter(s => !s.visualPrompt)
     );
     if (!targets.length) return;
 
-    const filledMap = new Map<string, string>();
-    for (const s of targets) {
-      const atm = (s.atmosphere || '').trim();
-      const prompt = atm
-        ? `${s.location}, ${s.time.toLowerCase()}, ${atm}, cinematic, atmospheric composition`
-        : `${s.location}, ${s.time.toLowerCase()}, cinematic establishing shot, detailed lighting`;
-      filledMap.set(s.id, prompt);
-    }
+    const filled = await Promise.all(targets.map(async (scene) => {
+      try {
+        const prompt = await scriptService.generateSceneVisualPrompt(
+          scene.location,
+          scene.time,
+          scene.atmosphere || '',
+          parsedScript.genre || '',
+          language,
+        );
+        return { id: scene.id, prompt };
+      } catch (err) {
+        console.warn('[useScriptStore] resolveSceneVisualPrompts failed for', scene.location, err);
+        return { id: scene.id, prompt: '' };
+      }
+    }));
+    const filledMap = new Map(filled.map(item => [item.id, item.prompt]));
 
     set(state => {
       if (!state.parsedScript) return state;
@@ -964,7 +965,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
           ...state.parsedScript,
           scenes: state.parsedScript.scenes.map(s => {
             const p = filledMap.get(s.id);
-            if (p && !s.visualPrompt) return { ...s, visualPrompt: p };
+            if (p) return { ...s, visualPrompt: p };
             return s;
           }),
         },
@@ -1068,6 +1069,74 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
       ),
     }));
   },
+
+  setCharacterFront: (charId, relPath) => {
+    set(state => {
+      const current = state.characterAssets[charId];
+      const prompt = current?.visualPrompt
+        || state.parsedScript?.characters.find(item => item.id === charId)?.visualPrompt
+        || '';
+      return {
+        characterAssets: {
+          ...state.characterAssets,
+          [charId]: {
+            ...current,
+            characterId: charId,
+            visualPrompt: prompt,
+            variations: current?.variations || [],
+            referenceImage: relPath,
+            threeViewImages: { ...current?.threeViewImages, front: relPath },
+          },
+        },
+      };
+    });
+  },
+
+  setSceneWide: (sceneId, relPath) => {
+    set(state => {
+      const current = state.sceneAssets[sceneId];
+      const prompt = current?.visualPrompt
+        || state.parsedScript?.scenes.find(item => item.id === sceneId)?.visualPrompt
+        || '';
+      return {
+        sceneAssets: {
+          ...state.sceneAssets,
+          [sceneId]: {
+            ...current,
+            sceneId,
+            visualPrompt: prompt,
+            keyframeImages: { ...current?.keyframeImages, wide: relPath },
+          },
+        },
+      };
+    });
+  },
+
+  setMotion: (motion) => {
+    set(state => ({
+      motionSequences: {
+        ...state.motionSequences,
+        [`${motion.shotId}_${motion.characterId}`]: motion,
+      },
+    }));
+  },
+
+  replaceFromRecord: (record) => set({
+    rawScript: record.rawScript || '',
+    language: record.language || 'chinese',
+    normalizedScript: record.normalizedScript || '',
+    parsedScript: record.parsedScript || null,
+    extractedCharacters: record.parsedScript?.characters || [],
+    shots: record.shots || [],
+    selectedShotId: record.selectedShotId || record.shots?.[0]?.id || null,
+    characterAssets: record.characterAssets || {},
+    sceneAssets: record.sceneAssets || {},
+    motionSequences: record.motionSequences || {},
+    projectId: record.projectId,
+    missingFiles: record.missingFiles || [],
+    isParsing: false,
+    error: null,
+  }),
 
   reset: () => set({ ...initialState }),
 

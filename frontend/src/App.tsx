@@ -7,7 +7,8 @@ import { SplitControls } from './components/SplitControls';
 import { SequencePanel } from './components/sequence/SequencePanel';
 import { FinishPanel } from './components/FinishPanel';
 import { useScriptStore } from './store/useScriptStore';
-import { useShotWorkflowStore } from './store/useShotWorkflowStore';
+import { applyRecord, importRecord, restoreLastProject, startRecordSync } from './services/recordService';
+import type { ProjectRecord } from './services/recordService';
 
 type AppMode = 'script' | 'single' | 'sequence' | 'finish';
 
@@ -20,12 +21,24 @@ const MODES: { id: AppMode; label: string; icon: typeof Film }[] = [
 
 export default function App() {
   const [appMode, setAppMode] = useState<AppMode>('script');
-  const projectId = useScriptStore((s) => s.projectId);
-  const hydrate = useShotWorkflowStore((s) => s.hydrate);
+  const [importError, setImportError] = useState<string | null>(null);
+  const missingFiles = useScriptStore((s) => s.missingFiles);
 
   useEffect(() => {
-    hydrate(projectId);
-  }, [projectId, hydrate]);
+    startRecordSync();
+    void restoreLastProject().catch(() => undefined);
+  }, []);
+
+  const onRecordFile = async (file: File) => {
+    setImportError(null);
+    try {
+      const parsed = JSON.parse(await file.text()) as ProjectRecord;
+      const stored = await importRecord(parsed);
+      applyRecord(stored);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : '这份 projects.json 没有读进来');
+    }
+  };
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-gray-950 text-white">
@@ -53,9 +66,36 @@ export default function App() {
             );
           })}
         </div>
+        <label
+          className="ml-2 px-3 py-1.5 text-xs rounded border border-dashed border-gray-600 text-gray-300 cursor-pointer"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            const file = event.dataTransfer.files?.[0];
+            if (file) void onRecordFile(file);
+          }}
+        >
+          拖入 projects.json
+          <input
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void onRecordFile(file);
+              event.target.value = '';
+            }}
+          />
+        </label>
         <div className="flex-1" />
         <SettingsPanel />
       </header>
+      {importError && <div className="px-4 py-2 text-xs text-red-300 bg-red-950">{importError}</div>}
+      {missingFiles.length > 0 && (
+        <div className="px-4 py-2 text-xs text-amber-200 bg-amber-950">
+          这些路径在剧本目录里对不上：{missingFiles.join('、')}
+        </div>
+      )}
       <div className="flex flex-1 min-h-0">
         <ShotSidebar />
         <main className="flex-1 min-w-0 min-h-0">

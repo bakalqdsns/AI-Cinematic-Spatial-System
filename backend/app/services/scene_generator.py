@@ -29,36 +29,15 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from .script_parser import Scene, ScriptLanguage
+from .prompt_contract import SCENE_SYSTEM, fallback_scene_prompt
 
 
 SCENE_VIEWS = ("wide", "closeup", "mood")
 
 
-GENERATE_SCENE_VISUAL_PROMPT_CHINESE = """你是一个专业的视觉提示词生成师。请为以下场景生成英文视觉描述提示词。
-
-要求：
-1. 输出纯英文描述，逗号分隔，最多 60 词
-2. 描述场景的空间布局，光线、材质、配色、时代感
-3. 使用电影/动画/概念美术的视觉语言
-4. 不要解释，只输出提示词
-
-示例：
-a vast paper-craft world, hand-cut cardboard clouds, blue craft-paper sky, warm diffuse lighting, soft shadows, anime background art, high detail, cinematic composition, empty no people"""
-
-GENERATE_SCENE_VISUAL_PROMPT_ENGLISH = """You are a professional visual prompt engineer. Generate English visual description prompts for the following scene.
-
-Requirements:
-1. Pure English, comma-separated, max 60 words
-2. Describe the space: layout, lighting, materials, palette, era
-3. Use cinematic / anime / concept-art visual language
-4. Output only the prompt, no explanation"""
-
-GENERATE_SCENE_VISUAL_PROMPT_JAPANESE = """あなたはプロフェッショナルなビジュアルプロンプトエンジニアです。以下のシーンの英語のビジュアル説明プロンプトを生成してください。
-
-要件：
-1. 純粋な英語、カンマ区切り、最大60語
-2. 空間のレイアウト，光、素材、パレット、時代感を描述
-3. 映画/アニメ/コンセプトアートのビジュアル言語を使用"""
+GENERATE_SCENE_VISUAL_PROMPT_CHINESE = SCENE_SYSTEM
+GENERATE_SCENE_VISUAL_PROMPT_ENGLISH = SCENE_SYSTEM
+GENERATE_SCENE_VISUAL_PROMPT_JAPANESE = SCENE_SYSTEM
 
 
 @dataclass
@@ -82,16 +61,16 @@ class SceneVariation:
 
 def _get_image_mode() -> str:
     try:
-        from app.config import settings
-        return settings.image_mode
+        from app.services.settings_manager import get as get_setting
+        return get_setting("image_mode", "local")
     except Exception:
         return "local"
 
 
 def _get_model_mode() -> str:
     try:
-        from app.config import settings
-        return settings.model_mode
+        from app.services.settings_manager import get as get_setting
+        return get_setting("model_mode", "local")
     except Exception:
         return "local"
 
@@ -139,7 +118,7 @@ async def generate_scene_visual_prompt(
                  {"role": "user", "content": user_text}],
                 component="llm",
                 temperature=0.3,
-                max_tokens=256,
+                max_tokens=900,
             )
             if content:
                 return content.strip()
@@ -153,19 +132,14 @@ async def generate_scene_visual_prompt(
                 [{"role": "system", "content": system_prompt},
                  {"role": "user", "content": user_text}],
                 temperature=0.3,
-                max_tokens=256,
+                max_tokens=900,
             )
             if content:
                 return content.strip()
         except Exception as e:
             logger.warning("[scene_generator] Local LLM visual prompt failed: %s", e)
 
-    # Fallback: deterministic prompt derived from scene metadata.
-    return (
-        f"{scene.location}, {time_text}, {scene.atmosphere}, "
-        f"{genre} style, empty scene, no people, cinematic wide shot, "
-        f"high detail, concept art background"
-    )
+    return fallback_scene_prompt(scene.location, scene.time, scene.atmosphere)
 
 
 # ── Image: 3-shot keyframe set ──────────────────────────────────────────────────

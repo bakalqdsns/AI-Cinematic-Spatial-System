@@ -53,12 +53,10 @@ from app.services.character_generator import (
     serialize_character_asset,
 )
 from app.services.auto_three_view import (
-    kickoff_after_parse,
     get_progress as get_auto_three_view_progress,
     clear_progress as clear_auto_three_view_progress,
 )
 from app.services.auto_scene_view import (
-    kickoff_after_parse as kickoff_scene_after_parse,
     get_progress as get_auto_scene_progress,
     clear_progress as clear_auto_scene_progress,
 )
@@ -348,29 +346,6 @@ async def api_normalize_and_parse(request: ParseScriptRequest):
         except Exception as e:
             logger.warning(f"[script] Failed to persist script data: {e}")
 
-        # ── Auto-batch: kick off three-view generation for every detected
-        # character (fire-and-forget; progress polled via /characters/batch-status).
-        try:
-            await kickoff_after_parse(
-                project_id=project_id,
-                characters=script_data.characters,
-                genre=script_data.genre or "cinematic",
-                language=lang,
-            )
-        except Exception as e:
-            logger.warning(f"[script] Failed to kick off auto three-view: {e}")
-
-        # ── Auto-batch: kick off scene keyframe generation (wide/closeup/mood)
-        try:
-            await kickoff_scene_after_parse(
-                project_id=project_id,
-                scenes=script_data.scenes,
-                genre=script_data.genre or "cinematic",
-                language=lang,
-            )
-        except Exception as e:
-            logger.warning(f"[script] Failed to kick off auto scene assets: {e}")
-
     return ParseScriptResponse(
         normalized_script=normalized,
         script_data=serialized,
@@ -574,6 +549,30 @@ async def api_get_action_sequences(request: ActionSequencesRequest):
     ]
 
     return ActionSequencesResponse(sequences=serialized)
+
+
+@router.post("/scene-visual-prompt")
+async def api_generate_scene_visual_prompt(
+    location: str = Query(..., description="Scene location"),
+    time: str = Query("Day", description="Day / Night / Dawn / Dusk / Morning / Evening"),
+    atmosphere: str = Query("", description="Observable atmosphere"),
+    genre: str = Query("", description="Genre fact, not a default style"),
+    language: str = Query("chinese", description="chinese / english / japanese"),
+):
+    """生成空场景 wide 提示词，不出图。"""
+    from app.services.script_parser import Scene
+    scene = Scene(
+        id="temp",
+        location=location,
+        time=time if time in {"Day", "Night", "Dawn", "Dusk", "Morning", "Evening"} else "Day",
+        atmosphere=atmosphere,
+    )
+    prompt = await generate_scene_visual_prompt(
+        scene,
+        genre=genre or "",
+        language=_lang_from_str(language),
+    )
+    return {"visual_prompt": prompt}
 
 
 @router.post("/visual-prompt")

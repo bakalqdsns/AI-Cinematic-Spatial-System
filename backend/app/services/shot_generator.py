@@ -28,6 +28,12 @@ from .script_parser import (
     Scene,
     StoryParagraph,
 )
+from .prompt_contract import (
+    ACTION_SYSTEM,
+    check_action_prompt,
+    fallback_action_prompt,
+    fallback_scene_prompt,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,9 +234,9 @@ _SHOT_GENERATION_SYSTEM_CHINESE = """你是一个专业的分镜师。请根据�
 2. 全剧共生成的总分镜数应**不少于故事段落数**；可在重要段落上拆出 2-3 个分镜（同一动作的不同景别/运镜）以保证密度，但绝不裁减段落
 3. **shot_number 必须全局连续递增**（1, 2, 3, ...），跨场景也要连续，绝对不能同一 shot_number 重复或乱序
 4. 分镜必须包含：镜头号（全局顺序编号）、景别（使用指定枚举）、运镜（使用指定枚举）、动作描述、人物列表、预估时长
-5. 为每个分镜生成英文视觉提示词（scene_prompt描述场景，action_prompt描述人物动作）
+5. scene_prompt 必须原样使用该场景已经写好的 wide 提示词，不要另写一套场景。action_prompt 按下方表演视频合同写英文正文。
 6. 确保分镜之间的动作和情节连贯
-7. 运镜要符合情节需要（如紧张场景可用手持或快速推拉）
+7. 每个分镜只使用一种运镜，并在 action_prompt 里写清这种运镜的起点和终点
 
 景别枚举值：Extreme Close-up, Close-up, Medium Close-up, Medium Shot, Medium Wide, Wide Shot, Extreme Wide, Over-the-Shoulder, POV, Two-Shot
 
@@ -247,9 +253,9 @@ _SHOT_GENERATION_SYSTEM_CHINESE = """你是一个专业的分镜师。请根据�
     "camera_movement": "Static",
     "shot_size": "Wide Shot",
     "characters": ["char-1"],
-    "scene_prompt": "A wide shot of a coffee shop interior, warm sunlight streaming through windows, soft bokeh background",
-    "action_prompt": "A woman sits alone at a table, nervously stirring her coffee, glancing toward the door",
-    "camera_prompt": "Slow dolly in to build tension",
+    "scene_prompt": "（原样复制该场景的 wide 提示词）",
+    "action_prompt": "Exactly one person in frame: the named character, identity unchanged. Duration 4s. Open: starting pose. 0.0-2.0s prepare and begin the action. 2.0-4.0s settle. Close: ending pose. Camera start: Wide Shot. Camera path: Static only. Camera end: same subject in frame.",
+    "camera_prompt": "Static only, start and end on the same framing",
     "duration_seconds": 4.0,
     "keyframe_start_prompt": "Woman sits, cup in hand, looking toward door, soft warm lighting",
     "keyframe_end_prompt": "Close-up on worried expression as phone buzzes on the table"
@@ -265,9 +271,9 @@ Requirements:
 2. Total shot count should be **at least the number of story paragraphs**; important paragraphs may split into 2-3 shots (different shot sizes / camera movements) for density.
 3. **shot_number must be globally sequential (1, 2, 3, …)** across scenes. No duplicates, no gaps, no resets per scene.
 4. Each shot must include: shot number (global sequential), shot size (use enum), camera movement (use enum), action description, character list, estimated duration
-5. Generate English visual prompts for each shot (scene_prompt for scene, action_prompt for character action)
+5. scene_prompt must copy that scene's existing wide prompt verbatim. action_prompt is an English performance-video prompt, not a one-line action caption.
 6. Ensure continuity of action and plot between shots
-7. Camera movements should match the plot needs
+7. Each shot uses only one camera movement, with a start and an end written in action_prompt
 
 Shot size enum values: Extreme Close-up, Close-up, Medium Close-up, Medium Shot, Medium Wide, Wide Shot, Extreme Wide, Over-the-Shoulder, POV, Two-Shot
 
@@ -282,9 +288,9 @@ _SHOT_GENERATION_SYSTEM_JAPANESE = """あなたはプロフェッショナルな
 2. 総ショット数は **段落数以上** とすること。重要な段落は2-3ショットに分割してもよい。
 3. **shot_number はシーンを跨いでグローバルに連番 (1, 2, 3, …)** とすること。重複・欠番・シーン単位リセット禁止。
 4. 各ショットには shot_number, camera_movement, shot_size, action_summary, characters, duration を含む
-5. 各ショットに英語の visual prompts を生成
+5. scene_prompt はそのシーンの wide 提示词をそのまま使う。action_prompt は人物演技動画用の英文とする
 6. ショット間の継続性を確保
-7. カメラムーブはプロットに合わせること
+7. 各ショットの運鏡は一種だけとし、起点と終点を action_prompt に書く
 
 出力:JSON配列のみ"""
 
@@ -296,11 +302,13 @@ _SHOT_GENERATION_SYSTEM_JAPANESE = """あなたはプロフェッショナルな
 def _build_shot_prompt(script_data: ScriptData, language: ScriptLanguage, shots_per_scene: int) -> str:
     """Build the user-facing prompt for shot generation from ScriptData."""
     scenes_text = "\n".join(
-        f"  - {s.id}: {s.location} - {s.time} ({s.atmosphere})"
+        f"  - {s.id}: {s.location} - {s.time} ({s.atmosphere})\n"
+        f"    wide提示词: {s.visual_prompt or '（尚未写）'}"
         for s in script_data.scenes
     )
     chars_text = "\n".join(
-        f"  - {c.id}: {c.name} (gender:{c.gender}, age:{c.age}, personality:{c.personality})"
+        f"  - {c.id}: {c.name} (gender:{c.gender}, age:{c.age}, personality:{c.personality})\n"
+        f"    角色提示词: {c.visual_prompt or '（尚未写，按姓名、性别、年龄写身份，不要另造外貌）'}"
         for c in script_data.characters
     )
     # Numbered paragraph index for unambiguous LLM-side references
@@ -359,7 +367,7 @@ async def generate_shots(
         ScriptLanguage.ENGLISH: _SHOT_GENERATION_SYSTEM_ENGLISH,
         ScriptLanguage.JAPANESE: _SHOT_GENERATION_SYSTEM_JAPANESE,
     }
-    system_prompt = prompts[lang]
+    system_prompt = prompts[lang] + "\n\n" + ACTION_SYSTEM
     user_prompt = _build_shot_prompt(script_data, lang, shots_per_scene)
 
     messages = [
@@ -378,6 +386,7 @@ async def generate_shots(
                 shots = _build_shots_from_json(data)
                 _validate_shot_characters(shots, script_data)
                 _renumber_shots(shots)
+                _lock_prompts(shots, script_data)
                 logger.info(
                     "[shot_generator] generated %d shots for %d scenes (%d paragraphs)",
                     len(shots),
@@ -393,6 +402,7 @@ async def generate_shots(
 
     shots = _fallback_shots(script_data)
     _renumber_shots(shots)
+    _lock_prompts(shots, script_data)
     return shots
 
 
@@ -542,6 +552,38 @@ def _parse_shot_size(value: str) -> ShotSize:
 # ─────────────────────────────────────────────────────────────────────────────
 # Fallback — heuristic generation when LLM is unavailable
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _lock_prompts(shots: list[Shot], script_data: ScriptData) -> None:
+    """场景句用已有 wide 提示词。动作句缺起止或人数时，按表演合同补全。"""
+    scenes = {scene.id: scene for scene in script_data.scenes}
+    chars = {char.id: char for char in script_data.characters}
+    for shot in shots:
+        scene = scenes.get(shot.scene_id)
+        if scene is not None and (scene.visual_prompt or "").strip():
+            shot.visual_prompts.scene_prompt = scene.visual_prompt.strip()
+        elif scene is not None:
+            shot.visual_prompts.scene_prompt = fallback_scene_prompt(
+                scene.location, scene.time, scene.atmosphere,
+            )
+        names: list[str] = []
+        identities: list[str] = []
+        for char_id in shot.characters:
+            char = chars.get(char_id)
+            if char is None:
+                continue
+            names.append(char.name or char_id)
+            if char.visual_prompt:
+                identities.append(char.visual_prompt)
+        if check_action_prompt(shot.visual_prompts.action_prompt):
+            shot.visual_prompts.action_prompt = fallback_action_prompt(
+                names,
+                identities,
+                shot.action_summary or shot.visual_prompts.action_prompt,
+                shot.duration_seconds,
+                getattr(shot.camera_movement, "value", str(shot.camera_movement)),
+                getattr(shot.shot_size, "value", str(shot.shot_size)),
+            )
+
 
 def _fallback_shots(script_data: ScriptData) -> list[Shot]:
     """

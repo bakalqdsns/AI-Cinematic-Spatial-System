@@ -395,6 +395,20 @@ export async function generateVisualPrompt(
   return data.visual_prompt;
 }
 
+export async function generateSceneVisualPrompt(
+  location: string,
+  time: string = 'Day',
+  atmosphere: string = '',
+  genre: string = '',
+  language: string = 'chinese',
+): Promise<string> {
+  const api = axios.create({ baseURL: `${DEFAULT_BACKEND}/api/aicss/v2/scripts`, timeout: 120000 });
+  const { data } = await api.post<{ visual_prompt: string }>('/scene-visual-prompt', null, {
+    params: { location, time, atmosphere, genre, language },
+  });
+  return data.visual_prompt;
+}
+
 // ─── Auto Three-View Batch Status ─────────────────────────────────────────────
 
 export interface BatchCharacterStatus {

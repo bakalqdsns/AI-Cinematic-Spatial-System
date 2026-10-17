@@ -16,6 +16,10 @@ import type {
   ScriptData, SceneAsset, Scene,
 } from '../types/script';
 import { TimelinePanel } from './timeline/TimelineEditor';
+import { CopyPrompt, DropSlot } from './ManualFill';
+import { imageSrc } from '../services/projectFiles';
+import { checkCharacterPrompt, checkScenePrompt, PromptIssueList } from '../services/promptCheck';
+import { uploadProjectFile, flushRecord } from '../services/recordService';
 
 const LANGUAGES: { value: ScriptLanguage; label: string }[] = [
   { value: 'chinese', label: '中文' },
@@ -844,6 +848,32 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
   isGenerating, selectedCharId, onSelectChar, onUpdatePrompt,
   onResolvePrompt, isResolvingPrompts,
 }) => {
+  const projectId = useScriptStore(s => s.projectId);
+  const setCharacterFront = useScriptStore(s => s.setCharacterFront);
+  const [dropping, setDropping] = useState<string | null>(null);
+  const [dropError, setDropError] = useState<string | null>(null);
+  void onGenerateThreeView;
+  void onGenerateVariation;
+  void isGenerating;
+
+  const dropFront = async (charId: string, file: File) => {
+    if (!projectId) {
+      setDropError('先解析剧本，图片才会写入这个剧本的目录');
+      return;
+    }
+    setDropping(charId);
+    setDropError(null);
+    try {
+      const ext = (file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '') || 'png';
+      const rel = await uploadProjectFile(projectId, `characters/${charId}/front.${ext}`, file);
+      setCharacterFront(charId, rel);
+      await flushRecord();
+    } catch (err) {
+      setDropError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDropping(null);
+    }
+  };
   const [editingPrompt, setEditingPrompt] = useState<Record<string, string>>({});
   const char = characters.find(c => c.id === selectedCharId);
   const asset = selectedCharId ? characterAssets[selectedCharId] : undefined;
@@ -934,14 +964,16 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
               <p className="text-sm text-gray-400">{char.personality}</p>
             </div>
 
-            {/* Generate three-view button */}
-            <button
-              onClick={() => onGenerateThreeView(char.id)}
-              disabled={isGenerating[char.id]}
-              className="mb-4 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-colors disabled:opacity-50"
-            >
-              {isGenerating[char.id] ? '生成中...' : '生成三视图'}
-            </button>
+            <div className="mb-4 space-y-2">
+              <h3 className="text-sm font-semibold text-gray-200">人物参考图</h3>
+              <DropSlot
+                label="拖入正面参考图"
+                accept="image/*"
+                busy={dropping === char.id}
+                onFile={(file) => { void dropFront(char.id, file); }}
+              />
+              {dropError && <p className="text-xs text-red-400">{dropError}</p>}
+            </div>
 
             {/* Three view images */}
             {asset?.threeViewImages && (
@@ -955,7 +987,7 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
                         <div className="text-xs text-gray-400 mb-1 capitalize">{view}</div>
                         {img ? (
                           <img
-                            src={`data:image/png;base64,${img}`}
+                            src={imageSrc(projectId, img)}
                             alt={view}
                             className="w-full aspect-square object-cover rounded border border-gray-700"
                           />
@@ -975,11 +1007,14 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
             <div className="mb-4">
               <div className="flex items-center justify-between mb-1">
                 <h3 className="text-sm font-semibold text-gray-200">视觉提示词</h3>
-                <PromptSourceBadge source={promptSource} />
+                <div className="flex items-center gap-2">
+                  <PromptSourceBadge source={promptSource} />
+                  <CopyPrompt text={promptValue} />
+                </div>
               </div>
               <textarea
                 className="w-full p-2 bg-gray-950 border border-gray-700 text-gray-100 placeholder:text-gray-500 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
-                rows={4}
+                rows={8}
                 value={promptValue}
                 placeholder="点击下方「生成初始提示词」开始，或等待解析后自动生成…"
                 onChange={e => {
@@ -988,6 +1023,7 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
                   onUpdatePrompt(selectedCharId, e.target.value);
                 }}
               />
+              <PromptIssueList issues={checkCharacterPrompt(promptValue)} />
               <div className="flex flex-wrap gap-2 mt-2">
                 {/* Input side: from script analysis → prompt box */}
                 <button
@@ -999,24 +1035,6 @@ const CharactersTab: React.FC<CharactersTabProps> = ({
                   {char.visualPrompt || asset?.visualPrompt
                     ? '重新生成提示词'
                     : '生成初始提示词'}
-                </button>
-                {/* Output side 1: prompt box → image generation (three-view) */}
-                <button
-                  onClick={() => onGenerateThreeView(char.id)}
-                  disabled={isGenerating[char.id] || !promptValue}
-                  className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
-                  title="使用当前提示词生成三视图"
-                >
-                  用此提示词生成三视图
-                </button>
-                {/* Output side 2: prompt box → variation */}
-                <button
-                  onClick={() => onGenerateVariation(char.id, promptValue)}
-                  disabled={isGenerating[char.id] || !promptValue}
-                  className="px-3 py-1 bg-purple-700 hover:bg-purple-600 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
-                  title="把当前提示词作为种子生成服装变体"
-                >
-                  以此为种子生成变体
                 </button>
               </div>
             </div>
@@ -1117,13 +1135,7 @@ const MotionTab: React.FC<MotionTabProps> = ({ shots, parsedScript }) => {
                   </details>
                 </div>
 
-                <button
-                  onClick={() => generateMotion(shot.id, char.id)}
-                  disabled={isGeneratingMotion[key]}
-                  className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
-                >
-                  {isGeneratingMotion[key] ? '生成中...' : '生成动作视频'}
-                </button>
+                <p className="text-xs text-gray-500">动作视频在 Sequence 里拖入。</p>
 
                 {motion && motion.frameCount > 0 && (
                   <div className="mt-2 text-xs text-gray-400">
@@ -1177,7 +1189,32 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
   onLayerScene,
   onUpdatePrompt, onResolvePrompt,
 }) => {
+  const projectId = useScriptStore(s => s.projectId);
+  const setSceneWide = useScriptStore(s => s.setSceneWide);
+  const [dropping, setDropping] = useState(false);
+  const [dropError, setDropError] = useState<string | null>(null);
+  void onGenerateSceneAsset;
+  void isGeneratingSceneAsset;
   const scenes = parsedScript?.scenes ?? [];
+
+  const dropWide = async (sceneId: string, file: File) => {
+    if (!projectId) {
+      setDropError('先解析剧本，图片才会写入这个剧本的目录');
+      return;
+    }
+    setDropping(true);
+    setDropError(null);
+    try {
+      const ext = (file.name.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '') || 'png';
+      const rel = await uploadProjectFile(projectId, `scenes/${sceneId}/wide.${ext}`, file);
+      setSceneWide(sceneId, rel);
+      await flushRecord();
+    } catch (err) {
+      setDropError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDropping(false);
+    }
+  };
 
   if (scenes.length === 0) {
     return (
@@ -1241,7 +1278,6 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
         const scene = scenes.find(s => s.id === selectedSceneId);
         if (!scene) return null;
         const asset = sceneAssets[scene.id];
-        const generating = !!isGeneratingSceneAsset[scene.id];
         const layering = !!isLayeringScene[scene.id];
         const layerError = layerErrors[scene.id] || '';
         const keyframes = ['wide', 'closeup', 'mood'] as const;
@@ -1265,17 +1301,21 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
             <div className="mb-4">
               <div className="flex items-center justify-between mb-1">
                 <h3 className="text-sm font-semibold text-gray-200">视觉提示词</h3>
-                <PromptSourceBadge
-                  source={scene.visualPrompt || asset?.visualPrompt ? 'auto' : 'none'}
-                />
+                <div className="flex items-center gap-2">
+                  <PromptSourceBadge
+                    source={scene.visualPrompt || asset?.visualPrompt ? 'auto' : 'none'}
+                  />
+                  <CopyPrompt text={promptValue} />
+                </div>
               </div>
               <textarea
                 className="w-full p-2 bg-gray-950 border border-gray-700 text-gray-100 placeholder:text-gray-500 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-cyan-400"
-                rows={4}
+                rows={8}
                 value={promptValue}
                 placeholder="点击下方「生成初始提示词」开始，或等待解析后自动生成…"
                 onChange={e => onUpdatePrompt(scene.id, e.target.value)}
               />
+              <PromptIssueList issues={checkScenePrompt(promptValue)} />
               <div className="flex flex-wrap gap-2 mt-2">
                 {/* Input side: derive scene prompt from location/time/atmosphere */}
                 <button
@@ -1287,24 +1327,25 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
                     ? '重新生成提示词'
                     : '生成初始提示词'}
                 </button>
-                {/* Output side: prompt box → keyframe image generation */}
-                <button
-                  onClick={() =>
-                    onGenerateSceneAsset(
-                      scene.id,
-                      scene.location,
-                      scene.time,
-                      scene.atmosphere || '',
-                      promptValue,
-                    )
-                  }
-                  disabled={generating || !promptValue}
-                  className="px-3 py-1 bg-cyan-600 hover:bg-cyan-500 text-white text-xs rounded-lg transition-colors disabled:opacity-50"
-                  title="使用当前提示词生成关键帧"
-                >
-                  用此提示词生成关键帧
-                </button>
               </div>
+            </div>
+
+            <div className="mb-4 space-y-2">
+              <h3 className="text-sm font-semibold text-gray-200">场景 wide 图</h3>
+              <DropSlot
+                label="拖入 wide 图，供 Single 分层使用"
+                accept="image/*"
+                busy={dropping}
+                onFile={(file) => { void dropWide(scene.id, file); }}
+              />
+              {dropError && <p className="text-xs text-red-400">{dropError}</p>}
+              {asset?.keyframeImages?.wide && (
+                <img
+                  src={imageSrc(projectId, asset.keyframeImages.wide)}
+                  alt="wide"
+                  className="w-full max-h-48 object-contain rounded border border-gray-700 bg-black"
+                />
+              )}
             </div>
 
             {/* Keyframe grid */}
@@ -1319,7 +1360,7 @@ const ScenesTab: React.FC<ScenesTabProps> = ({
                         <div className="text-xs text-gray-400 mb-1 capitalize">{k}</div>
                         {b64 ? (
                           <img
-                            src={`data:image/png;base64,${b64}`}
+                            src={imageSrc(projectId, b64)}
                             alt={k}
                             className="w-full aspect-video object-cover rounded border border-gray-700"
                           />

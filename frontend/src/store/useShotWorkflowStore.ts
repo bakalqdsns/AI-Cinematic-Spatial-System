@@ -6,6 +6,7 @@ export interface ShotProgress {
   renderDone: boolean;
   renderPath?: string;
   refinePath?: string;
+  refinePrompt?: string;
 }
 
 interface ShotWorkflowState {
@@ -13,6 +14,7 @@ interface ShotWorkflowState {
   progress: Record<string, ShotProgress>;
   hydrate: (projectId: string | null) => void;
   patch: (shotId: string, partial: Partial<ShotProgress>) => void;
+  replaceAll: (projectId: string, progress: Record<string, ShotProgress>) => void;
 }
 
 const EMPTY: ShotProgress = {
@@ -51,5 +53,10 @@ export const useShotWorkflowStore = create<ShotWorkflowState>((set, get) => ({
     if (projectId) {
       localStorage.setItem(storageKey(projectId), JSON.stringify(progressNext));
     }
+  },
+
+  replaceAll: (projectId, progress) => {
+    set({ projectId, progress });
+    localStorage.setItem(storageKey(projectId), JSON.stringify(progress));
   },
 }));

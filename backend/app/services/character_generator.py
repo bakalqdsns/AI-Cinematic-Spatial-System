@@ -18,34 +18,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from .script_parser import Character, ScriptLanguage
+from .prompt_contract import CHARACTER_SYSTEM, fallback_character_prompt
 
 THREE_VIEWS = ["front", "side", "back"]
 
-GENERATE_VISUAL_PROMPT_CHINESE = """你是一个专业的视觉提示词生成师。请为以下角色生成英文视觉描述提示词。
-
-要求：
-1. 输出纯英文描述，逗号分隔，最多50词
-2. 描述角色的外貌特征、服装、姿态、表情
-3. 使用电影/动画风格的视觉语言
-4. 不要解释，只输出提示词
-
-示例：
-beautiful young woman, long flowing hair, red dress, standing pose, confident expression, cinematic lighting, anime art style"""
-
-GENERATE_VISUAL_PROMPT_ENGLISH = """You are a professional visual prompt engineer. Generate English visual description prompts for the following character.
-
-Requirements:
-1. Pure English, comma-separated, max 50 words
-2. Describe appearance, clothing, pose, expression
-3. Use cinematic/animation visual language
-4. Output only the prompt, no explanation"""
-
-GENERATE_VISUAL_PROMPT_JAPANESE = """あなたはプロフェッショナルなビジュアルプロンプトエンジニアです。以下のキャラクターの英語のビジュアル説明プロンプトを生成してください。
-
-要件：
-1. 純粋な英語、カンマ区切り、最大50語
-2. 外見、服装、ポーズ、表情を描述
-3. 映画/アニメスタイルのビジュアル言語を使用"""
+GENERATE_VISUAL_PROMPT_CHINESE = CHARACTER_SYSTEM
+GENERATE_VISUAL_PROMPT_ENGLISH = CHARACTER_SYSTEM
+GENERATE_VISUAL_PROMPT_JAPANESE = CHARACTER_SYSTEM
 
 
 @dataclass
@@ -69,16 +48,16 @@ class CharacterVariation:
 
 def _get_image_mode() -> str:
     try:
-        from app.config import settings
-        return settings.image_mode
+        from app.services.settings_manager import get as get_setting
+        return get_setting("image_mode", "local")
     except Exception:
         return "local"
 
 
 def _get_model_mode() -> str:
     try:
-        from app.config import settings
-        return settings.model_mode
+        from app.services.settings_manager import get as get_setting
+        return get_setting("model_mode", "local")
     except Exception:
         return "local"
 
@@ -119,7 +98,7 @@ async def generate_visual_prompt(
                  {"role": "user", "content": user_text}],
                 component="llm",
                 temperature=0.3,
-                max_tokens=256,
+                max_tokens=900,
             )
             if content:
                 return content.strip()
@@ -133,15 +112,16 @@ async def generate_visual_prompt(
                 [{"role": "system", "content": system_prompt},
                  {"role": "user", "content": user_text}],
                 temperature=0.3,
-                max_tokens=256,
+                max_tokens=900,
             )
             if content:
                 return content.strip()
         except Exception as e:
             logger.warning("[character_generator] Local LLM visual prompt failed: %s", e)
 
-    # Fallback
-    return f"{character.name}, {character.gender}, {character.age} years old, {character.personality} personality, cinematic style"
+    return fallback_character_prompt(
+        character.name, character.gender, character.age, character.personality,
+    )
 
 
 # ── Image: reference generation ────────────────────────────────────────────────

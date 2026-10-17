@@ -78,6 +78,7 @@ from app.endpoints_llm import router as llm_router
 from app.endpoints_settings import router as settings_router, provider_router
 from app.endpoints_models import router as models_router
 from app.endpoints_layers import router as layers_router
+from app.endpoints_record import router as record_router
 from app.services.llama_server_manager import ensure_server_running
 
 
@@ -117,19 +118,21 @@ async def lifespan(app: FastAPI):
     configure_llm(base_url=settings.llm_base_url, model=settings.llm_model, timeout=settings.llm_timeout)
     # Route LLM calls through DashScope or ToAPIs when in cloud mode
     from app.services.local_llm import set_use_cloud, set_cloud_provider
-    set_use_cloud(settings.model_mode == "cloud")
+    from app.services.settings_manager import get as get_setting
+    model_mode = get_setting("model_mode", settings.model_mode)
+    set_use_cloud(model_mode == "cloud")
     set_cloud_provider(settings.cloud_llm_provider)
     _log.info(
         "[AICSS] model_mode=%s | LLM provider=%s | VLM provider=%s | "
         "Image provider=%s | Video provider=%s",
-        settings.model_mode,
+        model_mode,
         settings.cloud_llm_provider,
         settings.cloud_vlm_provider,
         settings.cloud_image_provider,
         settings.cloud_video_provider,
     )
     configure_image_generator(model_id=settings.image_model_id, dtype_name=settings.image_dtype)
-    print(f"[AICSS] Model mode: {settings.model_mode}")
+    print(f"[AICSS] Model mode: {model_mode}")
     print(f"[AICSS] LLM client: {settings.llm_base_url} ({settings.llm_model})")
     print(f"[AICSS] Image generator: {settings.image_model_id} (dtype={settings.image_dtype})")
     print(f"[AICSS] Video provider: {settings.video_provider}")
@@ -154,7 +157,7 @@ async def lifespan(app: FastAPI):
         print(f"[AICSS] GPU baseline check failed: {_e}")
 
     # ── llama-server / auto-unload manager (local mode only) ─────────────────
-    if settings.model_mode == "local":
+    if model_mode == "local":
         print("[AICSS] Model mode: local — checking llama-server...")
         try:
             llm_started = await ensure_server_running()
@@ -192,7 +195,7 @@ async def lifespan(app: FastAPI):
     yield
     print("[AICSS] Shutting down — unloading all models...")
     model_manager.unload_all()
-    if settings.model_mode == "local":
+    if model_mode == "local":
         from app.services.llama_server_manager import stop_auto_unload_manager, stop_server
         stop_auto_unload_manager()
         await stop_server()
@@ -232,6 +235,7 @@ app.include_router(settings_router, tags=["Settings"])
 app.include_router(provider_router, tags=["Cloud Providers"])
 app.include_router(models_router, tags=["Models"])
 app.include_router(layers_router, prefix="/api/aicss", tags=["Layers"])
+app.include_router(record_router, tags=["v2 - Record"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,6 +245,7 @@ app.include_router(layers_router, prefix="/api/aicss", tags=["Layers"])
 @app.get("/health")
 async def health():
     from app.services.local_llm import get_llm_client
+    from app.services.settings_manager import get as get_setting
     llm_ok = False
     try:
         llm_ok = await get_llm_client().is_alive()
@@ -249,7 +254,7 @@ async def health():
     return {
         "status": "ok",
         "device": DEVICE,
-        "model_mode": settings.model_mode,
+        "model_mode": get_setting("model_mode", settings.model_mode),
         "models_loaded": model_manager.is_loaded(),  # 兼容前端期望的字段名
         "lazy_load": settings.lazy_load,
         "all_loaded": model_manager.is_loaded(),
@@ -279,12 +284,13 @@ async def health_models():
       - `lazy_load`  : whether models are loaded on first use
     """
     try:
+        from app.services.settings_manager import get as get_setting
         status = model_manager.check_models_status()
         missing = model_manager.get_missing_models_info()
         return {
             "all_ready": len(missing) == 0,
             "device": DEVICE,
-            "model_mode": settings.model_mode,
+            "model_mode": get_setting("model_mode", settings.model_mode),
             "lazy_load": settings.lazy_load,
             "models": status,
             "missing": missing,
