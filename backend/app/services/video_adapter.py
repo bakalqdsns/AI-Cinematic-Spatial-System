@@ -538,6 +538,66 @@ class SVDProvider(VideoProvider):
             return None
 
 
+def _comfy_greenscreen_prompt(prompt: str) -> str:
+    """MiniMax 参考生视频会保住参考图背景，所以绿幕要写成替换背景。"""
+    action = (prompt or "").strip()
+    return (
+        "The person in <Picture 1> is the only subject. "
+        "The background in <Picture 1> is a chroma-key screen; keep every pixel "
+        "behind the person as flat pure green #00FF00. "
+        "Do not turn the background black, gray, or into a room. "
+        "No shadows, no gradient, no sky, no props. "
+        "Keep the person's face, hair, body, and costume from <Picture 1>. "
+        f"Action: {action}"
+    )
+
+
+class ComfyUIVideoProvider(VideoProvider):
+    """本机 ComfyUI 的人物动作视频。固定绿幕，供抽帧抠人，不是成片镜头。"""
+
+    name = "comfyui"
+
+    async def generate(
+        self,
+        prompt: str,
+        start_image_b64: Optional[str] = None,
+        end_image_b64: Optional[str] = None,
+        duration: float = 5.0,
+        greenscreen: bool = False,
+    ) -> Optional[str]:
+        from app.config import CACHE_DIR
+        from app.services.comfyui_client import generate_minimax_video
+
+        del greenscreen
+        try:
+            reference = self._b64_to_png(start_image_b64) if start_image_b64 else None
+            if end_image_b64:
+                logger.info("[VideoAdapter:ComfyUI] 当前工作流只使用首帧参考图")
+            data = await generate_minimax_video(
+                _comfy_greenscreen_prompt(prompt),
+                duration_seconds=duration,
+                reference_png=reference,
+            )
+            out_dir = CACHE_DIR / "comfy"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"minimax_{uuid.uuid4().hex[:8]}.mp4"
+            out_path.write_bytes(data)
+            logger.info("[VideoAdapter:ComfyUI] wrote %s", out_path)
+            return str(out_path)
+        except Exception as e:
+            logger.warning("[VideoAdapter:ComfyUI] error: %s", e)
+            return None
+
+    @staticmethod
+    def _b64_to_png(b64: str) -> Optional[bytes]:
+        try:
+            if "," in b64:
+                b64 = b64.split(",", 1)[1]
+            return base64.b64decode(b64)
+        except Exception:
+            return None
+
+
 # ── Provider registry & factory ───────────────────────────────────────────────────
 
 _PROVIDER_REGISTRY: dict[str, type[VideoProvider]] = {
@@ -545,6 +605,7 @@ _PROVIDER_REGISTRY: dict[str, type[VideoProvider]] = {
     "happyhorse": HappyHorseProvider,
     "local_wan": LocalWanProvider,
     "svd": SVDProvider,
+    "comfyui": ComfyUIVideoProvider,
 }
 
 
@@ -553,7 +614,7 @@ def get_video_provider(provider_name: str = "dashscope") -> VideoProvider:
     Factory: return a VideoProvider instance by name.
 
     Args:
-        provider_name: One of "dashscope", "local_wan", "svd"
+        provider_name: One of "dashscope", "local_wan", "svd", "comfyui"
                       Defaults to "dashscope" (cloud, high quality).
     """
     cls = _PROVIDER_REGISTRY.get(provider_name.lower())

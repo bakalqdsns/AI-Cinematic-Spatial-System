@@ -285,26 +285,40 @@ async def download_shot_archive(project_id: str, shot_id: str):
     """下载最近一次生成的 shot archive ZIP（若不存在则现场打包）。"""
     from fastapi.responses import FileResponse
     from pathlib import Path
+    from app.services.path_safety import PathEscapeError, safe_path_token
     from app.services.project_store import project_store
     from app.services.shot_archiver import build_shot_archive
 
-    archives_dir = project_store._project_dir(project_id) / "archives"
-    pattern = f"{project_id}_{shot_id}_archive.zip"
+    try:
+        project_root = project_store._project_dir(project_id)
+        shot_token = safe_path_token(shot_id, kind="镜头编号")
+        if any(ch in shot_token for ch in "*?[]"):
+            raise PathEscapeError("无效的镜头编号")
+    except PathEscapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    archives_dir = project_root / "archives"
+    pattern = f"{project_root.name}_{shot_token}_archive.zip"
     zip_path = archives_dir / pattern
     if not zip_path.is_file():
-        # also accept any matching archive
-        matches = sorted(archives_dir.glob(f"*_{shot_id}_archive.zip")) if archives_dir.is_dir() else []
+        matches = sorted(archives_dir.glob(f"*_{shot_token}_archive.zip")) if archives_dir.is_dir() else []
+        matches = [p.resolve() for p in matches if archives_dir.resolve() in p.resolve().parents]
         if matches:
             zip_path = matches[-1]
         else:
             try:
-                result = build_shot_archive(project_id, shot_id)
-                zip_path = Path(result["zipPath"])
+                result = build_shot_archive(project_id, shot_token)
+                zip_path = Path(result["zipPath"]).resolve()
+            except PathEscapeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             except FileNotFoundError as e:
                 raise HTTPException(status_code=404, detail=str(e))
             except Exception as e:
                 _log.exception(f"[shots] archive-on-download failed: {e}")
-                raise HTTPException(status_code=500, detail=f"Archive failed: {e}")
+                raise HTTPException(status_code=500, detail="Archive failed")
+
+    if project_root.resolve() not in Path(zip_path).resolve().parents:
+        raise HTTPException(status_code=404, detail="Archive not found")
 
     return FileResponse(
         path=str(zip_path),

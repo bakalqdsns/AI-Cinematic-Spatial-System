@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 # ffmpeg / ffprobe resolution
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _concat_file_line(path: str) -> str:
+    """concat demuxer 的一行。单引号按 ffmpeg 规则转义，避免路径截断指令。"""
+    posix = Path(path).as_posix().replace("'", r"'\''")
+    return f"file '{posix}'"
+
+
 def resolve_ffmpeg() -> str:
     """Return the ffmpeg binary path or raise ``RuntimeError("FFMPEG_MISSING")``."""
     exe = shutil.which("ffmpeg")
@@ -165,7 +171,7 @@ async def apply_transition(
     if kind == "cut":
         list_file = workdir / f"concat_{int(time.time()*1000)}.txt"
         list_file.write_text(
-            f"file '{Path(prev_path).as_posix()}'\nfile '{Path(next_path).as_posix()}'\n",
+            _concat_file_line(prev_path) + "\n" + _concat_file_line(next_path) + "\n",
             encoding="utf-8",
         )
         cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
@@ -225,9 +231,9 @@ async def apply_transition(
 
         list_file = workdir / f"fade_concat_{int(time.time()*1000)}.txt"
         list_file.write_text(
-            f"file '{Path(prev_out).as_posix()}'\n"
-            f"file '{Path(black_out).as_posix()}'\n"
-            f"file '{Path(next_out).as_posix()}'\n",
+            _concat_file_line(prev_out) + "\n"
+            + _concat_file_line(black_out) + "\n"
+            + _concat_file_line(next_out) + "\n",
             encoding="utf-8",
         )
         cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
@@ -441,9 +447,11 @@ async def compose_clips(
 
     # Resolve default output path.
     if not output_path:
+        from app.services.path_safety import resolve_contained, safe_path_token
+
         ts = time.strftime("%Y%m%d_%H%M%S")
-        pid = project_id or "default"
-        out_dir = settings.workspace_dir / "projects" / pid / "compose"
+        pid = safe_path_token(project_id or "default", kind="项目编号")
+        out_dir = resolve_contained(Path(settings.workspace_dir) / "projects", pid, "compose")
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(out_dir / f"{ts}.mp4")
 

@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from app.config import settings
+from app.services.path_safety import resolve_contained, safe_path_token
 
 # ─── Workspace root ────────────────────────────────────────────────────────────
 
@@ -517,10 +518,10 @@ class ProjectStore:
     # ── internal ────────────────────────────────────────────────────────────────
 
     def _project_dir(self, project_id: str) -> Path:
-        return self._workspace_dir / project_id
+        return resolve_contained(self._workspace_dir, project_id)
 
     def _step_dir(self, project_id: str, step: str) -> Path:
-        return self._project_dir(project_id) / step
+        return resolve_contained(self._workspace_dir, project_id, step)
 
     def _manifest_path(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "manifest.json"
@@ -556,6 +557,7 @@ class ProjectStore:
           { projectId, shotId, createdAt, inputHash }
         """
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        shot_id = slugify(shot_id)
         project_id = f"{ts}_{shot_id}"
         proj_dir = self._project_dir(project_id)
 
@@ -609,7 +611,8 @@ class ProjectStore:
             artifact_files: list[ArtifactFile] = []
 
             for name, content in files.items():
-                file_path = step_dir / name
+                safe_name = safe_path_token(name, kind="文件名")
+                file_path = step_dir / safe_name
                 if isinstance(content, dict):
                     # JSON metadata
                     content_bytes = json.dumps(content, ensure_ascii=False, indent=2).encode("utf-8")
@@ -621,7 +624,7 @@ class ProjectStore:
 
                 artifact_files.append(
                     ArtifactFile(
-                        name=name,
+                        name=safe_name,
                         size=file_path.stat().st_size,
                         sha256=_sha256(file_path.read_bytes()),
                         saved_at=_now_iso(),
@@ -721,7 +724,8 @@ class ProjectStore:
         return self._project_dir(project_id) / "sequences"
 
     def _sequence_file(self, project_id: str, sequence_id: str) -> Path:
-        return self._sequences_dir(project_id) / f"{sequence_id}.json"
+        token = safe_path_token(sequence_id, kind="序列编号")
+        return resolve_contained(self._workspace_dir, project_id, "sequences", f"{token}.json")
 
     async def save_sequence(
         self,
@@ -835,7 +839,7 @@ class ProjectStore:
         return self._project_dir(project_id) / "shots"
 
     def _shot_dir(self, project_id: str, shot_id: str) -> Path:
-        return self._shots_dir(project_id) / shot_id
+        return resolve_contained(self._workspace_dir, project_id, "shots", shot_id)
 
     def _shot_manifest_path(self, project_id: str, shot_id: str) -> Path:
         return self._shot_dir(project_id, shot_id) / "manifest.json"

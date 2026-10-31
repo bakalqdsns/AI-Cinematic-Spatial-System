@@ -60,6 +60,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # Absolute imports — work because backend root is now on sys.path
 from app.config import settings, DEVICE
@@ -236,6 +237,14 @@ app.include_router(provider_router, tags=["Cloud Providers"])
 app.include_router(models_router, tags=["Models"])
 app.include_router(layers_router, prefix="/api/aicss", tags=["Layers"])
 app.include_router(record_router, tags=["v2 - Record"])
+
+
+from app.services.path_safety import PathEscapeError
+
+
+@app.exception_handler(PathEscapeError)
+async def _reject_path_escape(_request, exc: PathEscapeError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.services.path_safety import resolve_contained
 from app.services.project_store import WORKSPACE_DIR
 
 RECORD_NAME = "projects.json"
@@ -13,9 +14,10 @@ _MEDIA_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".mov", ".webm"}
 
 
 def project_dir(project_id: str) -> Path:
-    if not project_id or any(part in project_id for part in ("/", "\\", "..")):
-        raise ValueError("无效的项目编号")
-    return WORKSPACE_DIR / project_id
+    try:
+        return resolve_contained(WORKSPACE_DIR, project_id)
+    except ValueError as exc:
+        raise ValueError("无效的项目编号") from exc
 
 
 def safe_rel(rel: str) -> str:

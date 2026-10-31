@@ -216,7 +216,7 @@ class GenerateMotionRequest(BaseModel):
     duration_seconds: float = Field(default=5.0, ge=1.0, le=30.0)
     video_provider: str = Field(
         default="dashscope",
-        description="Video provider: dashscope | local_wan | svd",
+        description="Video provider: dashscope | happyhorse | local_wan | svd | comfyui",
     )
     greenscreen: bool = Field(
         default=False,
@@ -869,7 +869,11 @@ async def api_generate_motion(request: GenerateMotionRequest):
     when a project_id is provided.
     """
     from app.services.motion_extractor import generate_motion_sequence
+    from app.services.settings_manager import get as get_setting
 
+    video_provider = request.video_provider or get_setting("video_provider", "dashscope")
+    # ComfyUI 这条只负责人物绿幕素材，成片镜头仍走原来的视频供应商。
+    greenscreen = True if video_provider == "comfyui" else request.greenscreen
     motion = await generate_motion_sequence(
         shot_id=request.shot_id,
         character_id=request.character_id,
@@ -878,8 +882,8 @@ async def api_generate_motion(request: GenerateMotionRequest):
         start_image_b64=request.start_image,
         end_image_b64=request.end_image,
         duration_seconds=request.duration_seconds,
-        video_provider=request.video_provider,
-        greenscreen=request.greenscreen,
+        video_provider=video_provider,
+        greenscreen=greenscreen,
         feather_edges=request.feather_edges,
     )
 

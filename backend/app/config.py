@@ -256,7 +256,13 @@ class Settings(BaseSettings):
     #   "dashscope"  — wanx-i2v via DashScope API (cloud, high quality)
     #   "local_wan"  — wan2.1-i2v local inference (28GB+ VRAM, requires Modelscope)
     #   "svd"        — Stable Video Diffusion (8GB VRAM, degraded quality)
+    #   "comfyui"    — local ComfyUI MiniMax H3 reference-to-video workflow
     video_provider: str = "dashscope"
+    # Local image execution when image_mode == "local".
+    #   "diffusers" — in-process Z-Image / SDXL
+    #   "comfyui"   — workflows/comfy/zimage.json on the ComfyUI server
+    local_image_backend: str = "diffusers"
+    comfyui_base_url: str = "http://127.0.0.1:8188"
 
     # When True, the video provider is asked to render the action against a
     # flat green-screen backdrop and the segmenter applies a chroma-key pass

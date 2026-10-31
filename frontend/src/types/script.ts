@@ -257,6 +257,7 @@ export interface GenerateMotionRequest {
   startImage?: string;
   endImage?: string;
   durationSeconds?: number;
+  videoProvider?: string;
   projectId?: string;
 }
 

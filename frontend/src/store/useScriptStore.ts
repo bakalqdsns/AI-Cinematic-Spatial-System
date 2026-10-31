@@ -12,6 +12,7 @@ import type {
 import * as scriptService from '../services/scriptService';
 import { useAppStore } from './useAppStore';
 import { useShotWorkflowStore } from './useShotWorkflowStore';
+import { useSettingsStore } from './useSettingsStore';
 import type { ProjectRecord } from '../services/recordService';
 
 interface ScriptStore {
@@ -1012,6 +1013,7 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         actionPrompt: shot.visualPrompts.actionPrompt,
         startImage: asset?.threeViewImages?.front,
         endImage: asset?.threeViewImages?.back,
+        videoProvider: useSettingsStore.getState().settings.video_provider,
         projectId,
       });
 

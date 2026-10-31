@@ -73,8 +73,13 @@ const VIDEO_PROVIDER_OPTIONS = [
   { value: 'happyhorse', label: 'DashScope happyhorse-1.1-r2v (免费试用)' },
 ];
 const LOCAL_VIDEO_PROVIDER_OPTIONS = [
+  { value: 'comfyui', label: 'ComfyUI MiniMax H3' },
   { value: 'local_wan', label: 'Local Wan2.1' },
   { value: 'svd', label: 'Stable Video Diffusion' },
+];
+const LOCAL_IMAGE_BACKEND_OPTIONS = [
+  { value: 'comfyui', label: 'ComfyUI Z-Image' },
+  { value: 'diffusers', label: '进程内 Diffusers' },
 ];
 
 const IMAGE_MODEL_PRESETS = [
@@ -156,6 +161,8 @@ export function SettingsPanel() {
       llm_model: settings.llm_model,
       image_model_id: settings.image_model_id,
       image_dtype: settings.image_dtype,
+      local_image_backend: settings.local_image_backend ?? 'diffusers',
+      comfyui_base_url: settings.comfyui_base_url ?? 'http://127.0.0.1:8188',
       video_provider: settings.video_provider,
       dashscope_llm_api_key: settings.dashscope_llm_api_key ?? '',
       dashscope_vlm_api_key: settings.dashscope_vlm_api_key ?? '',
@@ -497,6 +504,32 @@ export function SettingsPanel() {
                 </>
               ) : (
                 <>
+                  <Field label="本地后端">
+                    <select
+                      value={settings.local_image_backend === 'comfyui' ? 'comfyui' : 'diffusers'}
+                      onChange={(e) => setLocalField('local_image_backend', e.target.value)}
+                      className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                        focus:outline-none focus:border-blue-500"
+                    >
+                      {LOCAL_IMAGE_BACKEND_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  {settings.local_image_backend === 'comfyui' ? (
+                    <Field label="ComfyUI 地址">
+                      <input
+                        type="text"
+                        value={settings.comfyui_base_url ?? 'http://127.0.0.1:8188'}
+                        onChange={(e) => setLocalField('comfyui_base_url', e.target.value)}
+                        placeholder="http://127.0.0.1:8188"
+                        spellCheck={false}
+                        className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                          placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                      />
+                    </Field>
+                  ) : (
+                    <>
                   <Field label="Model ID">
                     <input
                       type="text"
@@ -532,6 +565,8 @@ export function SettingsPanel() {
                     hint="图生图 (~33 GB)"
                     status={modelDownloads.image}
                   />
+                    </>
+                  )}
                 </>
               )}
             </SettingsGroup>
@@ -628,7 +663,7 @@ export function SettingsPanel() {
                     <select
                       value={LOCAL_VIDEO_PROVIDER_OPTIONS.some((o) => o.value === settings.video_provider)
                         ? settings.video_provider
-                        : 'local_wan'}
+                        : 'comfyui'}
                       onChange={(e) => setLocalField('video_provider', e.target.value)}
                       className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
                         focus:outline-none focus:border-blue-500"
@@ -638,6 +673,19 @@ export function SettingsPanel() {
                       ))}
                     </select>
                   </Field>
+                  {settings.video_provider === 'comfyui' && (
+                    <Field label="ComfyUI 地址">
+                      <input
+                        type="text"
+                        value={settings.comfyui_base_url ?? 'http://127.0.0.1:8188'}
+                        onChange={(e) => setLocalField('comfyui_base_url', e.target.value)}
+                        placeholder="http://127.0.0.1:8188"
+                        spellCheck={false}
+                        className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
+                          placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                      />
+                    </Field>
+                  )}
                 </>
               )}
             </SettingsGroup>

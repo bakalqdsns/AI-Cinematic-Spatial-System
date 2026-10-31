@@ -49,6 +49,8 @@ export interface RuntimeSettings {
   // Local Image
   image_model_id: string;
   image_dtype: string;
+  local_image_backend: string;
+  comfyui_base_url: string;
   // Video provider string (used in local mode and dashscope mode)
   video_provider: string;
   // Per-component DashScope API keys (masked as "***" after initial read).
@@ -81,6 +83,8 @@ export type SettingsPatch = Partial<{
   llm_model: string;
   image_model_id: string;
   image_dtype: string;
+  local_image_backend: string;
+  comfyui_base_url: string;
   video_provider: string;
   dashscope_llm_api_key: string;
   dashscope_vlm_api_key: string;

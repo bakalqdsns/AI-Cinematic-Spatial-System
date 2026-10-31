@@ -316,6 +316,15 @@ async def generate_character_variation(
 
 # ── Internal image generation helpers ────────────────────────────────────────────
 
+def _comfy_character_prompt(prompt: str) -> str:
+    """人物素材要给后面的绿幕视频当参考，背景必须是纯绿，而不是棚拍灰底。"""
+    return (
+        f"{prompt}, standing in front of a flat chroma key cyclorama, "
+        "the entire background is uniform pure green #00FF00, "
+        "no gray studio, no floor shadow, no gradient, no room"
+    )
+
+
 def _default_character_size() -> str:
     """Default portrait size for character generation (e.g. '720*1280' → 9:16)."""
     from app.config import settings
@@ -345,7 +354,22 @@ async def _generate_via_local(
     seed: Optional[int] = None,
     size: Optional[str] = None,
 ) -> Optional[str]:
-    """Generate image via local Diffusers pipeline (SDXL / Z-Image)."""
+    """本地出图。local_image_backend=comfyui 时走 Z-Image 工作流，否则走 Diffusers。"""
+    from app.services.comfyui_client import comfy_image_selected, generate_zimage_png
+
+    if comfy_image_selected():
+        try:
+            width, height = _parse_size_to_tuple(size) if size else (1024, 1024)
+            png = await generate_zimage_png(
+                _comfy_character_prompt(prompt),
+                width=width,
+                height=height,
+                seed=seed,
+            )
+            return base64.b64encode(png).decode("ascii")
+        except Exception as e:
+            logger.warning("[character_generator] ComfyUI Z-Image failed: %s", e)
+            return None
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
@@ -366,7 +390,12 @@ async def _generate_via_local_with_reference(
     *,
     strength: float = 0.7,
 ) -> Optional[str]:
-    """Generate image with style reference using local img2img pipeline."""
+    """带参考图的本地出图。ComfyUI 的 Z-Image 工作流没有 img2img，只使用提示词。"""
+    from app.services.comfyui_client import comfy_image_selected
+
+    if comfy_image_selected():
+        logger.info("[character_generator] ComfyUI Z-Image 工作流不接收参考图，按提示词出图")
+        return await _generate_via_local(prompt)
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()

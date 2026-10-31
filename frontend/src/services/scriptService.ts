@@ -314,6 +314,7 @@ export async function generateMotion(request: GenerateMotionRequest): Promise<Mo
       start_image: request.startImage,
       end_image: request.endImage,
       duration_seconds: request.durationSeconds ?? 5.0,
+      video_provider: request.videoProvider,
       project_id: request.projectId,
     } as any,
   }) as {

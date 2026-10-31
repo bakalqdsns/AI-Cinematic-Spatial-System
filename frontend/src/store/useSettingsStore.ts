@@ -67,6 +67,8 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
   llm_model: 'qwen2.5-7b-q4_k_m',
   image_model_id: 'Tongyi-MAI/Z-Image-Turbo',
   image_dtype: 'bfloat16',
+  local_image_backend: 'diffusers',
+  comfyui_base_url: 'http://127.0.0.1:8188',
   video_provider: 'dashscope',
   dashscope_llm_api_key: null,
   dashscope_vlm_api_key: null,

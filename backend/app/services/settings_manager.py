@@ -52,6 +52,8 @@ RUNTIME_FIELDS = (
     "image_dtype",
     # Video
     "video_provider",
+    "local_image_backend",
+    "comfyui_base_url",
     "motion_greenscreen_default",
     "motion_feather_edges_default",
     # API keys
@@ -345,9 +347,9 @@ def update_settings(updates: dict) -> dict:
         if _mode == "cloud" and _cur_provider not in ("dashscope", "local_wan", "svd"):
             set_runtime_value("video_provider", "dashscope")
             _log.info("[settings] video_provider auto-set to 'dashscope' (video_mode=cloud)")
-        elif _mode == "local" and _cur_provider == "dashscope":
-            set_runtime_value("video_provider", "local_wan")
-            _log.info("[settings] video_provider auto-set to 'local_wan' (video_mode=local)")
+        elif _mode == "local" and _cur_provider in ("dashscope", "happyhorse"):
+            set_runtime_value("video_provider", "comfyui")
+            _log.info("[settings] video_provider auto-set to 'comfyui' (video_mode=local)")
 
     # ── Hot-reload DashScope client ─────────────────────────────────────────
     if "dashscope_llm_model" in changes or "dashscope_vlm_model" in changes or "dashscope_image_model" in changes:

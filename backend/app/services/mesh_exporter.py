@@ -1273,7 +1273,24 @@ def export_scene(
 
         out_dir = Path(output_dir) if output_dir else tmp_path
         out_dir.mkdir(parents=True, exist_ok=True)
-        output_file = out_dir / f"{scene.scene_id}.{ext}"
+        from app.services.path_safety import PathEscapeError, safe_path_token
+        try:
+            stem = safe_path_token(str(scene.scene_id), kind="场景编号")
+        except PathEscapeError:
+            return MeshExportResult(
+                mesh_id=scene.scene_id,
+                scene_id=scene.scene_id,
+                file_path="",
+                file_size=0,
+                file_sha256="",
+                format=fmt,
+                object_count=0,
+                vertex_count=0,
+                face_count=0,
+                success=False,
+                error="invalid scene id",
+            )
+        output_file = out_dir / f"{stem}.{ext}"
 
         # 动态计算超时
         timeout_seconds = _calculate_export_timeout(scene)

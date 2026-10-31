@@ -113,15 +113,34 @@ async def api_compose(project_id: str, request: ComposeRequest) -> ComposeRespon
       - ``FFMPEG_MISSING`` 鈫?503
       - Any other ``RuntimeError`` from the composer 鈫?500
     """
+    from app.services.path_safety import PathEscapeError, contained_file
+    from app.services.project_store import project_store
+
+    try:
+        project_root = project_store._project_dir(project_id)
+        clip_paths = [str(contained_file(project_root, path)) for path in request.clipPaths]
+        audio_tracks = None
+        if request.audioTracks:
+            audio_tracks = []
+            for track in request.audioTracks:
+                item = track.model_dump()
+                item["path"] = str(contained_file(project_root, item["path"]))
+                audio_tracks.append(item)
+        color_grade = request.colorGrade.model_dump() if request.colorGrade else None
+        if color_grade and color_grade.get("lut_path"):
+            color_grade["lut_path"] = str(contained_file(project_root, color_grade["lut_path"]))
+    except PathEscapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         output_path = await compose_clips(
-            clip_paths=request.clipPaths,
+            clip_paths=clip_paths,
             durations=request.durations,
             transition=request.transition,
             transition_duration=request.transitionDuration,
             project_id=project_id,
-            audio_tracks=[t.model_dump() for t in request.audioTracks] if request.audioTracks else None,
-            color_grade=request.colorGrade.model_dump() if request.colorGrade else None,
+            audio_tracks=audio_tracks,
+            color_grade=color_grade,
         )
     except RuntimeError as exc:
         msg = str(exc)
@@ -166,19 +185,23 @@ async def get_composed_video(project_id: str, filename: str):
     This endpoint streams it back with the correct MIME type so the frontend
     ``<video>`` tag can play it.
     """
-    # 瀹夊叏锛歠ilename 涓嶅厑璁稿惈璺緞鍒嗛殧绗︽垨 ..
-    if os.path.sep in filename or "/" in filename or ".." in filename:
-        raise HTTPException(404, "Not found")
-    # 瀹氫綅鏂囦欢
     from app.config import settings
-    compose_dir = settings.workspace_dir / "projects" / project_id / "compose"
-    path = compose_dir / filename
+    from app.services.path_safety import PathEscapeError, resolve_contained, safe_path_token
+
+    try:
+        name = safe_path_token(filename, kind="文件名")
+        if ".." in name:
+            raise PathEscapeError("无效的文件名")
+        compose_dir = resolve_contained(Path(settings.workspace_dir) / "projects", project_id, "compose")
+        path = compose_dir / name
+    except PathEscapeError:
+        raise HTTPException(404, "Not found")
     if not path.is_file():
         raise HTTPException(404, "Composed video not found")
     return FileResponse(
         str(path),
         media_type="video/mp4",
-        filename=filename,
+        filename=name,
     )
 
 
@@ -545,13 +568,20 @@ async def api_render_queue(project_id: str, request: RenderQueueRequest) -> Rend
     summary="Stream a rendered MP4",
 )
 async def get_rendered_video(project_id: str, filename: str):
-    if os.path.sep in filename or "/" in filename or ".." in filename:
-        raise HTTPException(404, "Not found")
+    from app.services.path_safety import PathEscapeError, resolve_contained, safe_path_token
     from app.services.project_store import WORKSPACE_DIR
-    path = WORKSPACE_DIR / project_id / "renders" / filename
+
+    try:
+        name = safe_path_token(filename, kind="文件名")
+        if ".." in name:
+            raise PathEscapeError("无效的文件名")
+        renders = resolve_contained(WORKSPACE_DIR, project_id, "renders")
+        path = renders / name
+    except PathEscapeError:
+        raise HTTPException(404, "Not found")
     if not path.is_file():
         raise HTTPException(404, "Rendered video not found")
-    return FileResponse(str(path), media_type="video/mp4", filename=filename)
+    return FileResponse(str(path), media_type="video/mp4", filename=name)
 
 
 @router.get("/media", summary="Stream a workspace or cache media file")
@@ -594,14 +624,24 @@ async def refine_from_render(project_id: str, shot_id: str, request: VideoRefine
 
     模型接口尚未接入时返回 501，不会改用抽帧冒充。
     """
+    from app.services.path_safety import PathEscapeError, resolve_contained, safe_path_token
     from app.services.project_store import WORKSPACE_DIR
     from app.services.video_adapter import VideoReferenceNotConfigured, get_video_provider
 
-    renders = WORKSPACE_DIR / project_id / "renders"
-    reference = renders / f"{shot_id}.mp4"
+    try:
+        shot_token = safe_path_token(shot_id, kind="镜头编号")
+        if any(ch in shot_token for ch in "*?[]"):
+            raise PathEscapeError("无效的镜头编号")
+        renders = resolve_contained(WORKSPACE_DIR, project_id, "renders")
+    except PathEscapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reference = renders / f"{shot_token}.mp4"
     if not reference.is_file():
-        matches = sorted(renders.glob(f"*{shot_id}*.mp4")) if renders.is_dir() else []
-        matches = [p for p in matches if not p.name.endswith("_refine.mp4")]
+        matches = sorted(renders.glob(f"*_{shot_token}.mp4")) if renders.is_dir() else []
+        matches = [
+            p.resolve() for p in matches
+            if not p.name.endswith("_refine.mp4") and renders.resolve() in p.resolve().parents
+        ]
         if not matches:
             raise HTTPException(status_code=400, detail="当前分镜还没有渲染结果")
         reference = matches[-1]
@@ -621,8 +661,8 @@ async def refine_from_render(project_id: str, shot_id: str, request: VideoRefine
         raise HTTPException(status_code=502, detail="视频生视频没有返回文件")
 
     renders.mkdir(parents=True, exist_ok=True)
-    dest = renders / f"{shot_id}_refine.mp4"
+    dest = renders / f"{shot_token}_refine.mp4"
     shutil.copy2(generated, dest)
-    return VideoRefineResponse(outputPath=str(dest.resolve()), shotId=shot_id)
+    return VideoRefineResponse(outputPath=str(dest.resolve()), shotId=shot_token)
 
 

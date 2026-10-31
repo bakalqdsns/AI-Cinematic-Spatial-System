@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import settings
+from app.services.path_safety import PathEscapeError, resolve_contained, safe_path_token
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -130,7 +131,7 @@ class ProjectStoreMesh:
     # ── 目录 helpers ────────────────────────────────────────────────────────
 
     def _project_dir(self, project_id: str) -> Path:
-        return _WS_ROOT / project_id
+        return resolve_contained(_WS_ROOT, project_id)
 
     def _meshes_dir(self, project_id: str) -> Path:
         return self._project_dir(project_id) / "meshes"
@@ -412,16 +413,24 @@ class ProjectStoreMesh:
         return None
 
     def get_mesh_file_path(self, project_id: str, mesh_id: str) -> Optional[Path]:
-        """根据 mesh_id 解析文件路径。"""
+        """根据 mesh_id 解析文件路径。文件名必须留在对应 scope 目录内。"""
         manifest = self._read_manifest(project_id)
         for m in manifest.meshes:
             if m.mesh_id == mesh_id:
                 if m.scope == "object":
-                    return self._mesh_objects_dir(project_id) / m.file_name
+                    directory = self._mesh_objects_dir(project_id)
                 elif m.scope == "layer":
-                    return self._mesh_layers_dir(project_id) / m.file_name
+                    directory = self._mesh_layers_dir(project_id)
                 else:
-                    return self._mesh_scenes_dir(project_id) / m.file_name
+                    directory = self._mesh_scenes_dir(project_id)
+                try:
+                    name = safe_path_token(m.file_name, kind="网格文件名")
+                except PathEscapeError:
+                    return None
+                path = (directory / name).resolve()
+                if directory.resolve() not in path.parents:
+                    return None
+                return path
         return None
 
     def list_by_scope(self, project_id: str, scope: str) -> list[dict]:
