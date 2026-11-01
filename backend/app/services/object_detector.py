@@ -144,7 +144,7 @@ def detect_objects(
             "raw SAM2 masks: %s", e,
         )
 
-    # Resolve layer hint from settings (fall back to "foreground" for unknown labels).
+    # layer_hint 只留给物件接口。像素归层不读这张表，未知标签不会因此全部进入前景。
     hint_rules = settings.layer_hint_rules
 
     out: list[ObjectAsset] = []
@@ -222,10 +222,9 @@ def detect_objects(
 
 
 def _default_z(layer_hint: str) -> float:
-    """Fallback Z offsets when the caller didn't pass a custom table."""
-    return {
-        "foreground": -2.0,
-        "midground": -6.0,
-        "background": -12.0,
-        "ground": -1.5,
-    }.get(layer_hint, -2.0)
+    """没传自定义表时用的层平面 Z，与 layer_exporter.LAYER_Z_OFFSETS 一致。"""
+    from app.services.layer_exporter import LAYER_Z_OFFSETS
+
+    if layer_hint in LAYER_Z_OFFSETS:
+        return float(LAYER_Z_OFFSETS[layer_hint])
+    return float(LAYER_Z_OFFSETS["foreground"])

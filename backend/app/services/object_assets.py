@@ -85,7 +85,7 @@ class GroundAsset:
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)        # tight bbox of ground mask
     cutout: Optional[Image.Image] = None                 # RGBA, ground pixels visible
     depth_correction: Optional[np.ndarray] = None        # H×W float32 (only inside mask)
-    z_offset: float = -1.5                               # ground plane Z offset
+    z_offset: float = -4.0                               # 地面比前景（-2）远、比中景（-8）近
     meta: dict = field(default_factory=dict)             # inlier_ratio / vertical_pos / area_px
 
     def depth_correction_data_uri(self) -> str:

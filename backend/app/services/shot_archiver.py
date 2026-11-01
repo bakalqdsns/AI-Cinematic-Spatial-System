@@ -37,12 +37,13 @@ from typing import Any, Optional
 _log = logging.getLogger("aicss")
 
 # Blender addon 约定的层顺序与默认 Z
+# 与 layer_exporter.LAYER_Z_OFFSETS 一致。地面比前景远，避免挡住人物。
 _DEFAULT_Z_OFFSETS = [
     {"layer": "sky", "zOffset": -20.0},
     {"layer": "background", "zOffset": -12.0},
-    {"layer": "midground", "zOffset": -6.0},
+    {"layer": "midground", "zOffset": -8.0},
+    {"layer": "ground", "zOffset": -4.0},
     {"layer": "foreground", "zOffset": -2.0},
-    {"layer": "ground", "zOffset": -1.5},
 ]
 
 _LAYER_NAMES = ("sky", "background", "midground", "foreground", "ground")
@@ -378,7 +379,7 @@ def _find_scene_wide(project_dir: Path, scene_id: Optional[str]) -> Optional[Pat
     return hits[0]
 
 
-_OCCLUSION_FILL_MARK = "occluded_lama_v1"
+_OCCLUSION_FILL_MARK = "scene_table_v1"
 
 
 def _layers_already_exported(layers_dir: Path, source: Path) -> bool:
@@ -402,10 +403,11 @@ def _layers_already_exported(layers_dir: Path, source: Path) -> bool:
 
 
 def ensure_depth_layers(project_dir: Path, scene_id: Optional[str] = None) -> list[str]:
-    """按文档路线生成 5 层 RGBA：DepthAnything → GroundingDINO+SAM2 → 地面拟合 → 分层导出。
+    """生成 5 层 RGBA：深度 → 物件检测 → 场景类 → 匹配表归层 → 按 Z 补全遮挡。
 
-    写入 ``<project>/layers/{sky,background,midground,foreground,ground}.png``。
-    源图未变且 5 层都在时跳过。模型不可用时记日志并返回空列表，归档仍可继续。
+    写入 ``<project>/layers/{sky,background,midground,foreground,ground}.png``
+    和 ``layers/_fill.json``。没有像素的层仍写出全透明图。
+    检测或场景分类失败时退回 unknown，归档不因此中断。
     """
     source = _find_scene_wide(project_dir, scene_id)
     if source is None:
@@ -452,36 +454,54 @@ def ensure_depth_layers(project_dir: Path, scene_id: Optional[str] = None) -> li
     except Exception as exc:
         _log.warning("[archive] ground reconstruction failed: %s", exc)
 
+    # 检测失败时物件为空，分类退回 unknown，再用深度就近归层。分类自己失败也一样。
+    scene_name = "unknown"
+    try:
+        from app.services.scene_layer_table import classify_scene
+        scene_name = classify_scene(object_assets or [])
+    except Exception as exc:
+        _log.warning("[archive] 场景分类失败，改用 unknown: %s", exc)
+        scene_name = "unknown"
+    _log.info("[archive] 场景类 %s", scene_name)
+
     try:
         from app.services.layer_exporter import inpaint_occluded_layers
         layer_imgs = export_layers(
             image,
             depth_meters,
-            object_assets=object_assets or None,
+            object_assets=object_assets or [],
             ground_asset=ground_asset,
+            scene_class=scene_name,
         )
         layer_imgs = inpaint_occluded_layers(
             image,
             layer_imgs,
             depth_meters,
-            object_assets=object_assets or None,
+            object_assets=object_assets or [],
             ground_asset=ground_asset,
+            scene_class=scene_name,
         )
     except Exception as exc:
         _log.warning("[archive] export_layers failed: %s", exc)
         return []
 
     layers_dir.mkdir(parents=True, exist_ok=True)
-    (layers_dir / "_fill.json").write_text(
-        json.dumps({"method": _OCCLUSION_FILL_MARK}, ensure_ascii=False),
-        encoding="utf-8",
-    )
     written: list[str] = []
-    for name, img in layer_imgs.items():
+    for name in _LAYER_NAMES:
+        img = layer_imgs.get(name)
+        if img is None:
+            img = Image.new("RGBA", image.size, (0, 0, 0, 0))
         dest = layers_dir / f"{name}.png"
         img.save(dest, format="PNG")
         written.append(dest.name)
         _log.info("[archive] wrote depth layer %s", dest)
+    (layers_dir / "_fill.json").write_text(
+        json.dumps(
+            {"method": _OCCLUSION_FILL_MARK, "sceneClass": scene_name},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     return written
 
 

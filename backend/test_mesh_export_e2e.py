@@ -384,7 +384,7 @@ def _estimate_depth_value(layer_key: str) -> float:
 
 def _base_z_for_layer(layer_key: str) -> float:
     """Return the bucket-level base Z offset for a layer."""
-    mapping = {"sky": -20.0, "background": -12.0, "midground": -6.0, "foreground": -2.0}
+    mapping = {"sky": -20.0, "background": -12.0, "midground": -8.0, "ground": -4.0, "foreground": -2.0}
     return mapping.get(layer_key, 0.0)
 
 

@@ -43,9 +43,9 @@ except ImportError:
 _Z_OFFSETS = {
     "sky": -20.0,
     "background": -12.0,
-    "midground": -6.0,
+    "midground": -8.0,
+    "ground": -4.0,
     "foreground": -2.0,
-    "ground": -1.5,
 }
 
 

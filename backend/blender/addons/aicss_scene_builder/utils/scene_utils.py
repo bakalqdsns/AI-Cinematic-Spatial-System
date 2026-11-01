@@ -14,14 +14,14 @@ plugin places planes at the exact same Z the Three.js viewer uses.
 Z_OFFSETS = {
     "sky": -20.0,
     "background": -12.0,
-    "midground": -6.0,
+    "midground": -8.0,
+    "ground": -4.0,
     "foreground": -2.0,
-    "ground": -1.5,
 }
 
-# Render order — sky is drawn first (deepest), ground last (closest floor).
-# Mirrors layer_exporter.LAYER_ORDER.
-LAYER_ORDER = ("sky", "background", "midground", "foreground", "ground")
+# 从远到近。地面在中景和前景之间，不盖住人物。
+# 与 layer_exporter.LAYER_ORDER 一致。
+LAYER_ORDER = ("sky", "background", "midground", "ground", "foreground")
 
 # Default scene size in Blender units (1 BU = 1 m in our paper-diorama world)
 DEFAULT_SCENE_WIDTH = 20.0

@@ -280,7 +280,8 @@ def build_scene_from_frontend_data(
     layer_z = {
         "sky": -20.0,
         "background": -12.0,
-        "midground": -6.0,
+        "midground": -8.0,
+        "ground": -4.0,
         "foreground": -2.0,
     }
 
@@ -1466,7 +1467,7 @@ def export_objects_only(
         include_textures=include_textures,
     )
 
-    layer_z = {"sky": -20.0, "background": -12.0, "midground": -6.0, "foreground": -2.0}
+    layer_z = {"sky": -20.0, "background": -12.0, "midground": -8.0, "ground": -4.0, "foreground": -2.0}
     offsets = billboard_offsets or {}
 
     for obj in objects:
@@ -1508,7 +1509,7 @@ def export_layers_only(
     include_textures: bool = True,
 ) -> MeshExportResult:
     """仅导出深度层（不含单个物体）。"""
-    layer_z = {"sky": -20.0, "background": -12.0, "midground": -6.0, "foreground": -2.0}
+    layer_z = {"sky": -20.0, "background": -12.0, "midground": -8.0, "ground": -4.0, "foreground": -2.0}
 
     scene = SceneExportData(
         scene_id=scene_id or f"layers_{uuid.uuid4().hex[:8]}",
@@ -1582,7 +1583,8 @@ def export_full_scene(
 
 _LAYER_Z_TABLE = {
     "foreground": -2.0,
-    "midground": -6.0,
+    "ground": -4.0,
+    "midground": -8.0,
     "background": -12.0,
     "sky": -20.0,
 }

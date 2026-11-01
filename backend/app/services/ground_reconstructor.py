@@ -210,6 +210,13 @@ def fallback_ground_mask(width: int, height: int, depth_meters: np.ndarray) -> n
     return mask
 
 
+def _ground_z_offset() -> float:
+    """地面平面的 Z。比前景远、比中景近，和分层导出同一张表。"""
+    from app.services.layer_exporter import LAYER_Z_OFFSETS
+
+    return float(LAYER_Z_OFFSETS["ground"])
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Top-level reconstructor
 # ──────────────────────────────────────────────────────────────────────────────
@@ -340,6 +347,6 @@ def reconstruct_ground(
         bbox=bbox,
         cutout=cutout,
         depth_correction=depth_correction,
-        z_offset=-1.5,
+        z_offset=_ground_z_offset(),
         meta=meta,
     )

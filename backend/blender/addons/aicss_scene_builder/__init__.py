@@ -35,7 +35,8 @@ Manifest format:
         "zOffsets": [
           {"layer": "sky",        "zOffset": -20.0, "zMin": 50.0, "zMax": 9999.0},
           {"layer": "background", "zOffset": -12.0, "zMin": 15.0, "zMax": 50.0},
-          {"layer": "midground",  "zOffset": -6.0,  "zMin": 5.0,  "zMax": 15.0},
+          {"layer": "midground",  "zOffset": -8.0,  "zMin": 5.0,  "zMax": 15.0},
+          {"layer": "ground",     "zOffset": -4.0,  "zMin": 0.0,  "zMax": 9999.0},
           {"layer": "foreground", "zOffset": -2.0,  "zMin": 0.0,  "zMax": 5.0}
         ],
         "camera": {
