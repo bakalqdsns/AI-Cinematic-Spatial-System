@@ -192,7 +192,8 @@ async def generate_character_three_view(
     else:
         anchor_prompt = (
             f"{base_prompt}, character sheet, front view, facing camera, neutral pose, "
-            f"full body, white background, concept art, anime style, high detail"
+            f"full body, solid bright green (#00FF00) chroma key background, "
+            f"concept art, anime style, high detail"
         )
         anchor_b64 = await _generate_with_retry(
             anchor_prompt, label=f"{character.id}:anchor", seed=seed, size=out_size,
@@ -203,11 +204,13 @@ async def generate_character_three_view(
     if anchor_b64:
         side_prompt = (
             f"{base_prompt}, side profile view, 90 degree angle, full body, "
-            f"same character, same outfit, same art style, white background"
+            f"same character, same outfit, same art style, "
+            f"solid bright green (#00FF00) chroma key background"
         )
         back_prompt = (
             f"{base_prompt}, back view, from behind, full body, same character, "
-            f"same outfit, same art style, white background"
+            f"same outfit, same art style, "
+            f"solid bright green (#00FF00) chroma key background"
         )
         results["side"] = await _img2img_with_retry(
             side_prompt, anchor_b64, label=f"{character.id}:side", strength=0.7,
