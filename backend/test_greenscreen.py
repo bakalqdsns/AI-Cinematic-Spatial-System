@@ -35,17 +35,28 @@ _FIXED_GREENSCREEN_SUFFIX = (
 )
 
 
+def _assert_flat_cyclorama_wording(out: str) -> None:
+    """第 2 轮收紧后的平整绿幕措辞：地板同色、无阴影、无渐变。"""
+    low = out.lower()
+    assert "cyclorama" in low
+    assert "the floor is the same green as the background" in low
+    assert "no shadows" in low
+    assert "no gradient" in low
+    assert "no other colors or objects" in low
+    assert "#00FF00" in out
+
+
 def test_comfy_greenscreen_prompt_reuses_fixed_suffix_and_keeps_clothes():
     from app.services.video_adapter import _comfy_greenscreen_prompt
 
     out = _comfy_greenscreen_prompt("girl walks forward")
     assert "girl walks forward" in out
     assert _FIXED_GREENSCREEN_SUFFIX in out
+    _assert_flat_cyclorama_wording(out)
     assert "Do not recolor the clothes green." in out
     assert "face" in out.lower()
     assert "hairstyle" in out.lower()
     assert "chroma-key screen" not in out.lower()
-    assert "cyclorama" not in out.lower()
 
 
 def test_comfy_character_prompt_locks_green_and_keeps_clothes():
@@ -54,10 +65,10 @@ def test_comfy_character_prompt_locks_green_and_keeps_clothes():
     out = _comfy_character_prompt("a girl in a blue dress")
     assert "a girl in a blue dress" in out
     assert _FIXED_GREENSCREEN_SUFFIX in out
+    _assert_flat_cyclorama_wording(out)
     assert "Do not recolor the clothes green." in out
     assert "face" in out.lower()
     assert "hairstyle" in out.lower()
-    assert "cyclorama" not in out.lower()
 
 
 def test_scene_generator_does_not_add_greenscreen():

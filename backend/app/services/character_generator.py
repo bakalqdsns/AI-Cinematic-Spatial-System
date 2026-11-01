@@ -323,13 +323,19 @@ def _comfy_character_prompt(prompt: str) -> str:
     """人物静帧背景只有平整的 #00FF00，衣服颜色保持提示词原意。
 
     后缀与 :func:`app.services.video_adapter._apply_greenscreen_prompt` 相同，
-    并写明不要改脸、发型，也不要把衣服改成绿色。
+    再收紧一句：背景是一块平整的亮绿 cyclorama，地面和背景是同一块绿色，
+    不要阴影、不要渐变、不要任何其他颜色或物体。同时写明不要改脸、发型，
+    也不要把衣服改成绿色。
     """
-    from app.services.video_adapter import _apply_greenscreen_prompt
+    from app.services.video_adapter import (
+        _FLAT_CYCLORAMA_CLAUSE,
+        _apply_greenscreen_prompt,
+    )
 
     locked = _apply_greenscreen_prompt((prompt or "").strip(), True)
     return (
-        f"{locked}. Keep the face, hairstyle, and clothing colors from the "
+        f"{locked}. {_FLAT_CYCLORAMA_CLAUSE} "
+        "Keep the face, hairstyle, and clothing colors from the "
         "description and any reference image. Do not recolor the clothes green."
     )
 

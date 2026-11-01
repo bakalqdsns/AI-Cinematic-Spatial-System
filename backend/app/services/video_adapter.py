@@ -538,15 +538,25 @@ class SVDProvider(VideoProvider):
             return None
 
 
+_FLAT_CYCLORAMA_CLAUSE = (
+    "The background is a single seamless flat bright green (#00FF00) cyclorama: "
+    "the floor is the same green as the background, no shadows, no gradient, "
+    "no other colors or objects."
+)
+
+
 def _comfy_greenscreen_prompt(prompt: str) -> str:
     """ComfyUI 人物视频固定绿幕，供抽帧抠人，不是成片。
 
     必须带上 :func:`_apply_greenscreen_prompt` 的固定后缀，幕布才是平整的
-    ``#00FF00``。同时写明保留参考图里的脸、发型和衣服颜色，避免模型把衣服染绿。
+    ``#00FF00``。再收紧一句：背景是一块平整的亮绿 cyclorama，地面和背景是
+    同一块绿色，不要阴影、不要渐变、不要任何其他颜色或物体。同时写明保留
+    参考图里的脸、发型和衣服颜色，避免模型把衣服染绿。
     """
     locked = _apply_greenscreen_prompt((prompt or "").strip(), True)
     return (
-        f"{locked}. Keep the face, hairstyle, and clothing colors from the "
+        f"{locked}. {_FLAT_CYCLORAMA_CLAUSE} "
+        "Keep the face, hairstyle, and clothing colors from the "
         "reference image. Do not recolor the clothes green."
     )
 
