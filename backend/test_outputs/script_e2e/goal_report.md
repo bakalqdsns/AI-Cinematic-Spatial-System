@@ -53,3 +53,23 @@
 - 成片 `render_mid.png` 里人物已经站在操场上，没有再带一块不透明卡片。
 
 结论：MiniMax 本身画不出平整亮绿，但「边缘连通幕布采样」的抠像能容忍暗绿，把幕布去掉。当前人物合成已经成立。下一个差距是人物与场景的光照、比例和动作自然度，以及从单分镜扩到多分镜。
+
+## 第 4 轮：分层明显化
+
+观察：
+
+- 三视图 `three_views/front.png` 里五层只是按深度缩放，正面完全重叠成一张平图，看不到纸片之间的缝，纸雕感不强。
+- side/top 视角只能看到面片切线，层片全是零厚度平面，没有厚度、没有切边，层与层的错落全靠想象。
+- 三视图只有 front/side/top 三个角度，没有能看到分层层次的 3/4 视角，也没有把层拆开看的视图。
+
+改动（只动分层在 Blender 里的呈现，人物、动作、绿幕、场景类识别、深度归层语义都没动）：
+
+- `backend/app/services/layer_exporter.py`：新增每层纸雕呈现参数 `LAYER_THICKNESS_M`（厚度 0.06–0.12m）、`LAYER_YAW_DEG`（同向偏航 2.0–2.5°）、`LAYER_PITCH_DEG`（俯仰 1.0–1.5°）、`LAYER_SHIFT_X_M` / `LAYER_SHIFT_Y_M`（水平错位 ±0.45m 内），并写进 `perspective_offsets` 和 `build_z_offset_table` 的每一行。`zOffset` 仍等于 `-depthMeters`，最近层 `scale` 仍是 1，归层语义不变。
+- `backend/blender/addons/aicss_scene_builder/utils/scene_utils.py`：镜像同一份默认值，新增 `layer_thickness` / `layer_yaw_deg` / `layer_pitch_deg` / `layer_shift` 读取函数——清单里写了按清单，缺失或越界（厚度 0、偏航 60° 之类）回退默认。
+- `backend/blender/addons/aicss_scene_builder/materials/paper_material.py`：新增 `apply_paper_edge_material`——所有层片共用一份暖纸板色「切边」材质，追加成独立材质槽。
+- `backend/blender/addons/aicss_scene_builder/operators/import_layers.py`：层片按清单加错位和偏航/俯仰；缩放烘进网格后新增 `_add_card_thickness`——Solidify 沿背面挤出厚度（offset=-1，正面位置不动），挤出的 rim 面用切边材质，再加小 Bevel 让切边吃光。人物平面不动。
+- `backend/blender/addons/aicss_scene_builder/utils/view_presets.py`（新）：纯 Python 视角预设，`VIEW_NAMES = front / side / top / front_three_quarter / layer_separation / exploded`，附各视角相机摆位和拆解布局 `exploded_x_offsets`（层片沿 X 单调拉开、中间层不动）。
+- `backend/test_outputs/script_e2e/render_three_views.py`：改用 view_presets，六个视角都出图；渲 exploded 前把层片沿 X 拉开、按实际宽度拉远相机，渲完恢复原位。
+- `backend/tests/test_layer_perspective.py`（新）：断言透视表带呈现字段且深度语义不变、插件默认值与后端一致、视角列表含 3/4 视角和拆解视图、拆解布局单调错开、切边材质和加厚接好。
+
+下一步：重跑 `render_three_views.py` 和归档渲染，观察六个视角里切边和错位是否让五层在静止帧里也能分清，成片运镜时层间缝是否可见。

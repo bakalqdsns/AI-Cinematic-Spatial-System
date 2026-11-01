@@ -22,6 +22,50 @@ Z_OFFSETS = {
 # 与 layer_exporter.LAYER_ORDER 一致。
 LAYER_ORDER = ("sky", "background", "midground", "ground", "foreground")
 
+# ── 纸雕呈现默认值 ──────────────────────────────────────────────────────────
+# 与 backend/app/services/layer_exporter.py 的同名表一致。
+# 只影响层片在 Blender 里的外观（厚度、切边、轻微旋转、错位），
+# 不改深度归层语义。清单 zOffsets 行里带了同名字段时以清单为准。
+LAYER_THICKNESS_M = {
+    "sky": 0.12,
+    "background": 0.10,
+    "midground": 0.08,
+    "ground": 0.08,
+    "foreground": 0.06,
+}
+
+LAYER_YAW_DEG = {
+    "sky": 2.5,
+    "background": 2.0,
+    "midground": 2.5,
+    "ground": 2.0,
+    "foreground": 2.5,
+}
+
+LAYER_PITCH_DEG = {
+    "sky": 1.5,
+    "background": 1.0,
+    "midground": 1.5,
+    "ground": 1.0,
+    "foreground": 1.5,
+}
+
+LAYER_SHIFT_X_M = {
+    "sky": 0.45,
+    "background": -0.35,
+    "midground": 0.15,
+    "ground": -0.20,
+    "foreground": 0.30,
+}
+
+LAYER_SHIFT_Y_M = {
+    "sky": 0.25,
+    "background": -0.10,
+    "midground": 0.20,
+    "ground": -0.15,
+    "foreground": 0.0,
+}
+
 # Default scene size in Blender units (1 BU = 1 m in our paper-diorama world)
 DEFAULT_SCENE_WIDTH = 20.0
 DEFAULT_SCENE_HEIGHT = 15.0
@@ -139,3 +183,69 @@ def layer_plane_scale(manifest, layer):
                 return 1.0
             return scale
     return 1.0
+
+
+def _layer_entry(manifest, layer):
+    """清单 zOffsets 里该层的那一行，没有返回 None。"""
+    for entry in manifest.get("zOffsets", []) or []:
+        if entry.get("layer") == layer:
+            return entry
+    return None
+
+
+def _entry_float(entry, key, default, *, minimum=None, maximum=None):
+    """读清单里的浮点字段。缺失、非数、越界都回退到默认值。"""
+    if entry is None:
+        return default
+    try:
+        value = float(entry.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    if value != value:  # NaN
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    if maximum is not None and value > maximum:
+        return default
+    return value
+
+
+def layer_thickness(manifest, layer):
+    """卡片厚度（米）。清单行里没有 thicknessM 时用默认表。"""
+    default = LAYER_THICKNESS_M.get(layer, 0.08)
+    return _entry_float(
+        _layer_entry(manifest, layer), "thicknessM", default,
+        minimum=0.005, maximum=0.5,
+    )
+
+
+def layer_yaw_deg(manifest, layer):
+    """绕竖直轴的轻微偏航（度）。限制在 ±6°，避免相邻层穿插。"""
+    default = LAYER_YAW_DEG.get(layer, 2.0)
+    return _entry_float(
+        _layer_entry(manifest, layer), "yawDeg", default,
+        minimum=-6.0, maximum=6.0,
+    )
+
+
+def layer_pitch_deg(manifest, layer):
+    """绕横轴的轻微俯仰（度）。限制在 ±6°。"""
+    default = LAYER_PITCH_DEG.get(layer, 1.0)
+    return _entry_float(
+        _layer_entry(manifest, layer), "pitchDeg", default,
+        minimum=-6.0, maximum=6.0,
+    )
+
+
+def layer_shift(manifest, layer):
+    """水平/垂直错位（米），返回 (dx, dy)。限制在 ±3m，免得把层片推出取景框。"""
+    entry = _layer_entry(manifest, layer)
+    dx = _entry_float(
+        entry, "shiftXM", LAYER_SHIFT_X_M.get(layer, 0.0),
+        minimum=-3.0, maximum=3.0,
+    )
+    dy = _entry_float(
+        entry, "shiftYM", LAYER_SHIFT_Y_M.get(layer, 0.0),
+        minimum=-3.0, maximum=3.0,
+    )
+    return dx, dy

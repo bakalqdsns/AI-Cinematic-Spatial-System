@@ -7,9 +7,13 @@ zOffsets table (which mirrors `backend.app.services.layer_exporter.
 LAYER_Z_OFFSETS`). Each plane gets the paper material applied via
 ``materials/paper_material.apply_paper_material``.
 
-When the manifest provides a per-layer thickness (``thicknessMm``) the
-plane is converted to a thin Box (extruded by the given thickness in
-metres) so the paper-cut silhouette has visible depth when rendered.
+第 4 轮「分层明显化」：每张层片按清单的纸雕呈现字段
+（thicknessM / yawDeg / pitchDeg / shiftXM / shiftYM，缺省值见
+``utils/scene_utils.py``）做三件事 —— 水平错位、轻微偏航/俯仰、
+Solidify 沿背面挤出厚度。挤出的 rim 面用共享的「切边」材质
+（``materials/paper_material.apply_paper_edge_material``），再加
+小 Bevel 让切边吃光，层与层之间在静止帧里也能看出纸片感。
+深度归层语义不变：正面位置仍由 zOffset 决定。
 
 Outside Blender the operator class is still importable but registers as
 a no-op (see ``__init__.py``).
@@ -143,6 +147,9 @@ class AICSS_OT_import_layers(Operator):
 
             if self.apply_paper_material:
                 apply_paper_material(obj, image_path=png_path)
+            # 纸面材质之后再加厚度和切边：apply_paper_material 会把所有
+            # 材质槽换成纸面材质，切边槽必须在那之后追加。
+            _add_card_thickness(obj, layer, manifest)
 
         if not imported:
             self.report({'ERROR'}, "No layers were imported — check the manifest")
@@ -263,32 +270,62 @@ def _create_plane_for_layer(layer, png_path, manifest, *,
     """Create a plane mesh for a single layer, position it on the Z-axis,
     and link it to ``collection``.
 
+    第 4 轮：在 Z 定位之外按清单的纸雕呈现字段加水平错位和轻微
+    偏航/俯仰（默认见 scene_utils），让卡片不再全部正对相机。
+    最后把缩放烘进网格，Solidify/Bevel 的厚度、宽度才能按米走。
+
     Returns the created object or None on failure.
     """
-    from ..utils.scene_utils import layer_plane_scale, layer_z_offset
+    import math
+
+    from ..utils.scene_utils import (
+        layer_pitch_deg, layer_plane_scale, layer_shift,
+        layer_yaw_deg, layer_z_offset,
+    )
 
     z_offset = layer_z_offset(manifest, layer)
     plane_scale = layer_plane_scale(manifest, layer)
+    shift_x, shift_y = layer_shift(manifest, layer)
+    yaw_deg = layer_yaw_deg(manifest, layer)
+    pitch_deg = layer_pitch_deg(manifest, layer)
 
     # Create the mesh — we use a plain Plane and resize it to the scene
     # dimensions in world units. The PNG is applied as a diffuse texture
     # by ``apply_paper_material``.
     bpy.ops.mesh.primitive_plane_add(
         size=1.0,
-        location=(0.0, 0.0, z_offset),
+        location=(shift_x, shift_y, z_offset),
     )
     obj = bpy.context.active_object
     obj.name = f"AICSS_Layer_{layer}"
-    # plane 默认法线 +Z，相机在 +Z 方向沿 -Z 看，法线 +Z 正好朝相机，无需旋转。
-    obj.rotation_euler = (0.0, 0.0, 0.0)
+    # plane 默认法线 +Z，相机在 +Z 方向沿 -Z 看，法线 +Z 正好朝相机。
+    # 加轻微偏航/俯仰（全部同向、幅度差 ≤0.5°，相邻层不会穿插），
+    # 让卡片边缘在运镜和斜视时露出来。
+    obj.rotation_euler = (
+        math.radians(pitch_deg),
+        math.radians(yaw_deg),
+        0.0,
+    )
     obj.scale = (scene_width * plane_scale, scene_height * plane_scale, 1.0)
+    # 把缩放烘进网格：之后 Solidify 厚度、Bevel 宽度按米计算，
+    # 不会被非均匀缩放拉歪。失败也不致命，只是切角略不均匀。
+    scale_applied = False
+    try:
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        scale_applied = True
+    except Exception:
+        scale_applied = False
     obj["aicss_layer_scale"] = plane_scale
+    obj["aicss_scale_applied"] = scale_applied
 
     # Track metadata on the object so other operators / UI panels can
     # discover which layers exist and where they came from.
     obj["aicss_layer"] = layer
     obj["aicss_layer_z"] = z_offset
     obj["aicss_layer_png"] = png_path
+    obj["aicss_layer_yaw_deg"] = yaw_deg
+    obj["aicss_layer_pitch_deg"] = pitch_deg
+    obj["aicss_layer_shift"] = [shift_x, shift_y]
     obj["aicss_shot_id"] = manifest.get("shotId", "")
 
     # Move the object to the desired collection
@@ -297,3 +334,47 @@ def _create_plane_for_layer(layer, png_path, manifest, *,
     collection.objects.link(obj)
 
     return obj
+
+
+def _add_card_thickness(obj, layer, manifest) -> None:
+    """把零厚度的层片变成纸雕卡片：Solidify 挤出厚度 + 切边材质 + 小切角。
+
+    Solidify 沿背面挤出（offset=-1），正面位置不动，zOffset 语义不变。
+    挤出的 rim 面用共享的「切边」材质（暖纸板色），让卡片边缘一眼能
+    看出是剪下来的纸；再补一个小 Bevel，切边在灯下有一条细高光。
+    任何一步失败都只损失装饰，不影响层片本身。
+
+    必须在 ``apply_paper_material`` 之后调用 —— 它会把所有材质槽换成
+    纸面材质，切边槽要在这之后追加。
+    """
+    from ..materials.paper_material import apply_paper_edge_material
+    from ..utils.scene_utils import layer_thickness
+
+    try:
+        thickness = layer_thickness(manifest, layer)
+    except Exception:
+        thickness = 0.08
+
+    try:
+        edge_slot = apply_paper_edge_material(obj)
+    except Exception:
+        edge_slot = 0
+
+    try:
+        solidify = obj.modifiers.new(name="AICSS_CardThickness", type='SOLIDIFY')
+        solidify.thickness = thickness
+        solidify.offset = -1.0
+        # rim（卡片四周的切边）用切边材质槽；背面仍用纸面材质。
+        solidify.material_offset_rim = edge_slot
+    except Exception:
+        return
+
+    # 缩放已烘进网格时 Bevel 宽度才是均匀的米；否则切角会被拉歪，宁可不加。
+    try:
+        if obj.get("aicss_scale_applied"):
+            bevel = obj.modifiers.new(name="AICSS_CardEdge", type='BEVEL')
+            bevel.width = min(0.02, thickness * 0.3)
+            bevel.segments = 2
+            bevel.limit_method = 'ANGLE'
+    except Exception:
+        pass

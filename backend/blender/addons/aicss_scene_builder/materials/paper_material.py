@@ -35,6 +35,11 @@ except ImportError:
 # the node graph once and have it propagate everywhere.
 PAPER_MATERIAL_NAME = "AICSS_PaperMaterial"
 
+# 「切边」材质：所有层片共用一份。暖纸板色、比正面暗，
+# 让 Solidify 挤出的卡片边缘一眼能看出是剪下来的纸。
+PAPER_EDGE_MATERIAL_NAME = "AICSS_PaperEdge"
+PAPER_EDGE_COLOR = (0.38, 0.31, 0.25)
+
 
 @dataclass
 class PaperMaterialParams:
@@ -239,6 +244,37 @@ def apply_paper_material(obj, *, image_path: Optional[str] = None,
     else:
         for slot_idx in range(len(obj.data.materials)):
             obj.data.materials[slot_idx] = material
+
+
+def apply_paper_edge_material(obj, *, color: Optional[tuple] = None) -> int:
+    """给对象追加一个「切边」材质槽，返回槽位下标（给 Solidify rim 用）。
+
+    所有层片共用同一个 ``AICSS_PaperEdge`` 材质数据块 —— 卡片都是从
+    同一种纸板剪下来的。幂等：对象上已有该材质的槽位时直接返回其下标。
+    注意要在 ``apply_paper_material`` 之后调用，后者会把已有槽位全部
+    换成纸面材质。
+    """
+    if not _HAS_BPY:
+        return 0
+    material = bpy.data.materials.get(PAPER_EDGE_MATERIAL_NAME)
+    if material is None:
+        material = bpy.data.materials.new(PAPER_EDGE_MATERIAL_NAME)
+        material.use_nodes = True
+        bsdf = material.node_tree.nodes.get("Principled BSDF")
+        if bsdf is not None:
+            rgb = color if color is not None else PAPER_EDGE_COLOR
+            bsdf.inputs["Base Color"].default_value = (
+                float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0,
+            )
+            bsdf.inputs["Roughness"].default_value = 0.95
+            spec = bsdf.inputs.get("Specular") or bsdf.inputs.get("Specular IOR Level")
+            if spec is not None:
+                spec.default_value = 0.0
+    for slot_idx in range(len(obj.data.materials)):
+        if obj.data.materials[slot_idx] == material:
+            return slot_idx
+    obj.data.materials.append(material)
+    return len(obj.data.materials) - 1
 
 
 # ── Helpers (private) ──────────────────────────────────────────────────────────

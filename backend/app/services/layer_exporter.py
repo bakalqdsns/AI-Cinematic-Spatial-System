@@ -62,6 +62,59 @@ LAYER_Z_RANGES: dict[str, tuple[float, float]] = {
 # 从远到近。地面在中景和前景之间，人物所在的前景最后画，重叠时盖住地面。
 LAYER_ORDER: tuple[str, ...] = ("sky", "background", "midground", "ground", "foreground")
 
+# ── 纸雕呈现参数 ────────────────────────────────────────────────────────────
+# 只影响 Blender 里层片的外观（厚度、切边、轻微旋转、错位），
+# 不改深度归层语义：zOffset 仍等于 -depthMeters，scale 仍是近大远小。
+# Blender 插件 scene_utils 镜像同一份默认值，清单里没写时用默认。
+#
+# 每层卡片厚度（米）。有厚度才有可见的切边，卡片之间才看得出缝。
+# 厚度沿背面挤出（朝远离相机方向），正面位置不动，最远 0.12m 也小于最小层间距。
+LAYER_THICKNESS_M: dict[str, float] = {
+    "sky": 0.12,
+    "background": 0.10,
+    "midground": 0.08,
+    "ground": 0.08,
+    "foreground": 0.06,
+}
+
+# 每层绕竖直轴（Blender Y 轴）的轻微偏航（度）。卡片不再全部正对相机，
+# 相机一动就露出切边。全部同向、幅度只差 0.5°：相邻层边缘相对摆动
+# 远小于 0.5m 的最小层间距，不会互相穿插。
+LAYER_YAW_DEG: dict[str, float] = {
+    "sky": 2.5,
+    "background": 2.0,
+    "midground": 2.5,
+    "ground": 2.0,
+    "foreground": 2.5,
+}
+
+# 每层绕横轴（Blender X 轴）的轻微俯仰（度）。卡片顶部微微后仰，
+# 像插在底座上的纸雕，侧上方看时层与层之间露出阶梯缝。
+LAYER_PITCH_DEG: dict[str, float] = {
+    "sky": 1.5,
+    "background": 1.0,
+    "midground": 1.5,
+    "ground": 1.0,
+    "foreground": 1.5,
+}
+
+# 每层水平/垂直错位（米）。相邻层错开一点，静止帧里剪影边缘也对不齐，
+# 看得出是几张分开的卡片。最大 0.45m，远小于面片相对取景框的留白。
+LAYER_SHIFT_X_M: dict[str, float] = {
+    "sky": 0.45,
+    "background": -0.35,
+    "midground": 0.15,
+    "ground": -0.20,
+    "foreground": 0.30,
+}
+LAYER_SHIFT_Y_M: dict[str, float] = {
+    "sky": 0.25,
+    "background": -0.10,
+    "midground": 0.20,
+    "ground": -0.15,
+    "foreground": 0.0,
+}
+
 # 剩余像素进天空时，行号要落在上半幅。
 SKY_UPPER_FRACTION = 0.5
 
@@ -144,6 +197,8 @@ def perspective_offsets(
     测量到的中位数如果把近层放到了远层后面，就把远层再推远，不交换层名。
     ``scale`` 按到相机的距离放大远处的面片：最近一层是 1，越远越大，
     这样在默认相机位置看，远层不会被透视缩成一个点。
+    每行另外带纸雕呈现字段（thicknessM/yawDeg/pitchDeg/shiftXM/shiftYM），
+    只给 Blender 插件摆层片用，不参与深度归层。
     """
     order = layers_far_to_near()
     measured: dict[str, float] = {}
@@ -171,6 +226,11 @@ def perspective_offsets(
             "zMin": round(depth, 4),
             "zMax": round(depth, 4),
             "scale": round(scale, 4),
+            "thicknessM": LAYER_THICKNESS_M[name],
+            "yawDeg": LAYER_YAW_DEG[name],
+            "pitchDeg": LAYER_PITCH_DEG[name],
+            "shiftXM": LAYER_SHIFT_X_M[name],
+            "shiftYM": LAYER_SHIFT_Y_M[name],
         })
     return rows
 
@@ -632,5 +692,10 @@ def build_z_offset_table() -> list[dict]:
             "zOffset": LAYER_Z_OFFSETS[layer],
             "zMin": float(z_min),
             "zMax": float(z_max) if z_max != float("inf") else 9999.0,
+            "thicknessM": LAYER_THICKNESS_M[layer],
+            "yawDeg": LAYER_YAW_DEG[layer],
+            "pitchDeg": LAYER_PITCH_DEG[layer],
+            "shiftXM": LAYER_SHIFT_X_M[layer],
+            "shiftYM": LAYER_SHIFT_Y_M[layer],
         })
     return table
