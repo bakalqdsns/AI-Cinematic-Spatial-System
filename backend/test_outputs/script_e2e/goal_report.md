@@ -43,3 +43,13 @@
 - 测试：`backend/test_greenscreen.py` 更新绿幕断言（cyclorama 现在必须出现），新增 `backend/tests/test_greenscreen_prompt.py` 断言 no shadows、no gradient、floor is the same green。
 
 下一步：用收紧后的提示词重出一条动作视频，观察背景是否变成平整的 #00FF00、地板绿条是否消失，再重新抽帧抠像看人物边缘。
+
+## 第 3 轮：动作视频验证
+
+观察：
+
+- 收紧后的动作视频 `minimax_2977bfa2.mp4` 背景仍是暗绿带深绿地板（`_evidence_video3_frame1.png`、`_evidence_video3_mid.png`），提示词收紧没有让 MiniMax 把绿幕画成平整亮绿。
+- 但抠像反而更好：`frame_0001.png` 透明像素占 79%，`transparent_ratio: 0.79`，比之前 0% 和 30.5% 都好。绿幕背景基本被去掉。
+- 成片 `render_mid.png` 里人物已经站在操场上，没有再带一块不透明卡片。
+
+结论：MiniMax 本身画不出平整亮绿，但「边缘连通幕布采样」的抠像能容忍暗绿，把幕布去掉。当前人物合成已经成立。下一个差距是人物与场景的光照、比例和动作自然度，以及从单分镜扩到多分镜。
