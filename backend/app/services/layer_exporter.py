@@ -126,6 +126,70 @@ def layers_near_to_far() -> list[str]:
     return list(reversed(layers_far_to_near()))
 
 
+# 近处至少离相机 1 米。层与层之间至少隔开这么多米，避免两张卡片贴在同一深度。
+_MIN_LAYER_DEPTH_M = 1.0
+_MIN_LAYER_GAP_M = 0.5
+# 最远层的世界尺寸不要小于最近层的这个比例，否则天空会缩成一个点。
+_MIN_PERSPECTIVE_SCALE = 0.2
+
+
+def perspective_offsets(
+    depth_meters: Optional[np.ndarray],
+    masks: dict[str, np.ndarray],
+) -> list[dict]:
+    """按 Depth Anything 的米制深度摆层，并给出近大远小的平面缩放。
+
+    深度数值越大越远。平面 Z 取负的深度：相机在 +Z、朝 -Z 看，越负越远。
+    顺序固定为天空、背景、中景、地面、前景，和渲染从远到近一致。
+    测量到的中位数如果把近层放到了远层后面，就把远层再推远，不交换层名。
+    ``scale`` 以最近一层为 1，越远越小，透视相机下近处更大。
+    """
+    order = layers_far_to_near()
+    measured: dict[str, float] = {}
+    if depth_meters is not None:
+        for name in order:
+            mask = masks.get(name)
+            if mask is None or mask.shape != depth_meters.shape or not np.any(mask):
+                continue
+            values = depth_meters[mask]
+            values = values[np.isfinite(values) & (values > 0)]
+            if values.size:
+                measured[name] = float(np.median(values))
+    depths = _align_layer_depths(measured, order)
+    nearest = min(depths.values())
+    rows = []
+    for name in order:
+        depth = depths[name]
+        scale = nearest / depth if depth > 0 else 1.0
+        rows.append({
+            "layer": name,
+            "depthMeters": round(depth, 4),
+            "zOffset": round(-depth, 4),
+            "zMin": round(depth, 4),
+            "zMax": round(depth, 4),
+            "scale": round(max(_MIN_PERSPECTIVE_SCALE, min(1.0, scale)), 4),
+        })
+    return rows
+
+
+def _align_layer_depths(measured: dict[str, float], order: list[str]) -> dict[str, float]:
+    """远到近的深度必须单调变小。缺测的层用默认 Z 的绝对值。"""
+    canonical = [abs(float(LAYER_Z_OFFSETS[name])) for name in order]
+    if not measured:
+        values = canonical
+    else:
+        values = [
+            measured[name] if name in measured else canonical[index]
+            for index, name in enumerate(order)
+        ]
+    values = [max(_MIN_LAYER_DEPTH_M, float(value)) for value in values]
+    for index in range(len(values) - 2, -1, -1):
+        floor = values[index + 1] + _MIN_LAYER_GAP_M
+        if values[index] < floor:
+            values[index] = floor
+    return {name: values[index] for index, name in enumerate(order)}
+
+
 def _object_depth(obj: object) -> Optional[float]:
     """有效深度均值。缺测或非正数不当成一层的深度中心。"""
     raw = getattr(obj, "depth_mean", None)

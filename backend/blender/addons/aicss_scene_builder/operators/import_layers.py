@@ -265,9 +265,10 @@ def _create_plane_for_layer(layer, png_path, manifest, *,
 
     Returns the created object or None on failure.
     """
-    from ..utils.scene_utils import layer_z_offset
+    from ..utils.scene_utils import layer_plane_scale, layer_z_offset
 
     z_offset = layer_z_offset(manifest, layer)
+    plane_scale = layer_plane_scale(manifest, layer)
 
     # Create the mesh — we use a plain Plane and resize it to the scene
     # dimensions in world units. The PNG is applied as a diffuse texture
@@ -280,7 +281,8 @@ def _create_plane_for_layer(layer, png_path, manifest, *,
     obj.name = f"AICSS_Layer_{layer}"
     # plane 默认法线 +Z，相机在 +Z 方向沿 -Z 看，法线 +Z 正好朝相机，无需旋转。
     obj.rotation_euler = (0.0, 0.0, 0.0)
-    obj.scale = (scene_width, scene_height, 1.0)
+    obj.scale = (scene_width * plane_scale, scene_height * plane_scale, 1.0)
+    obj["aicss_layer_scale"] = plane_scale
 
     # Track metadata on the object so other operators / UI panels can
     # discover which layers exist and where they came from.

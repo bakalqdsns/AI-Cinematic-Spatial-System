@@ -171,7 +171,7 @@ class DepthModel:
             image: RGB PIL Image or numpy array (HxWx3)
 
         Returns:
-            depth: numpy array HxW, float32, normalized 0-1 (1 = far, 0 = close)
+            depth: numpy array HxW, float32, normalized 0-1 (0 = close, 1 = far)
         """
         if self._model is None:
             raise RuntimeError("Model not loaded. Call load() first.")
@@ -208,9 +208,14 @@ class DepthModel:
         d_min, d_max = depth_np.min(), depth_np.max()
         if d_max - d_min > 1e-6:
             depth_np = (depth_np - d_min) / (d_max - d_min)
+        else:
+            depth_np = np.zeros_like(depth_np)
 
-        return depth_np.astype(np.float32)
+        # 网络原始值越大越近（视差）。翻成 0=近、1=远，后面的米制、分层和渲染都按这个方向。
+        from app.utils.image_utils import disparity_to_depth_norm
+        return disparity_to_depth_norm(depth_np)
 
     def predict_meters(self, image: Union[Image.Image, np.ndarray], scale: float = 50.0) -> np.ndarray:
-        """Return depth in approximate meters (relative scale)."""
-        return self.predict(image) * scale
+        """米制深度。0 附近是近处，越大越远，最远约 ``scale`` 米。"""
+        from app.utils.image_utils import depth_to_meters
+        return depth_to_meters(self.predict(image), scale=scale)

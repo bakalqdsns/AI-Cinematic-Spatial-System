@@ -78,9 +78,14 @@ def numpy_to_pil_depth(depth: np.ndarray, cmap: str = "gray") -> Image.Image:
         return Image.fromarray(depth_color[:, :, ::-1])
 
 
+def disparity_to_depth_norm(disparity_norm: np.ndarray) -> np.ndarray:
+    """Depth Anything 的相对输出越大越近。翻成 0=近、1=远，和分层、遮挡一致。"""
+    return (1.0 - np.asarray(disparity_norm, dtype=np.float32)).astype(np.float32)
+
+
 def depth_to_meters(depth_norm: np.ndarray, scale: float = 50.0) -> np.ndarray:
-    """Scale normalized depth to approximate meters."""
-    return depth_norm * scale
+    """把 0=近、1=远 的归一化深度乘成米。数值越大越远。"""
+    return np.asarray(depth_norm, dtype=np.float32) * float(scale)
 
 
 def create_layer_mask(

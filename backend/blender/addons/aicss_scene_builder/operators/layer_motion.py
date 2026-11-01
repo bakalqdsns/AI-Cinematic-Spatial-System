@@ -49,17 +49,33 @@ _Z_OFFSETS = {
 }
 
 
-def _parallax_factor(layer_z: float) -> float:
-    """前景 → 1.0，天空 → 0.0 的归一化因子。
+def _parallax_factor(layer_z: float, near_z: float | None = None, far_z: float | None = None) -> float:
+    """越靠近相机，视差越大。近处 → 1，最远处 → 0。
 
-    foreground (z=-2) → 1.0，sky (z=-20) → 0.0，中间线性插值。
+    相机在 +Z、朝 -Z 看，所以 Z 越大（没那么负）越近。
     """
-    fg_z = _Z_OFFSETS["foreground"]
-    sky_z = _Z_OFFSETS["sky"]
-    if fg_z == sky_z:
+    if near_z is None:
+        near_z = _Z_OFFSETS["foreground"]
+    if far_z is None:
+        far_z = _Z_OFFSETS["sky"]
+    if near_z == far_z:
         return 0.0
-    f = (layer_z - sky_z) / (fg_z - sky_z)
-    return max(0.0, min(1.0, f))
+    factor = (layer_z - far_z) / (near_z - far_z)
+    return max(0.0, min(1.0, factor))
+
+
+def _layer_z_map(manifest) -> dict:
+    """优先用清单里按深度写下的 Z，没有再用默认层距。"""
+    found = {}
+    for entry in manifest.get("zOffsets") or []:
+        name = entry.get("layer")
+        if not name:
+            continue
+        try:
+            found[str(name)] = float(entry.get("zOffset"))
+        except (TypeError, ValueError):
+            continue
+    return found or dict(_Z_OFFSETS)
 
 
 def _find_layer_plane(layer: str, shot_id: str):
@@ -118,8 +134,11 @@ def _derive_layer_motion_from_camera_path(camera_path, manifest, intensity: floa
         base_x = base_y = 0.0
 
     out: dict = {}
-    for layer, z in _Z_OFFSETS.items():
-        factor = _parallax_factor(z)
+    z_map = _layer_z_map(manifest)
+    near_z = max(z_map.values())
+    far_z = min(z_map.values())
+    for layer, z in z_map.items():
+        factor = _parallax_factor(z, near_z, far_z)
         kfs = []
         for kf in camera_path:
             try:

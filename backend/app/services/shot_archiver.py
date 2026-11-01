@@ -379,7 +379,7 @@ def _find_scene_wide(project_dir: Path, scene_id: Optional[str]) -> Optional[Pat
     return hits[0]
 
 
-_OCCLUSION_FILL_MARK = "scene_table_v1"
+_OCCLUSION_FILL_MARK = "scene_table_perspective_v1"
 
 
 def _layers_already_exported(layers_dir: Path, source: Path) -> bool:
@@ -485,7 +485,27 @@ def ensure_depth_layers(project_dir: Path, scene_id: Optional[str] = None) -> li
         _log.warning("[archive] export_layers failed: %s", exc)
         return []
 
+    try:
+        from app.services.layer_exporter import build_scene_layer_masks, perspective_offsets
+        height, width = image.size[1], image.size[0]
+        masks = build_scene_layer_masks(
+            height=height,
+            width=width,
+            depth_meters=depth_meters,
+            object_assets=object_assets or [],
+            scene_class=scene_name,
+        )
+        perspective = perspective_offsets(depth_meters, masks)
+    except Exception as exc:
+        _log.warning("[archive] 透视深度表失败，渲染改用默认层距: %s", exc)
+        perspective = []
+
     layers_dir.mkdir(parents=True, exist_ok=True)
+    if perspective:
+        (layers_dir / "_perspective.json").write_text(
+            json.dumps({"layers": perspective}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     written: list[str] = []
     for name in _LAYER_NAMES:
         img = layer_imgs.get(name)
@@ -497,7 +517,11 @@ def ensure_depth_layers(project_dir: Path, scene_id: Optional[str] = None) -> li
         _log.info("[archive] wrote depth layer %s", dest)
     (layers_dir / "_fill.json").write_text(
         json.dumps(
-            {"method": _OCCLUSION_FILL_MARK, "sceneClass": scene_name},
+            {
+                "method": _OCCLUSION_FILL_MARK,
+                "sceneClass": scene_name,
+                "perspective": perspective,
+            },
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -522,6 +546,40 @@ def _camera_path_for_shot(project_dir: Path, shot_id: str) -> tuple[list[dict], 
         _log.warning("[archive] camera path failed: %s", exc)
         return [], duration
     return path, duration
+
+
+def _load_perspective_offsets(project_dir: Path) -> list[dict]:
+    """读取分层时写下的深度、Z 和近大远小缩放。没有文件时返回空列表。"""
+    path = project_dir / "layers" / "_perspective.json"
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _log.warning("[archive] 透视表读不了: %s", exc)
+        return []
+    rows = []
+    for row in payload.get("layers") or []:
+        name = str(row.get("layer") or "")
+        if name not in _LAYER_NAMES:
+            continue
+        rows.append(row)
+    return rows
+
+
+def _place_characters_in_front(characters: list[dict], z_offsets: list[dict]) -> list[dict]:
+    """人物平面放在前景层靠相机的一侧，近处比远处的场景层更大。"""
+    foreground = next((row for row in z_offsets if row.get("layer") == "foreground"), None)
+    if foreground is None:
+        return characters
+    z = float(foreground.get("zOffset", -2.0)) + 0.4
+    placed = []
+    for character in characters:
+        item = dict(character)
+        if not item.get("position"):
+            item["position"] = [0.0, 0.0, z]
+        placed.append(item)
+    return placed
 
 
 def confirmed_layers_dir(project_dir: Path, shot_id: str) -> Path:
@@ -719,6 +777,12 @@ def build_shot_archive(
             pos = first.get("position") or [0.0, 0.0, cam_distance]
             cam_distance = float(pos[2]) if len(pos) > 2 else cam_distance
 
+        if confirmed_z:
+            z_offsets = confirmed_z
+        else:
+            z_offsets = _load_perspective_offsets(project_dir) or [
+                z for z in _DEFAULT_Z_OFFSETS if z["layer"] in layer_map or not layer_map
+            ]
         manifest: dict[str, Any] = {
             "shotId": shot_id,
             "sceneId": scene_id or shot_id,
@@ -727,7 +791,7 @@ def build_shot_archive(
             "height": height,
             "duration": shot_duration,
             "layers": layer_map,
-            "zOffsets": confirmed_z if confirmed_z else [z for z in _DEFAULT_Z_OFFSETS if z["layer"] in layer_map or not layer_map],
+            "zOffsets": z_offsets,
             "camera": {
                 "shotType": "wide",
                 "fov": cam_fov,
@@ -736,7 +800,7 @@ def build_shot_archive(
                 "keyframesPath": cam_rel,
             },
             "cameraPath": list(camera_path) if camera_path else [],
-            "characters": characters_field,
+            "characters": _place_characters_in_front(characters_field, z_offsets),
             "lighting": lighting_field,
             "lightingPreset": lighting_preset_name,
             "meshes": mesh_files,

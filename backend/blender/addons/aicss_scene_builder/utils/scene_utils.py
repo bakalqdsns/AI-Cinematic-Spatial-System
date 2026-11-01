@@ -7,10 +7,9 @@ tested outside Blender. The Z-offset values mirror
 plugin places planes at the exact same Z the Three.js viewer uses.
 """
 
-# Canonical Z offsets (negative = closer to camera in Blender's
-# right-handed coordinate system). Mirrors the backend's LAYER_Z_OFFSETS
-# so a scene assembled in Three.js lines up pixel-for-pixel when re-
-# rendered in Blender.
+# 默认层距。相机在 +Z、朝 -Z 看，Z 越负越远。
+# 有 Depth Anything 结果时，manifest.zOffsets 用每层深度的负值，并带 scale：
+# 最近一层 scale=1，越远越小。
 Z_OFFSETS = {
     "sky": -20.0,
     "background": -12.0,
@@ -126,3 +125,17 @@ def layer_z_offset(manifest, layer):
         if entry.get("layer") == layer:
             return float(entry.get("zOffset", Z_OFFSETS.get(layer, -8.0)))
     return float(Z_OFFSETS.get(layer, -8.0))
+
+
+def layer_plane_scale(manifest, layer):
+    """近大远小。清单里没有 scale 时，各层都用 1。"""
+    for entry in manifest.get("zOffsets", []):
+        if entry.get("layer") == layer:
+            try:
+                scale = float(entry.get("scale", 1.0))
+            except (TypeError, ValueError):
+                return 1.0
+            if scale <= 0.0:
+                return 1.0
+            return scale
+    return 1.0

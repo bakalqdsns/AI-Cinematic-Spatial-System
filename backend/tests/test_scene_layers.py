@@ -339,7 +339,7 @@ def test_没有检测结果时仍写出五张全透明层(tmp_path, monkeypatch)
         透明度 = np.array(Image.open(路径).convert("RGBA"))[..., 3]
         assert int(透明度.sum()) == 0
     标记 = json.loads((项目 / "layers" / "_fill.json").read_text(encoding="utf-8"))
-    assert 标记["method"] == "scene_table_v1"
+    assert 标记["method"] == "scene_table_perspective_v1"
     assert 标记["sceneClass"] == "unknown"
 
 
@@ -377,3 +377,55 @@ def test_地面Z位于前景和中景之间():
     assert 插件.Z_OFFSETS["foreground"] == -2.0
     assert 视差._Z_OFFSETS["ground"] == -4.0
     assert 视差._Z_OFFSETS["midground"] == -8.0
+
+
+def test_视差输出越大越近时翻成近小远大():
+    from app.utils.image_utils import depth_to_meters, disparity_to_depth_norm
+
+    视差图 = np.array([[1.0, 0.0], [0.8, 0.2]], dtype=np.float32)
+    深度 = disparity_to_depth_norm(视差图)
+    assert float(深度[0, 0]) == 0.0
+    assert float(深度[0, 1]) == 1.0
+    米 = depth_to_meters(深度, scale=50.0)
+    assert float(米[0, 1]) > float(米[0, 0])
+
+
+def test_层深度和缩放近大远小且顺序一致():
+    from app.services.layer_exporter import perspective_offsets
+
+    高, 宽 = 8, 8
+    深度 = np.full((高, 宽), 3.0, dtype=np.float32)
+    天空 = np.zeros((高, 宽), dtype=bool)
+    天空[0:2, :] = True
+    深度[天空] = 40.0
+    前景 = np.zeros((高, 宽), dtype=bool)
+    前景[6:8, :] = True
+    深度[前景] = 2.0
+    遮罩 = {
+        "sky": 天空,
+        "background": np.zeros((高, 宽), dtype=bool),
+        "midground": np.zeros((高, 宽), dtype=bool),
+        "ground": np.zeros((高, 宽), dtype=bool),
+        "foreground": 前景,
+    }
+    表 = perspective_offsets(深度, 遮罩)
+    按名 = {项["layer"]: 项 for 项 in 表}
+    assert 按名["sky"]["depthMeters"] > 按名["foreground"]["depthMeters"]
+    assert 按名["sky"]["zOffset"] < 按名["background"]["zOffset"] < 按名["foreground"]["zOffset"]
+    assert 按名["foreground"]["scale"] == 1.0
+    assert 按名["sky"]["scale"] < 按名["foreground"]["scale"]
+    assert 按名["foreground"]["zOffset"] == -按名["foreground"]["depthMeters"]
+
+
+def test_清单里的缩放会传给层平面():
+    插件 = _加载模块(
+        _REPO / "backend" / "blender" / "addons" / "aicss_scene_builder" / "utils" / "scene_utils.py",
+        "aicss_scene_utils_scale_for_test",
+    )
+    清单 = {"zOffsets": [
+        {"layer": "sky", "zOffset": -40.0, "scale": 0.2},
+        {"layer": "foreground", "zOffset": -2.0, "scale": 1.0},
+    ]}
+    assert 插件.layer_plane_scale(清单, "sky") == 0.2
+    assert 插件.layer_z_offset(清单, "foreground") == -2.0
+    assert 插件.layer_plane_scale({}, "sky") == 1.0
