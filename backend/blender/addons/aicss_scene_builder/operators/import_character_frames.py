@@ -34,21 +34,27 @@ except ImportError:
 
 
 def _list_frames(frames_dir: str) -> list:
-    """返回 framesDir 下排序后的 frame_*.png 绝对路径列表。"""
+    """返回 framesDir 下按文件名排序的 png 绝对路径。
+
+    接受 ``seg_`` 与 ``frame_`` 前缀。两种都在时只用抠像 ``seg_``。
+    都没有时退回目录里其余 png（透明仍靠图像 Alpha，不在这里做色键）。
+    """
     if not frames_dir or not os.path.isdir(frames_dir):
         return []
     try:
-        frames = sorted(
+        names = sorted(
             f for f in os.listdir(frames_dir)
             if f.lower().endswith(".png")
         )
     except Exception:
         return []
-    # 优先 frame_*.png，否则任何 png
-    frame_named = [f for f in frames if f.lower().startswith("frame_")]
-    if frame_named:
-        frames = frame_named
-    return [os.path.join(frames_dir, f) for f in frames]
+    seg_named = [f for f in names if f.lower().startswith("seg_")]
+    if seg_named:
+        chosen = seg_named
+    else:
+        frame_named = [f for f in names if f.lower().startswith("frame_")]
+        chosen = frame_named or names
+    return [os.path.join(frames_dir, f) for f in chosen]
 
 
 def _load_image_sequence(first_frame: str):

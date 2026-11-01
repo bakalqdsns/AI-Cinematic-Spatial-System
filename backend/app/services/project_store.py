@@ -110,16 +110,19 @@ def slugify(name: str, *, fallback: str = "unnamed", max_len: int = 80) -> str:
     return s
 
 
-def slugify_action(action: str | None, *, default: str = "default") -> str:
+def slugify_action(action: str | None, *, default: str = "default", max_len: int = 80) -> str:
     """
     动作名（"three_view"、"walking"、"眨眼"）的 slug：
-    全部小写、仅保留 [a-z0-9_\-] 与 CJK，便于作为目录名。
+    全部小写、仅保留 [a-z0-9_\\-] 与 CJK，便于作为目录名。
+    超长分镜动作句截到 max_len，避免 Windows 路径超过 260 字符。
     """
     if not action:
         return default
     s = _INVALID_PATH_CHARS.sub("_", action.strip())
     s = _re_slug.sub(r"\s+", "_", s)
     s = _COLLAPSE_RE.sub("_", s).strip("._-")
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("._-")
     return s or default
 
 

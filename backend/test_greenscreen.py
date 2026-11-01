@@ -29,6 +29,49 @@ def test_apply_greenscreen_prompt_passthrough_when_false():
     assert _apply_greenscreen_prompt(base, False) == base
 
 
+_FIXED_GREENSCREEN_SUFFIX = (
+    ", solid bright green (#00FF00) chroma key background, "
+    "no other objects in background, flat lighting"
+)
+
+
+def test_comfy_greenscreen_prompt_reuses_fixed_suffix_and_keeps_clothes():
+    from app.services.video_adapter import _comfy_greenscreen_prompt
+
+    out = _comfy_greenscreen_prompt("girl walks forward")
+    assert "girl walks forward" in out
+    assert _FIXED_GREENSCREEN_SUFFIX in out
+    assert "Do not recolor the clothes green." in out
+    assert "face" in out.lower()
+    assert "hairstyle" in out.lower()
+    assert "chroma-key screen" not in out.lower()
+    assert "cyclorama" not in out.lower()
+
+
+def test_comfy_character_prompt_locks_green_and_keeps_clothes():
+    from app.services.character_generator import _comfy_character_prompt
+
+    out = _comfy_character_prompt("a girl in a blue dress")
+    assert "a girl in a blue dress" in out
+    assert _FIXED_GREENSCREEN_SUFFIX in out
+    assert "Do not recolor the clothes green." in out
+    assert "face" in out.lower()
+    assert "hairstyle" in out.lower()
+    assert "cyclorama" not in out.lower()
+
+
+def test_scene_generator_does_not_add_greenscreen():
+    import inspect
+
+    from app.services import scene_generator
+
+    source = inspect.getsource(scene_generator)
+    assert "#00FF00" not in source
+    assert "_apply_greenscreen_prompt" not in source
+    assert "_comfy_character_prompt" not in source
+    assert "_comfy_greenscreen_prompt" not in source
+
+
 def test_provider_generate_accepts_greenscreen_kwarg():
     from app.services.video_adapter import (
         DashScopeFilmProvider,

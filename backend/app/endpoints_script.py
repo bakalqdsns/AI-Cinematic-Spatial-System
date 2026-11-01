@@ -18,7 +18,9 @@ Reference: docs/API_PROTOCOL_v2.md Section 8 (Script & Motion workflow)
 """
 import base64
 import logging
+import shutil
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -75,7 +77,8 @@ from app.services.motion_extractor import (
     segment_frames_sequence,
     serialize_motion_sequence,
 )
-from app.services.project_store import project_store
+from app.services.path_safety import resolve_contained, safe_path_token
+from app.services.project_store import WORKSPACE_DIR, project_store, slugify, slugify_action
 
 logger = logging.getLogger("aicss")
 
@@ -96,6 +99,64 @@ def _strip_data_url(b64: str) -> str:
     if "," in b64 and b64.startswith("data:"):
         return b64.split(",", 1)[1]
     return b64
+
+
+def _select_motion_pngs(motion: MotionSequence) -> list[Path]:
+    """优先用分割结果，没有再退回原始抽帧。
+
+    segmented_dir 里先找 seg_*.png，没有则用该目录下任意 *.png。
+    分割目录为空或不存在时，改用 frame_dir 的 frame_*.png。
+    """
+    segmented_dir = getattr(motion, "segmented_dir", None)
+    if segmented_dir:
+        root = Path(segmented_dir)
+        if root.is_dir():
+            segmented = sorted(p for p in root.glob("seg_*.png") if p.is_file())
+            if not segmented:
+                segmented = sorted(p for p in root.glob("*.png") if p.is_file())
+            if segmented:
+                return segmented
+
+    frame_dir = getattr(motion, "frame_dir", None)
+    if frame_dir:
+        root = Path(frame_dir)
+        if root.is_dir():
+            return sorted(p for p in root.glob("frame_*.png") if p.is_file())
+    return []
+
+
+def _copy_motion_frames_into_project(
+    project_id: str,
+    character_name: str,
+    action_name: str,
+    motion: MotionSequence,
+) -> None:
+    """把人物帧拷到 projects/<id>/motions/<角色>/<动作>/frame_0001.png。
+
+    角色名、动作名先 slug，再经 safe_path_token / resolve_contained，
+    避免用用户原文拼路径。调用方负责吞掉异常。
+    """
+    sources = _select_motion_pngs(motion)
+    if not sources:
+        logger.info("[script] motion 没有可归档的帧，跳过拷贝")
+        return
+
+    if character_name:
+        char_slug = slugify(character_name, fallback="unnamed_character")
+    else:
+        char_slug = "_misc"
+    char_token = safe_path_token(char_slug, kind="角色名")
+    action_token = safe_path_token(slugify_action(action_name), kind="动作名")
+    dest = resolve_contained(
+        WORKSPACE_DIR, project_id, "motions", char_token, action_token,
+    )
+    dest.mkdir(parents=True, exist_ok=True)
+    for stale in dest.glob("frame_*.png"):
+        if stale.is_file():
+            stale.unlink()
+    for index, src in enumerate(sources, start=1):
+        shutil.copy2(src, dest / f"frame_{index:04d}.png")
+    logger.info("[script] copied %d motion frames to %s", len(sources), dest)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -865,8 +926,9 @@ async def api_generate_motion(request: GenerateMotionRequest):
       2. Extract PNG frames via ffmpeg
       3. Segment person from frames via SAM2 (if available)
 
-    Persists the resulting MotionSequence JSON to <project>/motions/<shot_id>.json
-    when a project_id is provided.
+    带 project_id 时，把人物帧拷到
+    motions/<角色>/<动作>/frame_0001.png，并写入同目录的动作 JSON。
+    拷贝或落盘失败只记日志，不影响已经生成的视频结果。
     """
     from app.services.motion_extractor import generate_motion_sequence
     from app.services.settings_manager import get as get_setting
@@ -890,7 +952,6 @@ async def api_generate_motion(request: GenerateMotionRequest):
     # Collect segmented frame paths
     segmented_frames = []
     if motion.segmented_dir:
-        from pathlib import Path
         for f in sorted(Path(motion.segmented_dir).glob("*.png")):
             segmented_frames.append({
                 "frame_index": len(segmented_frames),
@@ -900,14 +961,22 @@ async def api_generate_motion(request: GenerateMotionRequest):
 
     project_id = request.project_id
     if project_id:
+        character_name = request.character_name or request.character_id
+        action_name = request.action_prompt or "motion"
+        try:
+            _copy_motion_frames_into_project(
+                project_id, character_name, action_name, motion,
+            )
+        except Exception as e:
+            logger.warning(f"[script] Failed to copy motion frames: {e}")
         try:
             await project_store.save_motion_sequence(
                 project_id,
                 request.character_id,
                 request.shot_id,
                 serialize_motion_sequence(motion),
-                character_name=request.character_name or request.character_id,
-                action_name=request.action_prompt or "motion",
+                character_name=character_name,
+                action_name=action_name,
                 frame_index=0,
             )
         except Exception as e:

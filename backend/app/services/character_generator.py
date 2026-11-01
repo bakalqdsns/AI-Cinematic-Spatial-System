@@ -317,11 +317,17 @@ async def generate_character_variation(
 # ── Internal image generation helpers ────────────────────────────────────────────
 
 def _comfy_character_prompt(prompt: str) -> str:
-    """人物素材要给后面的绿幕视频当参考，背景必须是纯绿，而不是棚拍灰底。"""
+    """人物静帧背景只有平整的 #00FF00，衣服颜色保持提示词原意。
+
+    后缀与 :func:`app.services.video_adapter._apply_greenscreen_prompt` 相同，
+    并写明不要改脸、发型，也不要把衣服改成绿色。
+    """
+    from app.services.video_adapter import _apply_greenscreen_prompt
+
+    locked = _apply_greenscreen_prompt((prompt or "").strip(), True)
     return (
-        f"{prompt}, standing in front of a flat chroma key cyclorama, "
-        "the entire background is uniform pure green #00FF00, "
-        "no gray studio, no floor shadow, no gradient, no room"
+        f"{locked}. Keep the face, hairstyle, and clothing colors from the "
+        "description and any reference image. Do not recolor the clothes green."
     )
 
 

@@ -539,16 +539,15 @@ class SVDProvider(VideoProvider):
 
 
 def _comfy_greenscreen_prompt(prompt: str) -> str:
-    """MiniMax 参考生视频会保住参考图背景，所以绿幕要写成替换背景。"""
-    action = (prompt or "").strip()
+    """ComfyUI 人物视频固定绿幕，供抽帧抠人，不是成片。
+
+    必须带上 :func:`_apply_greenscreen_prompt` 的固定后缀，幕布才是平整的
+    ``#00FF00``。同时写明保留参考图里的脸、发型和衣服颜色，避免模型把衣服染绿。
+    """
+    locked = _apply_greenscreen_prompt((prompt or "").strip(), True)
     return (
-        "The person in <Picture 1> is the only subject. "
-        "The background in <Picture 1> is a chroma-key screen; keep every pixel "
-        "behind the person as flat pure green #00FF00. "
-        "Do not turn the background black, gray, or into a room. "
-        "No shadows, no gradient, no sky, no props. "
-        "Keep the person's face, hair, body, and costume from <Picture 1>. "
-        f"Action: {action}"
+        f"{locked}. Keep the face, hairstyle, and clothing colors from the "
+        "reference image. Do not recolor the clothes green."
     )
 
 

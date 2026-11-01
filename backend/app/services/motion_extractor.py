@@ -28,6 +28,7 @@ from typing import Optional
 import numpy as np
 
 from app.config import CACHE_DIR
+from app.services.project_store import slugify
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +286,7 @@ async def generate_action_video(
         greenscreen: When True, prepend a chroma-key background directive to
             the provider prompt so the generated video features a flat green
             backdrop. The matching post-processing pass happens in
-            :func:`segment_person_from_frame`.
+            :func:`generate_motion_sequence` (chroma key, then SAM2 when loaded).
 
     Returns:
         Local path to the generated video file, or None on failure.
@@ -400,6 +401,80 @@ def extract_frames_from_video(
 
 # ── SAM2 Segmentation ───────────────────────────────────────────────────────────
 
+def _border_band_thickness(height: int, width: int) -> int:
+    """Width of the frame-edge strip used to read the screen color."""
+    return max(2, min(height, width) // 32)
+
+
+def _bgr_distance(pixels: np.ndarray, key_color: tuple[int, int, int]) -> np.ndarray:
+    """Euclidean BGR distance from ``pixels`` (..., 3) to ``key_color``."""
+    delta = pixels.astype(np.int32) - np.asarray(key_color, dtype=np.int32)
+    return np.sqrt(np.sum(delta * delta, axis=-1))
+
+
+def _looks_like_greenscreen_bgr(color: tuple[int, int, int] | np.ndarray) -> bool:
+    """True when a sampled border color is a green plate, including off-pure plates.
+
+    Generated footage often drifts off ``#00FF00`` toward a flat light green
+    (the paper-cut plate is about BGR 134, 179, 116). That still has a green
+    hue and a clearly leading green channel. Gray, skin, red, and yellow do not.
+    """
+    b = int(round(float(color[0])))
+    g = int(round(float(color[1])))
+    r = int(round(float(color[2])))
+    if g < 100 or g - max(r, b) < 24:
+        return False
+    pixel = np.uint8([[[b, g, r]]])
+    hue = int(cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0, 0])
+    return 40 <= hue <= 100
+
+
+def _sample_edge_screen_bgr(
+    bgr: np.ndarray,
+    key_color: tuple[int, int, int],
+    threshold: int,
+) -> Optional[tuple[int, int, int]]:
+    """Median screen color from the four edges, or None when the border is not a plate.
+
+    Prefer the median of border pixels already within ``threshold`` of
+    ``key_color`` (pure green) when those pixels are at least half the border.
+    Otherwise use the median of the whole border, but only if that color is
+    still a green screen. A red, gray, or photographic border returns None
+    and the caller must not key.
+    """
+    height, width = bgr.shape[:2]
+    band = _border_band_thickness(height, width)
+    mask = np.zeros((height, width), dtype=bool)
+    mask[:band, :] = True
+    mask[height - band :, :] = True
+    mask[:, :band] = True
+    mask[:, width - band :] = True
+    border = bgr[mask]
+    if border.size == 0:
+        return None
+
+    dist = _bgr_distance(border, key_color)
+    near = border[dist <= float(threshold)]
+    if near.shape[0] * 2 >= border.shape[0]:
+        chosen = np.median(near, axis=0)
+    else:
+        chosen = np.median(border, axis=0)
+        rounded = (
+            int(round(float(chosen[0]))),
+            int(round(float(chosen[1]))),
+            int(round(float(chosen[2]))),
+        )
+        near_ref = float(_bgr_distance(np.asarray([rounded], dtype=np.int32), key_color)[0])
+        if near_ref > float(threshold) and not _looks_like_greenscreen_bgr(rounded):
+            return None
+        return rounded
+    return (
+        int(round(float(chosen[0]))),
+        int(round(float(chosen[1]))),
+        int(round(float(chosen[2]))),
+    )
+
+
 def chroma_key_rgba(
     rgba_bgr: np.ndarray,
     key_color: tuple[int, int, int] = GREEN_KEY_BGR,
@@ -407,42 +482,277 @@ def chroma_key_rgba(
     softness: int = 20,
 ) -> np.ndarray:
     """
-    Apply a soft chroma key over an RGBA image (BGR channel order).
+    Make an edge-connected green screen transparent without cutting interior green.
 
-    Pixels whose Euclidean distance to ``key_color`` is below ``threshold``
-    get alpha=0; pixels farther than ``threshold + softness`` keep alpha=255;
-    pixels in between ramp linearly. The result is an RGBA image where the
-    green-screen background is fully transparent and the edge feathers
-    smoothly over ``softness`` units of distance.
+    The screen color is sampled from the frame border (see
+    :func:`_sample_edge_screen_bgr`), not assumed to be exactly ``key_color``.
+    Distance and the softness ramp still use ``threshold`` / ``softness``, but
+    they are measured against that sampled color. Only pixels that can reach
+    the outer rim through similarly colored pixels are keyed, so a green
+    costume that does not touch the rim stays opaque.
+
+    The keyed alpha is combined with ``np.minimum`` against the alpha already
+    in ``rgba_bgr``. A SAM2 matte therefore stays the silhouette: chroma can
+    only make pixels more transparent, and cannot paint the background back
+    on. When the input alpha is fully opaque (no SAM2), this pass alone
+    removes the plate. If the border does not look like a green screen, the
+    alpha channel is left unchanged.
 
     Args:
         rgba_bgr: HxWx4 uint8 array in BGR channel order.
-        key_color: BGR triplet to remove (default pure green).
-        threshold: Distance below which alpha becomes 0.
+        key_color: Reference BGR green used to accept a near-pure border.
+        threshold: Distance below which a reached pixel becomes alpha 0.
         softness: Distance band over which alpha ramps from 0 to 255.
 
     Returns:
-        New HxWx4 uint8 RGBA array with rewritten alpha channel.
+        New HxWx4 uint8 RGBA array. Color channels are copied.
     """
-    b = rgba_bgr[:, :, 0].astype(np.int32)
-    g = rgba_bgr[:, :, 1].astype(np.int32)
-    r = rgba_bgr[:, :, 2].astype(np.int32)
+    out = rgba_bgr.copy()
+    if out.ndim != 3 or out.shape[2] < 4 or out.shape[0] == 0 or out.shape[1] == 0:
+        return out
 
-    diff = np.sqrt(
-        (b - key_color[0]) ** 2
-        + (g - key_color[1]) ** 2
-        + (r - key_color[2]) ** 2
-    )
+    screen = _sample_edge_screen_bgr(out[:, :, :3], key_color, threshold)
+    if screen is None:
+        return out
+
+    dist = _bgr_distance(out[:, :, :3], screen)
+    limit = float(threshold if softness <= 0 else threshold + softness)
+    keyable = dist < limit
+    if not np.any(keyable):
+        return out
+
+    count, labels = cv2.connectedComponents(keyable.astype(np.uint8), connectivity=4)
+    if count <= 1:
+        return out
+    rim = np.zeros(keyable.shape, dtype=bool)
+    rim[0, :] = True
+    rim[-1, :] = True
+    rim[:, 0] = True
+    rim[:, -1] = True
+    reached_ids = np.unique(labels[rim])
+    reached_ids = reached_ids[reached_ids > 0]
+    if reached_ids.size == 0:
+        return out
+    reached = np.isin(labels, reached_ids)
 
     if softness <= 0:
-        new_alpha = np.where(diff >= threshold, 255, 0).astype(np.uint8)
+        keyed = np.where(reached, 0, 255).astype(np.uint8)
     else:
-        ramp = np.clip(((diff - threshold) * 255.0) / softness, 0.0, 255.0)
-        new_alpha = ramp.astype(np.uint8)
-
-    out = rgba_bgr.copy()
-    out[:, :, 3] = new_alpha
+        ramp = np.clip((dist - float(threshold)) * 255.0 / float(softness), 0.0, 255.0)
+        keyed = np.where(reached, ramp, 255.0).astype(np.uint8)
+    out[:, :, 3] = np.minimum(out[:, :, 3], keyed)
     return out
+
+
+def _read_image(path: str, flags: int) -> Optional[np.ndarray]:
+    """Load an image from a path OpenCV's ``imread`` cannot open.
+
+    On Windows, ``cv2.imread`` / ``cv2.imwrite`` use the ANSI code page and
+    fail for directories such as ``白发角色``. Decoding the file bytes avoids that.
+    """
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        logger.warning("[motion_extractor] failed to read %s: %s", path, e)
+        return None
+    if not raw:
+        return None
+    image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), flags)
+    return image
+
+
+def _write_image(path: str, image: np.ndarray) -> bool:
+    """Write an image to ``path``, including non-ASCII Windows paths."""
+    dest = Path(path)
+    ext = dest.suffix or ".png"
+    ok, buf = cv2.imencode(ext, image)
+    if not ok:
+        return False
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(buf.tobytes())
+        tmp.replace(dest)
+    except OSError as e:
+        logger.warning("[motion_extractor] failed to write %s: %s", path, e)
+        return False
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return True
+
+
+def segmented_png_name(frame_path: str, ordinal: int) -> str:
+    """Return ``seg_0001.png``-style name for one extracted frame.
+
+    Uses the trailing number in ``frame_0001.png`` when present so output
+    order matches ffmpeg's 1-based frame index. ``ordinal`` is the 1-based
+    position in the extracted list and is only used when the name has no digits.
+    """
+    stem = Path(frame_path).stem
+    end = len(stem)
+    start = end
+    while start > 0 and stem[start - 1].isdigit():
+        start -= 1
+    number = int(stem[start:end]) if start < end else ordinal
+    return f"seg_{number:04d}.png"
+
+
+def frame_background_is_greenscreen(
+    frame_path: str,
+    key_color: tuple[int, int, int] = GREEN_KEY_BGR,
+    threshold: int = 80,
+    *,
+    min_ratio: float = 0.7,
+) -> bool:
+    """True when the frame border is mostly the chroma-key color.
+
+    A thin strip around the image is compared to ``key_color``. Character
+    pixels in the middle do not count, so a person on a flat green plate
+    still matches.
+    """
+    image = _read_image(frame_path, cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        return False
+    height, width = image.shape[:2]
+    band = _border_band_thickness(height, width)
+    strips = (
+        image[:band, :, :],
+        image[height - band :, :, :],
+        image[:, :band, :],
+        image[:, width - band :, :],
+    )
+    border = np.concatenate([strip.reshape(-1, 3) for strip in strips], axis=0).astype(np.int32)
+    diff = np.sqrt(
+        (border[:, 0] - key_color[0]) ** 2
+        + (border[:, 1] - key_color[1]) ** 2
+        + (border[:, 2] - key_color[2]) ** 2
+    )
+    return float(np.mean(diff <= threshold)) >= min_ratio
+
+
+def chroma_key_frames_sequence(
+    frame_paths: list[str],
+    output_dir: str,
+    *,
+    chroma_threshold: int = 80,
+    chroma_softness: int = 20,
+) -> list[str]:
+    """Chroma-key each frame to an RGBA PNG named ``seg_0001.png``, ``seg_0002.png``, ...
+
+    Written even when SAM2 is not loaded. Unreadable frames are skipped.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    written: list[str] = []
+    for ordinal, frame_path in enumerate(frame_paths, start=1):
+        image = _read_image(frame_path, cv2.IMREAD_COLOR)
+        out_file = output_path / segmented_png_name(frame_path, ordinal)
+        if image is None:
+            logger.warning("[motion_extractor] chroma key skipped unreadable frame %s", frame_path)
+            continue
+
+        height, width = image.shape[:2]
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        rgba[:, :, :3] = image[:, :, :3]
+        rgba[:, :, 3] = 255
+        rgba = chroma_key_rgba(
+            rgba,
+            key_color=GREEN_KEY_BGR,
+            threshold=chroma_threshold,
+            softness=chroma_softness,
+        )
+        if not _write_image(str(out_file), rgba):
+            logger.warning("[motion_extractor] failed to write chroma key %s", out_file)
+            continue
+        written.append(str(out_file))
+
+    logger.info(
+        "[motion_extractor] Chroma-keyed %d/%d frames into %s",
+        len(written),
+        len(frame_paths),
+        output_dir,
+    )
+    return written
+
+
+def _refine_chroma_edges_with_sam2(
+    frame_paths: list[str],
+    output_dir: str,
+    sam2_model,
+    *,
+    feather_edges: bool = True,
+    chroma_threshold: int = 80,
+    chroma_softness: int = 20,
+    snap_distance: int = 8,
+) -> int:
+    """Tighten chroma-keyed ``seg_*.png`` edges with the existing SAM2 segmenter.
+
+    SAM2 runs after the chroma key. Its mask (with optional Canny feathering)
+    is intersected with the chroma alpha, so green stays transparent and
+    non-person pixels SAM2 rejects are cleared too. A failed SAM2 frame keeps
+    the chroma-keyed PNG. The file on disk stays a 4-channel PNG.
+    """
+    import os
+    import tempfile
+
+    output_path = Path(output_dir)
+    refined = 0
+    for ordinal, frame_path in enumerate(frame_paths, start=1):
+        out_file = output_path / segmented_png_name(frame_path, ordinal)
+        if not out_file.is_file():
+            continue
+
+        fd, tmp_name = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        tmp_file = Path(tmp_name)
+        try:
+            ok = segment_person_from_frame(
+                frame_path,
+                str(tmp_file),
+                sam2_model,
+                feather_edges=feather_edges,
+                greenscreen=False,
+                chroma_threshold=chroma_threshold,
+                chroma_softness=chroma_softness,
+                snap_distance=snap_distance,
+            )
+            if not ok:
+                continue
+
+            chroma = _read_image(str(out_file), cv2.IMREAD_UNCHANGED)
+            sam = _read_image(str(tmp_file), cv2.IMREAD_UNCHANGED)
+            if (
+                chroma is None
+                or sam is None
+                or chroma.ndim != 3
+                or sam.ndim != 3
+                or chroma.shape[2] != 4
+                or sam.shape[2] != 4
+                or chroma.shape[:2] != sam.shape[:2]
+            ):
+                logger.warning(
+                    "[motion_extractor] SAM2 edge refine skipped for %s",
+                    frame_path,
+                )
+                continue
+
+            chroma[:, :, 3] = np.minimum(chroma[:, :, 3], sam[:, :, 3])
+            if not _write_image(str(out_file), chroma):
+                logger.warning("[motion_extractor] failed to write refined %s", out_file)
+                continue
+            refined += 1
+        finally:
+            if tmp_file.exists():
+                tmp_file.unlink()
+
+    logger.info(
+        "[motion_extractor] SAM2 refined edges on %d/%d chroma-keyed frames",
+        refined,
+        len(frame_paths),
+    )
+    return refined
 
 
 def segment_person_from_frame(
@@ -462,8 +772,11 @@ def segment_person_from_frame(
     Saves an RGBA PNG with transparent background. When ``feather_edges`` is
     True (default) the SAM2 mask is snapped to nearby Canny edges via
     :func:`app.models.sam2_loader.refine_mask_edges` to soften the silhouette.
-    When ``greenscreen`` is True an additional chroma-key pass is applied on
-    top of the SAM2 alpha (green-screen pixels become fully transparent).
+    When ``greenscreen`` is True an additional chroma-key pass runs on the
+    SAM2 alpha. Edge-connected screen pixels become transparent.
+    :func:`chroma_key_rgba` keeps the more transparent of the two alphas, so
+    the SAM2 silhouette is not painted back on. Green cloth that does not
+    touch the frame edge stays opaque.
 
     Args:
         frame_path: Input PNG frame from ffmpeg.
@@ -482,7 +795,7 @@ def segment_person_from_frame(
     try:
         import cv2
 
-        image = cv2.imread(frame_path)
+        image = _read_image(frame_path, cv2.IMREAD_COLOR)
         if image is None:
             return False
 
@@ -542,8 +855,7 @@ def segment_person_from_frame(
                 softness=chroma_softness,
             )
 
-        cv2.imwrite(output_path, rgba)
-        return True
+        return _write_image(output_path, rgba)
 
     except Exception as e:
         logger.warning("[motion_extractor] SAM2 segmentation error on %s: %s", frame_path, e)
@@ -572,8 +884,8 @@ def segment_frames_sequence(
 
     segmented = []
     for i, frame_path in enumerate(frame_paths):
-        safe_char = character_name.replace(" ", "_")
-        safe_action = action_name.replace(" ", "_")
+        safe_char = slugify(character_name, fallback="character")
+        safe_action = slugify(action_name, fallback="action")
         out_file = output_path / f"{safe_char}_{safe_action}_{i:04d}.png"
 
         success = segment_person_from_frame(
@@ -628,7 +940,11 @@ async def generate_motion_sequence(
         sam2_model: Pre-loaded SAM2 model instance (None = auto-detect from model_manager).
         video_provider: Video provider name ("dashscope", "local_wan", "svd").
         greenscreen: Forward a green-screen background directive to the video
-            provider and apply a chroma-key pass during segmentation.
+            provider and chroma-key extracted frames into RGBA PNGs
+            (``seg_0001.png`` …). A green border on the frames is treated the
+            same way when this flag is false. SAM2, if loaded, refines those
+            edges afterwards. Once the video and frames exist, a missing SAM2
+            model leaves ``status`` as ``"done"`` and ``error`` unset.
         feather_edges: Snap SAM2 masks to nearby Canny edges for softer silhouettes.
         chroma_threshold: Lower bound for the chroma key distance (greenscreen mode).
         chroma_softness: Feather band over which alpha ramps from 0 to 255.
@@ -645,8 +961,8 @@ async def generate_motion_sequence(
     if output_base_dir is None:
         output_base_dir = str(CACHE_DIR / "motion")
 
-    safe_char = character_name.replace(" ", "_")
-    safe_action = action_prompt[:30].replace(" ", "_").replace("/", "_")
+    safe_char = slugify(character_name, fallback="character")
+    safe_action = slugify(action_prompt, fallback="action")
     shot_dir = Path(output_base_dir) / f"{safe_char}_{safe_action}"
     shot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -724,7 +1040,8 @@ async def generate_motion_sequence(
                 "Video may not respect the end keyframe."
             )
 
-    # 3. Segment
+    # 3. Chroma-key green plates, then optionally refine edges with SAM2.
+    # Video and frames already exist, so a missing SAM2 model is not a failure.
     if sam2_model is None:
         try:
             from app.models import model_manager
@@ -733,7 +1050,40 @@ async def generate_motion_sequence(
         except Exception:
             pass
 
-    if sam2_model:
+    use_chroma = bool(greenscreen)
+    if not use_chroma:
+        try:
+            use_chroma = frame_background_is_greenscreen(
+                frames[0],
+                threshold=chroma_threshold,
+            )
+        except Exception as e:
+            logger.warning("[motion_extractor] greenscreen detection failed: %s", e)
+            use_chroma = False
+        if use_chroma:
+            logger.info(
+                "[motion_extractor] Frame background looks like a green screen; applying chroma key"
+            )
+
+    if use_chroma:
+        chroma_key_frames_sequence(
+            frames,
+            motion.segmented_dir,
+            chroma_threshold=chroma_threshold,
+            chroma_softness=chroma_softness,
+        )
+
+    if sam2_model and use_chroma:
+        _refine_chroma_edges_with_sam2(
+            frames,
+            motion.segmented_dir,
+            sam2_model,
+            feather_edges=feather_edges,
+            chroma_threshold=chroma_threshold,
+            chroma_softness=chroma_softness,
+            snap_distance=snap_distance,
+        )
+    elif sam2_model:
         segment_frames_sequence(
             frames,
             motion.segmented_dir,
@@ -746,11 +1096,16 @@ async def generate_motion_sequence(
             chroma_softness=chroma_softness,
             snap_distance=snap_distance,
         )
-        motion.status = "done"
+    elif use_chroma:
+        logger.info(
+            "[motion_extractor] SAM2 model not available; using greenscreen chroma key only"
+        )
     else:
-        motion.status = "error"
-        motion.error = "SAM2 model not available"
+        logger.info(
+            "[motion_extractor] SAM2 model not available; leaving extracted frames unsegmented"
+        )
 
+    motion.status = "done"
     return motion
 
 

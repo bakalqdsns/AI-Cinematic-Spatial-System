@@ -39,20 +39,21 @@ def test_chroma_key_rgba_keeps_red():
 def test_chroma_key_rgba_feather_band():
     from app.services.motion_extractor import chroma_key_rgba
 
-    h, w = 8, 8
+    h, w = 32, 32
     rgba = np.zeros((h, w, 4), dtype=np.uint8)
-    # Yellow-ish green at distance ~127 from pure green -> ramp zone.
-    rgba[:, :, 0] = 50
-    rgba[:, :, 1] = 200
-    rgba[:, :, 2] = 50
+    rgba[:, :, 1] = 255  # pure green plate, so the sampled screen is #00FF00
     rgba[:, :, 3] = 255
+    # Left rim sits ~90 away from that screen: inside threshold 80 + softness 40.
+    rgba[:, 0, 0] = 50
+    rgba[:, 0, 1] = 200
+    rgba[:, 0, 2] = 50
 
     out = chroma_key_rgba(rgba, threshold=80, softness=40)
-    # Alpha should be in (0, 255), not 0 or 255 only.
-    alpha_vals = np.unique(out[:, :, 3])
-    assert len(alpha_vals) > 1 or (0 < alpha_vals[0] < 255), (
-        f"feather band must produce intermediate alpha, got {alpha_vals}"
+    edge = out[:, 0, 3]
+    assert np.all((edge > 0) & (edge < 255)), (
+        f"feather band must produce intermediate alpha, got {np.unique(edge)}"
     )
+    assert int(out[h // 2, w // 2, 3]) == 0
 
 
 def test_segment_person_from_frame_accepts_greenscreen():

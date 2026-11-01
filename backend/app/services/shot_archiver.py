@@ -192,19 +192,40 @@ def _collect_meshes(staging: Path, project_dir: Path) -> list[str]:
     return packed
 
 
+def _select_action_frames(action_dir: Path) -> Optional[tuple[Path, int]]:
+    """选择贴到人物平面上的帧目录。
+
+    ``segmented/`` 里有 png 时用抠像（Alpha），否则用动作目录的 ``frame_*.png``。
+    返回 ``(frames_dir, frame_count)``；没有可用帧时返回 None。
+    """
+    seg_dir = action_dir / "segmented"
+    if seg_dir.is_dir():
+        seg_pngs = [
+            p for p in seg_dir.iterdir()
+            if p.is_file() and p.suffix.lower() == ".png"
+        ]
+        if seg_pngs:
+            return seg_dir, len(seg_pngs)
+    raw = [p for p in action_dir.glob("frame_*.png") if p.is_file()]
+    if not raw:
+        return None
+    return action_dir, len(raw)
+
+
 def _collect_characters(project_dir: Path) -> list[dict]:
     """扫描 motions/ 目录，构建 manifest.characters 字段（T11）。
 
     motion_extractor 输出布局：``motions/<character_name>/<action_slug>/frame_*.png``
-    以及 ``motions/<character_name>/<action_slug>/segmented/seg_*.png``。
+    以及 ``motions/<character_name>/<action_slug>/segmented/*.png``（抠像，带 Alpha）。
 
     每个角色生成一条记录：
       {id, name, framesDir, frameCount, fps}
 
     - framesDir 用绝对路径（os.path.abspath），方便 Blender 跨平台读。
-    - frameCount = 该 action 目录下 frame_*.png 数量。
+    - 动作目录下有 ``segmented/`` 且里面有 png 时，framesDir 指向该目录，
+      frameCount 为这些 png 的数量。否则用动作目录里的 ``frame_*.png``。
     - fps 默认 24（Blender 标准帧率）；若 action 目录下有 _meta.json 含 fps 字段则用之。
-    - 一个角色若有多个 action，取帧数最多的那条作为该角色的代表序列。
+    - 一个角色若有多个 action，取所选帧数最多的那条作为该角色的代表序列。
     """
     motions_root = project_dir / "motions"
     if not motions_root.is_dir():
@@ -220,29 +241,25 @@ def _collect_characters(project_dir: Path) -> list[dict]:
         best_action: Optional[dict] = None
         best_count = 0
         for action_dir in sorted(p for p in char_dir.iterdir() if p.is_dir()):
-            frames = sorted(action_dir.glob("frame_*.png"))
-            if not frames:
-                # 也尝试 segmented/ 子目录
-                seg_dir = action_dir / "segmented"
-                if seg_dir.is_dir():
-                    frames = sorted(seg_dir.glob("seg_*.png"))
-            if not frames:
+            picked = _select_action_frames(action_dir)
+            if picked is None:
                 continue
-            count = len(frames)
+            frames_dir, count = picked
             if count > best_count:
                 best_count = count
                 best_action = {
                     "action": action_dir.name,
-                    "frames_dir": action_dir,
+                    "frames_dir": frames_dir,
+                    "meta_dir": action_dir,
                     "frame_count": count,
                 }
 
         if best_action is None:
             continue
 
-        # fps：尝试读 _meta.json，否则默认 24
+        # fps：_meta.json 写在动作目录，不在 segmented/ 里
         fps = 24
-        meta_path = best_action["frames_dir"] / "_meta.json"
+        meta_path = best_action["meta_dir"] / "_meta.json"
         if meta_path.is_file():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
