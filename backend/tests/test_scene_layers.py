@@ -339,7 +339,7 @@ def test_没有检测结果时仍写出五张全透明层(tmp_path, monkeypatch)
         透明度 = np.array(Image.open(路径).convert("RGBA"))[..., 3]
         assert int(透明度.sum()) == 0
     标记 = json.loads((项目 / "layers" / "_fill.json").read_text(encoding="utf-8"))
-    assert 标记["method"] == "scene_table_perspective_v1"
+    assert 标记["method"] == "scene_table_perspective_v2"
     assert 标记["sceneClass"] == "unknown"
 
 
@@ -413,7 +413,10 @@ def test_层深度和缩放近大远小且顺序一致():
     assert 按名["sky"]["depthMeters"] > 按名["foreground"]["depthMeters"]
     assert 按名["sky"]["zOffset"] < 按名["background"]["zOffset"] < 按名["foreground"]["zOffset"]
     assert 按名["foreground"]["scale"] == 1.0
-    assert 按名["sky"]["scale"] < 按名["foreground"]["scale"]
+    assert 按名["sky"]["scale"] > 按名["foreground"]["scale"]
+    近距 = 12.0 + 按名["foreground"]["depthMeters"]
+    远距 = 12.0 + 按名["sky"]["depthMeters"]
+    assert 按名["sky"]["scale"] == round(远距 / 近距, 4)
     assert 按名["foreground"]["zOffset"] == -按名["foreground"]["depthMeters"]
 
 

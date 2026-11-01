@@ -379,7 +379,7 @@ def _find_scene_wide(project_dir: Path, scene_id: Optional[str]) -> Optional[Pat
     return hits[0]
 
 
-_OCCLUSION_FILL_MARK = "scene_table_perspective_v1"
+_OCCLUSION_FILL_MARK = "scene_table_perspective_v2"
 
 
 def _layers_already_exported(layers_dir: Path, source: Path) -> bool:

@@ -129,8 +129,8 @@ def layers_near_to_far() -> list[str]:
 # 近处至少离相机 1 米。层与层之间至少隔开这么多米，避免两张卡片贴在同一深度。
 _MIN_LAYER_DEPTH_M = 1.0
 _MIN_LAYER_GAP_M = 0.5
-# 最远层的世界尺寸不要小于最近层的这个比例，否则天空会缩成一个点。
-_MIN_PERSPECTIVE_SCALE = 0.2
+# 和归档清单里的默认相机一致：相机在 +Z，离目标 12 米，朝 -Z 看。
+PERSPECTIVE_CAMERA_DISTANCE_M = 12.0
 
 
 def perspective_offsets(
@@ -142,7 +142,8 @@ def perspective_offsets(
     深度数值越大越远。平面 Z 取负的深度：相机在 +Z、朝 -Z 看，越负越远。
     顺序固定为天空、背景、中景、地面、前景，和渲染从远到近一致。
     测量到的中位数如果把近层放到了远层后面，就把远层再推远，不交换层名。
-    ``scale`` 以最近一层为 1，越远越小，透视相机下近处更大。
+    ``scale`` 按到相机的距离放大远处的面片：最近一层是 1，越远越大，
+    这样在默认相机位置看，远层不会被透视缩成一个点。
     """
     order = layers_far_to_near()
     measured: dict[str, float] = {}
@@ -157,17 +158,19 @@ def perspective_offsets(
                 measured[name] = float(np.median(values))
     depths = _align_layer_depths(measured, order)
     nearest = min(depths.values())
+    near_distance = PERSPECTIVE_CAMERA_DISTANCE_M + nearest
     rows = []
     for name in order:
         depth = depths[name]
-        scale = nearest / depth if depth > 0 else 1.0
+        distance = PERSPECTIVE_CAMERA_DISTANCE_M + depth
+        scale = distance / near_distance if near_distance > 0 else 1.0
         rows.append({
             "layer": name,
             "depthMeters": round(depth, 4),
             "zOffset": round(-depth, 4),
             "zMin": round(depth, 4),
             "zMax": round(depth, 4),
-            "scale": round(max(_MIN_PERSPECTIVE_SCALE, min(1.0, scale)), 4),
+            "scale": round(scale, 4),
         })
     return rows
 

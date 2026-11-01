@@ -9,7 +9,7 @@ plugin places planes at the exact same Z the Three.js viewer uses.
 
 # 默认层距。相机在 +Z、朝 -Z 看，Z 越负越远。
 # 有 Depth Anything 结果时，manifest.zOffsets 用每层深度的负值，并带 scale：
-# 最近一层 scale=1，越远越小。
+# 最近一层 scale=1，越远越大，用来抵消透视缩小。
 Z_OFFSETS = {
     "sky": -20.0,
     "background": -12.0,
@@ -128,7 +128,7 @@ def layer_z_offset(manifest, layer):
 
 
 def layer_plane_scale(manifest, layer):
-    """近大远小。清单里没有 scale 时，各层都用 1。"""
+    """面片相对最近一层的放大倍数。清单里没有 scale 时用 1。"""
     for entry in manifest.get("zOffsets", []):
         if entry.get("layer") == layer:
             try:
