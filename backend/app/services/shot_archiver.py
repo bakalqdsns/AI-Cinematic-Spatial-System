@@ -574,7 +574,17 @@ _DEFAULT_CHARACTER_HEIGHT_M = 1.6
 # 抠像帧里人物占画面高度的默认比例，量不到剪影时用它估平面高度。
 _DEFAULT_CHARACTER_FILL = 0.9
 # 人物平面贴在地面层靠相机一侧的距离（米），避免和地面卡片共面闪面。
+# 只在分层表缺 foreground/ground 行时的回退路径使用。
 _CHARACTER_GROUND_CLEARANCE_M = 0.3
+# 人物平面深度：在 foreground 与 ground 两层之间、从前景层往地面层走的
+# 比例。0.35 → 当前分层（foreground -2.0 / ground -16.34）落在约 -7.0：
+# 比贴地面层近约 9m，1.6m 身高在 35°/12m 相机下读得出来；又仍在前景
+# 层之后、地面层之前，脚踩操场画面近处地面，不悬空也不和层片共面。
+_CHARACTER_DEPTH_FROM_FOREGROUND = 0.35
+# 人物行走位移（世界 X，米）：多帧角色的平面随帧从 walkFromX 线性走到
+# walkToX，默认从画面左 (-3) 走到右 (+3)，可在角色 dict 里覆盖。
+_CHARACTER_WALK_FROM_X = -3.0
+_CHARACTER_WALK_TO_X = 3.0
 
 
 def _character_plane_scale(frames_dir: str, height_m: float) -> Optional[list]:
@@ -617,32 +627,69 @@ def _character_plane_scale(frames_dir: str, height_m: float) -> Optional[list]:
         return None
 
 
-def _place_characters_on_ground(characters: list[dict], z_offsets: list[dict]) -> list[dict]:
-    """人物平面放到地面层靠相机一侧，按真实身高给缩放。
+def _character_depth(z_offsets: list[dict]) -> Optional[float]:
+    """人物平面深度：ground 与 foreground 之间、从前景往地面走 0.35 处。
 
-    人物站在地上：Z 取 ground 层的 zOffset 加 0.3m（朝相机方向），
-    不再悬在前景层前面和场景透视脱节。缩放按角色真实身高
-    （默认 1.6m，可用 heightM 覆盖）除以帧里人物占比换算，
-    不再拍脑袋 4.0。清单里已写 position / scale 的角色不动。
+    比贴地面层近得多，1.6m 人物在画面里够大；仍在前景层之后、
+    地面层之前，脚踩操场画面的近处地面，不悬空。任一层缺失时
+    回退到旧锚点（ground/midground/foreground 第一个可用）+ 0.3m。
     """
-    anchor = None
+    def _row(name: str) -> Optional[float]:
+        row = next((r for r in z_offsets if r.get("layer") == name), None)
+        if row is None:
+            return None
+        try:
+            return float(row.get("zOffset"))
+        except (TypeError, ValueError):
+            return None
+
+    ground = _row("ground")
+    foreground = _row("foreground")
+    if ground is not None and foreground is not None and ground != foreground:
+        z = foreground + (ground - foreground) * _CHARACTER_DEPTH_FROM_FOREGROUND
+        # 夹到两层之间并留出共面清隙
+        lo, hi = sorted((ground, foreground))
+        clearance = min(_CHARACTER_GROUND_CLEARANCE_M, abs(hi - lo) / 4.0)
+        return min(max(z, lo + clearance), hi - clearance)
     for want in ("ground", "midground", "foreground"):
-        row = next((r for r in z_offsets if r.get("layer") == want), None)
-        if row is not None:
-            try:
-                anchor = float(row.get("zOffset"))
-            except (TypeError, ValueError):
-                anchor = None
-            if anchor is not None:
-                break
-    if anchor is None:
+        anchor = _row(want)
+        if anchor is not None:
+            return anchor + _CHARACTER_GROUND_CLEARANCE_M
+    return None
+
+
+def _place_characters_on_ground(characters: list[dict], z_offsets: list[dict]) -> list[dict]:
+    """人物平面放到 ground 与 foreground 之间靠前景一侧，按真实身高给缩放。
+
+    深度取 foreground→ground 的 0.35 处（当前分层约 -7.0m）：比贴地面层
+    近得多，1.6m 身高在 35°/12m 相机下读得出来；仍在前景层之后、地面层
+    之前，脚踩操场地面不悬空。多帧角色附 walkFromX/walkToX 行走区间
+    （默认 -3 → +3，可覆盖），Blender 端按帧线性插值出从左到右的位移，
+    position 的 X 取行走起点。缩放按角色真实身高（默认 1.6m，heightM
+    可覆盖）除以帧里人物占比换算，不再拍脑袋 4.0。清单里已写
+    position / scale 的角色不动。
+    """
+    z = _character_depth(z_offsets)
+    if z is None:
         return characters
-    z = anchor + _CHARACTER_GROUND_CLEARANCE_M
     placed = []
     for character in characters:
         item = dict(character)
+        try:
+            frame_count = int(item.get("frameCount") or 0)
+        except (TypeError, ValueError):
+            frame_count = 0
+        if frame_count > 1:
+            if item.get("walkFromX") is None:
+                item["walkFromX"] = _CHARACTER_WALK_FROM_X
+            if item.get("walkToX") is None:
+                item["walkToX"] = _CHARACTER_WALK_TO_X
         if not item.get("position"):
-            item["position"] = [0.0, 0.0, z]
+            try:
+                start_x = float(item.get("walkFromX"))
+            except (TypeError, ValueError):
+                start_x = 0.0
+            item["position"] = [start_x, 0.0, z]
         if not item.get("scale"):
             try:
                 height_m = float(item.get("heightM") or _DEFAULT_CHARACTER_HEIGHT_M)

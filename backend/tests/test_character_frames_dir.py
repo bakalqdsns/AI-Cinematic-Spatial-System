@@ -75,7 +75,7 @@ def test_collect_characters_uses_raw_frames_without_cutouts(tmp_path: Path):
     assert chars[0]["fps"] == 24
 
 
-def _load_list_frames():
+def _load_frames_module():
     path = (
         Path(__file__).resolve().parents[1]
         / "blender"
@@ -87,7 +87,11 @@ def _load_list_frames():
     spec = importlib.util.spec_from_file_location("aicss_import_character_frames", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module._list_frames
+    return module
+
+
+def _load_list_frames():
+    return _load_frames_module()._list_frames
 
 
 def test_list_frames_prefers_seg_prefix(tmp_path: Path):
@@ -103,3 +107,22 @@ def test_list_frames_prefers_seg_prefix(tmp_path: Path):
     _touch(raw_only / "frame_0001.png")
     listed = [os.path.basename(p) for p in _list_frames(str(raw_only))]
     assert listed == ["frame_0001.png", "frame_0002.png"]
+
+
+def test_walk_range_defaults_left_to_right():
+    module = _load_frames_module()
+    assert module._walk_range({}) == (module.DEFAULT_WALK_FROM_X, module.DEFAULT_WALK_TO_X)
+    assert module.DEFAULT_WALK_FROM_X == -3.0
+    assert module.DEFAULT_WALK_TO_X == 3.0
+
+
+def test_walk_range_honours_manifest_override():
+    module = _load_frames_module()
+    assert module._walk_range({"walkFromX": -1.0, "walkToX": 2.5}) == (-1.0, 2.5)
+    # 非法值回退默认
+    assert module._walk_range({"walkFromX": "bad", "walkToX": None}) == (-3.0, 3.0)
+
+
+def test_walk_range_zero_displacement_means_no_walk():
+    module = _load_frames_module()
+    assert module._walk_range({"walkFromX": 1.0, "walkToX": 1.0}) is None

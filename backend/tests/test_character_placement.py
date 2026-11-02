@@ -1,7 +1,10 @@
-"""第 5 轮：人物接到场景透视上。
+"""第 6 轮：人物行走轨迹和比例。
 
-- 归档清单的人物放在地面层靠相机一侧（站在地上），不再悬在前景层前面。
-- 人物缩放按真实身高（默认 1.6m）和帧内占比换算，不再拍脑袋 4.0。
+- 人物不再贴地面层（16m 深处太小），落到 ground 与 foreground 之间
+  靠前景 0.35 处（当前分层约 -7.0m），1.6m 身高在画面里读得出来。
+- 多帧角色带 walkFromX/walkToX 行走区间（默认 -3 → +3），Blender 端
+  按帧线性插值出从左到右的位移。
+- 人物缩放仍按真实身高（默认 1.6m）和帧内占比换算。
 - Blender 插件的人物默认值与后端镜像一致。
 """
 from __future__ import annotations
@@ -14,7 +17,10 @@ import pytest
 from PIL import Image
 
 from app.services.shot_archiver import (
+    _CHARACTER_DEPTH_FROM_FOREGROUND,
     _CHARACTER_GROUND_CLEARANCE_M,
+    _CHARACTER_WALK_FROM_X,
+    _CHARACTER_WALK_TO_X,
     _DEFAULT_CHARACTER_HEIGHT_M,
     _place_characters_on_ground,
 )
@@ -35,7 +41,7 @@ def _加载模块(path: Path, name: str):
 @pytest.fixture(scope="module")
 def 插件():
     return _加载模块(
-        _ADDON / "operators" / "import_layers.py", "aicss_import_layers_round5",
+        _ADDON / "operators" / "import_layers.py", "aicss_import_layers_round6",
     )
 
 
@@ -63,16 +69,62 @@ def _帧目录(tmp_path: Path, *, 占比: float = 0.5, 尺寸: tuple[int, int] =
     return str(frames)
 
 
-def test_人物放在地面层而不是前景层():
+def test_人物放在前景与地面之间更近的深度():
     chars = [{"id": "girl", "name": "小女孩", "framesDir": "", "frameCount": 1, "fps": 24}]
     placed = _place_characters_on_ground(chars, _Z_OFFSETS)
     assert len(placed) == 1
     z = placed[0]["position"][2]
     地面 = next(r["zOffset"] for r in _Z_OFFSETS if r["layer"] == "ground")
     前景 = next(r["zOffset"] for r in _Z_OFFSETS if r["layer"] == "foreground")
-    # 站在地上：贴着地面层靠相机一侧，离前景层很远。
+    # 在两层之间、从前景往地面走 0.35：-2 + (-16.3+2) * 0.35 ≈ -7.0。
+    期望 = 前景 + (地面 - 前景) * _CHARACTER_DEPTH_FROM_FOREGROUND
+    assert z == pytest.approx(期望)
+    assert -9.0 < z < -5.0
+    # 不再贴着 16m 深的地面层，也不越过前景层。
+    assert abs(z - 地面) > 5.0
+    assert abs(z - 前景) > 1.0
+
+
+def test_多帧角色带行走轨迹字段且从起点落位():
+    chars = [{"id": "girl", "framesDir": "", "frameCount": 45, "fps": 24}]
+    placed = _place_characters_on_ground(chars, _Z_OFFSETS)
+    row = placed[0]
+    assert row["walkFromX"] == _CHARACTER_WALK_FROM_X == -3.0
+    assert row["walkToX"] == _CHARACTER_WALK_TO_X == 3.0
+    # position 的 X 取行走起点，首帧姿势和轨迹一致。
+    assert row["position"][0] == _CHARACTER_WALK_FROM_X
+
+
+def test_单帧角色不写行走字段():
+    chars = [{"id": "girl", "framesDir": "", "frameCount": 1, "fps": 24}]
+    placed = _place_characters_on_ground(chars, _Z_OFFSETS)
+    assert "walkFromX" not in placed[0]
+    assert "walkToX" not in placed[0]
+    assert placed[0]["position"][0] == 0.0
+
+
+def test_已写行走区间的角色不被覆盖():
+    chars = [{
+        "id": "girl",
+        "framesDir": "",
+        "frameCount": 24,
+        "fps": 24,
+        "walkFromX": -1.0,
+        "walkToX": 1.5,
+    }]
+    placed = _place_characters_on_ground(chars, _Z_OFFSETS)
+    assert placed[0]["walkFromX"] == -1.0
+    assert placed[0]["walkToX"] == 1.5
+    assert placed[0]["position"][0] == -1.0
+
+
+def test_分层表缺前景层时回退贴地面层():
+    缺前景 = [r for r in _Z_OFFSETS if r["layer"] != "foreground"]
+    chars = [{"id": "girl", "framesDir": "", "frameCount": 1, "fps": 24}]
+    placed = _place_characters_on_ground(chars, 缺前景)
+    地面 = next(r["zOffset"] for r in 缺前景 if r["layer"] == "ground")
+    z = placed[0]["position"][2]
     assert z == pytest.approx(地面 + _CHARACTER_GROUND_CLEARANCE_M)
-    assert abs(z - 前景) > 10.0
 
 
 def test_人物缩放按真实身高和帧内占比(tmp_path: Path):
@@ -112,8 +164,18 @@ def test_已写位置和缩放的角色不动(tmp_path: Path):
 def test_插件人物默认值与后端一致(插件):
     assert 插件.DEFAULT_CHARACTER_HEIGHT_M == _DEFAULT_CHARACTER_HEIGHT_M == 1.6
     assert 插件.CHARACTER_GROUND_CLEARANCE_M == _CHARACTER_GROUND_CLEARANCE_M == 0.3
+    assert (
+        插件.CHARACTER_DEPTH_FROM_FOREGROUND
+        == _CHARACTER_DEPTH_FROM_FOREGROUND
+        == 0.35
+    )
     # 默认缩放 = 身高 / 默认占帧比，约 1.78，不是 4.0。
     默认 = 插件.DEFAULT_CHARACTER_HEIGHT_M / 插件.DEFAULT_CHARACTER_FILL
     assert 默认 == pytest.approx(1.78, abs=0.01)
+    # 插件默认深度与后端同一条插值公式。
+    manifest = {"zOffsets": [dict(r) for r in _Z_OFFSETS]}
+    assert 插件.default_character_z(manifest) == pytest.approx(
+        -2.0 + (-16.3 + 2.0) * 0.35
+    )
     # 人物平面创建函数存在（bpy 缺席时不能调用，只校验签名）。
     assert callable(插件._create_plane_for_character)

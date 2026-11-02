@@ -11,6 +11,10 @@ Image Sequence 贴到角色平面上，让 Blender 时间线播放时按帧切�
 角色平面位置从 manifest 的 ``position`` 读（T10 已加角色落位，这里只
 补帧动画纹理 —— 如果平面已存在则复用，不存在则新建）。
 
+第 6 轮：多帧角色附带行走轨迹——按 manifest 的 ``walkFromX`` /
+``walkToX``（默认 -3 → +3）给平面 X 位置 K 两个线性关键帧，
+帧序列播放时人物从画面左走到右。
+
 非 Blender 环境下 operator 类仍可 import，但 register 为 no-op。
 """
 from __future__ import annotations
@@ -120,6 +124,62 @@ def _apply_image_sequence_material(obj, img, frame_count: int, fps: int) -> bool
         return False
 
 
+# 行走位移默认值（世界 X，米）：清单没写 walkFromX/walkToX 时，
+# 多帧角色从画面左 (-3) 线性走到右 (+3)。与后端
+# shot_archiver._CHARACTER_WALK_FROM_X / _CHARACTER_WALK_TO_X 一致。
+DEFAULT_WALK_FROM_X = -3.0
+DEFAULT_WALK_TO_X = 3.0
+
+
+def _walk_range(ch):
+    """读角色的行走区间。返回 (from_x, to_x)；起止相同（不走路）时返回 None。
+
+    清单缺字段或值非法时回退到默认 -3 → +3。
+    """
+    try:
+        from_x = float(ch.get("walkFromX", DEFAULT_WALK_FROM_X))
+    except (TypeError, ValueError):
+        from_x = DEFAULT_WALK_FROM_X
+    try:
+        to_x = float(ch.get("walkToX", DEFAULT_WALK_TO_X))
+    except (TypeError, ValueError):
+        to_x = DEFAULT_WALK_TO_X
+    if from_x == to_x:
+        return None
+    return (from_x, to_x)
+
+
+def _add_walk_animation(obj, ch, frame_count: int) -> bool:
+    """给角色平面 K 两个 X 位置关键帧：帧 1 在 walkFromX、末帧在 walkToX，
+    线性插值——帧序列播放时人物从画面左走到右，行走读得出来。
+    Y/Z 不动（深度由落位决定）。单帧角色不走路。返回是否成功。"""
+    if not _HAS_BPY or obj is None or int(frame_count) <= 1:
+        return False
+    walk = _walk_range(ch)
+    if walk is None:
+        return False
+    from_x, to_x = walk
+    end_frame = max(2, int(frame_count))
+    try:
+        obj.location.x = from_x
+        obj.keyframe_insert(data_path="location", index=0, frame=1)
+        obj.location.x = to_x
+        obj.keyframe_insert(data_path="location", index=0, frame=end_frame)
+        # 回到起始姿势，别让当前时间线停在终点
+        obj.location.x = from_x
+        obj["aicss_walk_from_x"] = from_x
+        obj["aicss_walk_to_x"] = to_x
+        action = getattr(obj.animation_data, "action", None) if obj.animation_data else None
+        for fc in getattr(action, "fcurves", None) or []:
+            if fc.data_path != "location":
+                continue
+            for kp in fc.keyframe_points:
+                kp.interpolation = 'LINEAR'
+        return True
+    except Exception:
+        return False
+
+
 def _find_character_plane(char_id: str, shot_id: str):
     """在当前场景里按 aicss_character_id 找已落位的角色平面。
     找不到返回 None。"""
@@ -138,20 +198,17 @@ def _create_character_plane(char, manifest):
     """新建一个角色平面（T10 已有逻辑，这里复刻一份精简版用于 T08
     单独跑的场景）。返回 obj 或 None。"""
     from .import_layers import (
-        CHARACTER_GROUND_CLEARANCE_M,
         DEFAULT_CHARACTER_FILL,
         DEFAULT_CHARACTER_HEIGHT_M,
+        default_character_z,
     )
-    from ..utils.scene_utils import layer_z_offset
 
     char_id = char.get("id") or char.get("name") or "character"
     position = char.get("position")
     if not position or len(position) < 3:
-        # 与 import_layers 一致：默认站在地上，不再悬在前景层
-        position = [
-            0.0, 0.0,
-            layer_z_offset(manifest, "ground") + CHARACTER_GROUND_CLEARANCE_M,
-        ]
+        # 与 import_layers / 后端一致：ground 与 foreground 之间靠前景
+        # 0.35 处，人物够大又不悬空
+        position = [0.0, 0.0, default_character_z(manifest)]
     scale = char.get("scale")
     if not scale or len(scale) < 2:
         s = DEFAULT_CHARACTER_HEIGHT_M / DEFAULT_CHARACTER_FILL
@@ -184,7 +241,7 @@ class AICSS_OT_import_character_frames(Operator):
     Properties:
         manifest_path: Path to the AICSS manifest.json. Must contain a
             ``characters`` array (T11). Each entry: ``{id, name, framesDir,
-            frameCount, fps, position?, scale?}``.
+            frameCount, fps, position?, scale?, walkFromX?, walkToX?}``.
         fps: Override the manifest's per-character fps (default 0 = read
             from manifest, fallback 24).
         default_scale: Plane scale used when manifest has no ``scale`` field
@@ -281,6 +338,9 @@ class AICSS_OT_import_character_frames(Operator):
                     f"Character {char_id}: failed to build image-sequence material",
                 )
                 continue
+
+            # 行走轨迹：多帧角色沿 X 从 walkFromX 线性走到 walkToX
+            _add_walk_animation(obj, ch, frame_count)
 
             placed += 1
             if frame_count > max_frames:

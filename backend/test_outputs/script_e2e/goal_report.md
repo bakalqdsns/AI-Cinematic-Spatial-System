@@ -111,3 +111,23 @@
 - 新问题：人物在画面里偏小，而且三帧里位置几乎没变，动作没有读出明显行走。原因：人物落到地面层 16m 深处后，按透视被缩得比近处小很多；她走的是「从左到右」的动作，但世界尺寸和相机距离让位移不明显。
 
 下一步：让人物在地面层上行走时，位置随帧移动（行走轨迹），或把人物放在地面与前景之间一个更近的深度，让比例和动作都可读。
+
+## 第 6 轮：人物行走轨迹和比例
+
+观察：
+
+- `_r5_frame60.png`：白衣少女在画面里太小，而且 frame0/60/119 三帧位置几乎没变，行走读不出来。
+- 原因：人物贴在地面层 16m 深处（z=-16.04），35°/12m 相机下 1.6m 身高只占画面高约 9%；人物平面是静止的，没有任何位移。
+
+改动（场景类识别、深度归层语义、绿幕、分层厚度切边、动作视频都没动；两个手段一起上）：
+
+- `backend/app/services/shot_archiver.py`：`_place_characters_on_ground` 不再固定在地面层 +0.3m，新增 `_character_depth`——人物深度取 foreground→ground 的 0.35 处（`_CHARACTER_DEPTH_FROM_FOREGROUND = 0.35`，当前分层 foreground -2.0 / ground -16.34 → z≈-7.02），夹到两层之间并留共面清隙；任一层缺失时回退旧锚点 + 0.3m。多帧角色（frameCount>1）新增 `walkFromX`/`walkToX` 行走区间字段（默认 -3.0 → +3.0，角色 dict 可覆盖），`position` 的 X 取行走起点，首帧姿势和轨迹一致。缩放逻辑不变（1.6m ÷ 帧内占比）。
+- `backend/blender/addons/aicss_scene_builder/operators/import_character_frames.py`：不再只建静止平面——新增 `_walk_range`（读行走区间，缺字段/非法值回退默认，起止相同则不走路）和 `_add_walk_animation`（给平面 X 位置 K 两个关键帧：帧 1 在 walkFromX、末帧在 walkToX，线性插值，Y/Z 不动），在帧序列材质挂好后调用。单独建平面时的默认深度与 import_layers 对齐。
+- `backend/blender/addons/aicss_scene_builder/operators/import_layers.py`：新增 `CHARACTER_DEPTH_FROM_FOREGROUND = 0.35` 和 `default_character_z`（与后端同一条插值公式；模块被单独加载时直接读清单，不依赖包结构），`_create_plane_for_character` 默认深度从地面层 +0.3 改成同一插值。
+- 测试：`backend/tests/test_character_placement.py` 改到第 6 轮语义——人物落在前景与地面之间（-9 < z < -5，严格等于插值公式）、多帧角色带行走字段且从起点落位、单帧角色不写行走字段、已写 walk 区间不被覆盖、缺前景层时回退贴地面、插件常量与默认深度公式和后端一致；`backend/tests/test_character_frames_dir.py` 新增 `_walk_range` 默认/覆盖/零位移三个用例。
+
+最终落位：人物 z≈-7.02（ground -16.34 与 foreground -2.0 之间、靠前景 0.35 处），x 从 -3.0 线性走到 +3.0，位移 6m。相机距离从 28m 缩到 19m，人物在画面里放大约 1.47 倍（身高占比从 ~9% 到 ~14%）；6m 位移在 19m 深处约占画面宽的一半，行走进度三帧可读。
+
+测试：`backend/.venv/Scripts/python.exe -m pytest backend/tests -q` → 82 passed。
+
+下一步：重跑归档渲染，观察人物在 frame0/60/119 里是否从左走到右、比例是否读得出来，脚踩位置是否仍在操场地面上不悬空。

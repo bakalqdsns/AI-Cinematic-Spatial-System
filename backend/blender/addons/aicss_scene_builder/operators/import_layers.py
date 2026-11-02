@@ -224,7 +224,46 @@ def _first_frame_in_dir(frames_dir: str) -> str:
 DEFAULT_CHARACTER_HEIGHT_M = 1.6
 DEFAULT_CHARACTER_FILL = 0.9
 # 人物平面贴在地面层靠相机一侧的距离（米），避免和地面卡片共面闪面。
+# 只作旧回退：ground==foreground 等退化情况使用。
 CHARACTER_GROUND_CLEARANCE_M = 0.3
+# 人物平面深度：foreground 与 ground 之间、从前景往地面走的比例。
+# 与后端 shot_archiver._CHARACTER_DEPTH_FROM_FOREGROUND 一致（0.35 →
+# 当前分层约 -7.0m），人物在画面里够大，又仍在前景之后不悬空。
+CHARACTER_DEPTH_FROM_FOREGROUND = 0.35
+
+
+def _manifest_layer_z(manifest, layer, fallback):
+    """不依赖包结构地查清单里某层的 zOffset（scene_utils.layer_z_offset
+    的独立副本，供本模块被单独加载时使用）。"""
+    for entry in manifest.get("zOffsets", []):
+        if entry.get("layer") == layer:
+            try:
+                return float(entry.get("zOffset"))
+            except (TypeError, ValueError):
+                break
+    return float(fallback)
+
+
+def default_character_z(manifest):
+    """人物默认深度：ground 与 foreground 之间靠前景 0.35 处（镜像后端）。
+
+    两层都查得到时按比例插值并夹到层间（留共面清隙）；退化时回退到
+    地面层 + CHARACTER_GROUND_CLEARANCE_M。
+    """
+    try:
+        from ..utils.scene_utils import layer_z_offset
+        ground = layer_z_offset(manifest, "ground")
+        foreground = layer_z_offset(manifest, "foreground")
+    except ImportError:
+        # 模块被单独加载（无包上下文）时直接读清单
+        ground = _manifest_layer_z(manifest, "ground", -4.0)
+        foreground = _manifest_layer_z(manifest, "foreground", -2.0)
+    if ground == foreground:
+        return ground + CHARACTER_GROUND_CLEARANCE_M
+    z = foreground + (ground - foreground) * CHARACTER_DEPTH_FROM_FOREGROUND
+    lo, hi = sorted((ground, foreground))
+    clearance = min(CHARACTER_GROUND_CLEARANCE_M, abs(hi - lo) / 4.0)
+    return min(max(z, lo + clearance), hi - clearance)
 
 
 def _create_plane_for_character(ch, manifest, *, collection,
@@ -233,21 +272,17 @@ def _create_plane_for_character(ch, manifest, *, collection,
 
     character 项字段：
       id (必填), name, framesDir, frameCount, fps
-      position: [x, y, z]  (可选，默认站在地上：地面层 z + 0.3m)
+      position: [x, y, z]  (可选，默认 ground 与 foreground 之间靠前景 0.35 处)
       scale:    [sx, sy]   (可选，默认按 1.6m 人物占帧九成 ≈ [1.78, 1.78])
 
     返回创建的对象，失败返回 None。
     """
-    from ..utils.scene_utils import layer_z_offset
-
     char_id = ch.get("id") or ch.get("name") or "character"
     position = ch.get("position")
     if not position or len(position) < 3:
-        # 默认站在地上：贴着地面层靠相机一侧，不再悬在所有层前面
-        position = [
-            0.0, 0.0,
-            layer_z_offset(manifest, "ground") + CHARACTER_GROUND_CLEARANCE_M,
-        ]
+        # 默认深度与后端一致：ground 与 foreground 之间靠前景 0.35 处，
+        # 人物在画面里够大，仍落在地面层之前不悬空
+        position = [0.0, 0.0, default_character_z(manifest)]
     scale = ch.get("scale")
     if not scale or len(scale) < 2:
         s = DEFAULT_CHARACTER_HEIGHT_M / DEFAULT_CHARACTER_FILL
