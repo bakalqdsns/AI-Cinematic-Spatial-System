@@ -379,7 +379,9 @@ def _find_scene_wide(project_dir: Path, scene_id: Optional[str]) -> Optional[Pat
     return hits[0]
 
 
-_OCCLUSION_FILL_MARK = "scene_table_perspective_v2"
+# 分层缓存标记：补全策略变了就 bump，否则旧的「整层画满」分层会被当成
+# 最新结果复用。v3 = 轮廓窄带补全 + 可见像素互斥。
+_OCCLUSION_FILL_MARK = "scene_table_perspective_v3"
 
 
 def _layers_already_exported(layers_dir: Path, source: Path) -> bool:
@@ -567,17 +569,90 @@ def _load_perspective_offsets(project_dir: Path) -> list[dict]:
     return rows
 
 
-def _place_characters_in_front(characters: list[dict], z_offsets: list[dict]) -> list[dict]:
-    """人物平面放在前景层靠相机的一侧，近处比远处的场景层更大。"""
-    foreground = next((row for row in z_offsets if row.get("layer") == "foreground"), None)
-    if foreground is None:
+# 人物默认身高（米）。16 岁少女约 1.6m；角色 dict 里写 heightM 可覆盖。
+_DEFAULT_CHARACTER_HEIGHT_M = 1.6
+# 抠像帧里人物占画面高度的默认比例，量不到剪影时用它估平面高度。
+_DEFAULT_CHARACTER_FILL = 0.9
+# 人物平面贴在地面层靠相机一侧的距离（米），避免和地面卡片共面闪面。
+_CHARACTER_GROUND_CLEARANCE_M = 0.3
+
+
+def _character_plane_scale(frames_dir: str, height_m: float) -> Optional[list]:
+    """按帧里人物的实际占比换算平面缩放，让人物在世界里的高度 ≈ height_m 米。
+
+    量中间帧的 alpha 包围盒：平面高 = height_m / 人物占帧高度比，
+    宽按帧宽高比走，不拉伸变形。量不到（无帧、无 alpha）时返回 None，
+    调用方退回 ``height_m / _DEFAULT_CHARACTER_FILL``。
+    """
+    if not frames_dir or not os.path.isdir(frames_dir):
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        names = sorted(
+            f for f in os.listdir(frames_dir) if f.lower().endswith(".png")
+        )
+        if not names:
+            return None
+        # 中间帧人物最完整（首帧可能刚入画被切边）
+        path = os.path.join(frames_dir, names[len(names) // 2])
+        with Image.open(path) as im:
+            w, h = im.size
+            bbox = im.getchannel("A").getbbox() if "A" in im.getbands() else None
+        if not w or not h:
+            return None
+        if bbox:
+            fill = float(bbox[3] - bbox[1]) / float(h)
+            fill = min(max(fill, 0.2), 1.0)
+        else:
+            # 绿底整帧量不到剪影，按人物占九成估
+            fill = _DEFAULT_CHARACTER_FILL
+        sy = float(height_m) / fill
+        sx = sy * (float(w) / float(h))
+        return [round(sx, 3), round(sy, 3)]
+    except Exception as exc:
+        _log.warning("[archive] character scale measure failed: %s", exc)
+        return None
+
+
+def _place_characters_on_ground(characters: list[dict], z_offsets: list[dict]) -> list[dict]:
+    """人物平面放到地面层靠相机一侧，按真实身高给缩放。
+
+    人物站在地上：Z 取 ground 层的 zOffset 加 0.3m（朝相机方向），
+    不再悬在前景层前面和场景透视脱节。缩放按角色真实身高
+    （默认 1.6m，可用 heightM 覆盖）除以帧里人物占比换算，
+    不再拍脑袋 4.0。清单里已写 position / scale 的角色不动。
+    """
+    anchor = None
+    for want in ("ground", "midground", "foreground"):
+        row = next((r for r in z_offsets if r.get("layer") == want), None)
+        if row is not None:
+            try:
+                anchor = float(row.get("zOffset"))
+            except (TypeError, ValueError):
+                anchor = None
+            if anchor is not None:
+                break
+    if anchor is None:
         return characters
-    z = float(foreground.get("zOffset", -2.0)) + 0.4
+    z = anchor + _CHARACTER_GROUND_CLEARANCE_M
     placed = []
     for character in characters:
         item = dict(character)
         if not item.get("position"):
             item["position"] = [0.0, 0.0, z]
+        if not item.get("scale"):
+            try:
+                height_m = float(item.get("heightM") or _DEFAULT_CHARACTER_HEIGHT_M)
+            except (TypeError, ValueError):
+                height_m = _DEFAULT_CHARACTER_HEIGHT_M
+            scale = _character_plane_scale(str(item.get("framesDir") or ""), height_m)
+            if scale is None:
+                s = round(height_m / _DEFAULT_CHARACTER_FILL, 3)
+                scale = [s, s]
+            item["scale"] = scale
         placed.append(item)
     return placed
 
@@ -800,7 +875,7 @@ def build_shot_archive(
                 "keyframesPath": cam_rel,
             },
             "cameraPath": list(camera_path) if camera_path else [],
-            "characters": _place_characters_in_front(characters_field, z_offsets),
+            "characters": _place_characters_on_ground(characters_field, z_offsets),
             "lighting": lighting_field,
             "lightingPreset": lighting_preset_name,
             "meshes": mesh_files,

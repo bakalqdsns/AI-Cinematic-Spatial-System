@@ -73,3 +73,26 @@
 - `backend/tests/test_layer_perspective.py`（新）：断言透视表带呈现字段且深度语义不变、插件默认值与后端一致、视角列表含 3/4 视角和拆解视图、拆解布局单调错开、切边材质和加厚接好。
 
 下一步：重跑 `render_three_views.py` 和归档渲染，观察六个视角里切边和错位是否让五层在静止帧里也能分清，成片运镜时层间缝是否可见。
+
+## 第 5 轮：人物接透视 + alpha 边界
+
+观察：
+
+- `_final_frame60.png`：白衣少女太小、像贴纸，没有踩到地面透视上。人物平面被放到前景层前（z=-1.6），缩放是拍脑袋的 [4.0, 4.0]，和地面层（z=-16.3）完全脱节。
+- 同一帧有半透明错位带。查五层 alpha：sky 整层 100% 不透明、background 90.5%，全图 90% 的像素有 ≥2 层同时不透明——`inpaint_occluded_layers` 把「被更近层挡住的全部区域」都 LaMa 画满了，层片一带错位/偏航，轮廓边就露出和近层对不上的填充带。
+- `export_layers` 的羽化是模糊后再用 127 硬阈值，既啃细边又让相邻层在同一像素同时半透明。
+
+改动（场景类识别、深度归层语义、绿幕措辞、人物帧都没动）：
+
+- `backend/app/services/shot_archiver.py`：`_place_characters_in_front` 改成 `_place_characters_on_ground`——人物 Z 取地面层 zOffset + 0.3m（站在地上，不再悬在前景前）；新增 `_character_plane_scale`，量中间帧 alpha 包围盒，平面高 = 角色真实身高（默认 1.6m，`heightM` 可覆盖）÷ 人物占帧高度比，宽按帧宽高比走，量不到时按占帧九成估。分层缓存标记 bump 到 `scene_table_perspective_v3`，否则旧的「整层画满」分层会被复用。
+- `backend/blender/addons/aicss_scene_builder/operators/import_layers.py`：`_create_plane_for_character` 默认位置从 [0,0,0] 改成地面层 z + 0.3m，默认缩放从 [4.0, 4.0] 改成 1.6m÷0.9 ≈ [1.78, 1.78]。
+- `backend/blender/addons/aicss_scene_builder/operators/import_character_frames.py`：单独建平面时的默认位置和缩放与 import_layers 对齐。
+- `backend/app/services/layer_exporter.py`：
+  - `export_layers` 羽化改成对所有层的模糊 alpha 做 argmax 归属（新增 `_exclusive_alphas`）：每个像素仍只属于一层，可见像素互斥（一个 255 其余 0），边缘锯齿同时被平滑，不再各自模糊后硬阈值。
+  - `inpaint_occluded_layers` 补全只补两种洞：①轮廓窄带——本层可见内容外缘 `reveal_band_px`（默认图宽 2.5%，1280 宽时 32px）内被更近层遮住的部分，挡住运镜/错位露出的缝；②全透明洞——所有层都没像素的点，只补到最远一层。重叠深处远层 alpha 显式清 0，不再把整个被遮区域画满。
+- 测试：`backend/tests/test_scene_layers.py` 更新补全断言（洞不超出人遮罩、重叠区必补、深处互斥），新增全透明洞只补最远层的用例；新增 `backend/tests/test_character_placement.py` 断言人物落在地面层、缩放按身高换算、插件默认值与后端一致。
+- 验证：合成 320×180 场景跑 export+inpaint，多层不透明像素从旧实现的 ~90% 降到 11.6%（只剩轮廓窄带），全透明洞为 0。
+
+测试：`backend/.venv/Scripts/python.exe -m pytest backend/tests -q` → 75 passed。
+
+下一步：重跑归档渲染，观察人物是否踩到操场透视上、身高和场景是否匹配，轮廓边的错位带是否消失；运镜时确认窄带补全覆盖近层移开露出的缝。

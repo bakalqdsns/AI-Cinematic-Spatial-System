@@ -137,13 +137,25 @@ def _find_character_plane(char_id: str, shot_id: str):
 def _create_character_plane(char, manifest):
     """新建一个角色平面（T10 已有逻辑，这里复刻一份精简版用于 T08
     单独跑的场景）。返回 obj 或 None。"""
-    from ..utils.scene_utils import Z_OFFSETS
+    from .import_layers import (
+        CHARACTER_GROUND_CLEARANCE_M,
+        DEFAULT_CHARACTER_FILL,
+        DEFAULT_CHARACTER_HEIGHT_M,
+    )
+    from ..utils.scene_utils import layer_z_offset
 
     char_id = char.get("id") or char.get("name") or "character"
     position = char.get("position")
     if not position or len(position) < 3:
-        position = [0.0, 0.0, Z_OFFSETS["foreground"]]
-    scale = char.get("scale") or [4.0, 4.0]
+        # 与 import_layers 一致：默认站在地上，不再悬在前景层
+        position = [
+            0.0, 0.0,
+            layer_z_offset(manifest, "ground") + CHARACTER_GROUND_CLEARANCE_M,
+        ]
+    scale = char.get("scale")
+    if not scale or len(scale) < 2:
+        s = DEFAULT_CHARACTER_HEIGHT_M / DEFAULT_CHARACTER_FILL
+        scale = [round(s, 3), round(s, 3)]
 
     try:
         bpy.ops.mesh.primitive_plane_add(
@@ -176,7 +188,7 @@ class AICSS_OT_import_character_frames(Operator):
         fps: Override the manifest's per-character fps (default 0 = read
             from manifest, fallback 24).
         default_scale: Plane scale used when manifest has no ``scale`` field
-            (default [4.0, 4.0] BU).
+            (default ≈1.78 BU — 按 1.6m 人物占帧九成估算，人物站在地面层旁)。
     """
     bl_idname = "aicss.import_character_frames"
     bl_label = "Import Character Frames"
@@ -196,10 +208,10 @@ class AICSS_OT_import_character_frames(Operator):
     )
     default_scale_xy: FloatProperty(
         name="Default Plane Scale",
-        default=4.0,
+        default=1.78,
         min=0.1,
         max=50.0,
-        description="Plane scale used when manifest has no `scale` field",
+        description="Plane scale used when manifest has no `scale` field (1.6m character)",
     )
 
     def execute(self, context):

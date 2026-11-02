@@ -522,22 +522,67 @@ def export_layers(
         layers=layers,
     )
 
+    # 羽化：不再每层各自模糊后用 127 硬阈值——那会把细边啃出缝，
+    # 也让相邻层在同一像素同时变半透明（叠出错位带）。
+    # 改成对所有层的模糊 alpha 做 argmax 归属：每个像素仍然只赢得一层，
+    # 可见像素互斥（一个 255 其余 0），边缘锯齿同时被平滑。
+    alpha_map = _exclusive_alphas(layer_masks, layers=layers, feather_px=feather_px, size=(h, w))
+
     # 合成每层 RGBA。
     out: dict[str, Image.Image] = {}
     for layer in layers:
-        mask = layer_masks.get(layer, np.zeros((h, w), dtype=bool))
-        alpha = (mask.astype(np.uint8) * 255)
-        alpha_img = Image.fromarray(alpha, mode="L")
-        if feather_px > 0:
-            blurred = alpha_img.filter(
-                ImageFilter.GaussianBlur(radius=float(feather_px))
-            )
-            blurred_np = np.array(blurred)
-            alpha = (blurred_np > 127).astype(np.uint8) * 255
-            alpha_img = Image.fromarray(alpha, mode="L")
+        alpha = alpha_map.get(layer)
+        if alpha is None:
+            alpha = np.zeros((h, w), dtype=np.uint8)
         rgba = np.dstack([rgb_np, alpha])
         out[layer] = Image.fromarray(rgba, mode="RGBA")
     return out
+
+
+def _exclusive_alphas(
+    layer_masks: dict[str, np.ndarray],
+    *,
+    layers: list[str],
+    feather_px: int,
+    size: tuple[int, int],
+) -> dict[str, np.ndarray]:
+    """把互斥的层 mask 转成互斥的 0/255 alpha，可选地平滑分区间边界。
+
+    feather_px=0 时就是硬边。>0 时对每张 mask 做高斯模糊后按像素
+    argmax 归属——平滑只移动层与层的分界线，不会让两层在同一像素
+    都不透明，也不会让两层都透明。归属按 ``layer_masks`` 的全集算，
+    只导出部分层时未导出层仍参与竞选，边界不会被拉宽。
+    """
+    h, w = size
+    names = [name for name, mask in layer_masks.items()
+             if mask is not None and getattr(mask, "shape", None) == (h, w)]
+    if feather_px <= 0 or len(names) <= 1:
+        return {
+            name: (layer_masks[name].astype(bool).astype(np.uint8) * 255)
+            for name in names
+        }
+    blurred = []
+    for name in names:
+        soft = Image.fromarray(
+            layer_masks[name].astype(bool).astype(np.uint8) * 255, mode="L",
+        ).filter(ImageFilter.GaussianBlur(radius=float(feather_px)))
+        blurred.append(np.array(soft, dtype=np.float32))
+    stack = np.stack(blurred, axis=0)
+    winner = np.argmax(stack, axis=0)
+    top = np.max(stack, axis=0)
+    return {
+        name: ((winner == index) & (top > 8)).astype(np.uint8) * 255
+        for index, name in enumerate(names)
+    }
+
+
+def _dilate_mask(mask: np.ndarray, radius_px: int) -> np.ndarray:
+    """方形膨胀 radius_px 像素。PIL MaxFilter 是 C 实现，不需要 scipy。"""
+    if radius_px <= 0 or not np.any(mask):
+        return mask.astype(bool)
+    size = 2 * int(radius_px) + 1
+    img = Image.fromarray(mask.astype(np.uint8) * 255, mode="L")
+    return np.array(img.filter(ImageFilter.MaxFilter(size))) > 0
 
 
 def inpaint_occluded_layers(
@@ -550,12 +595,25 @@ def inpaint_occluded_layers(
     sky_mask: Optional[np.ndarray] = None,
     scene_class: Optional[str] = None,
     inpaint_fn: Optional[Callable] = None,
+    reveal_band_px: Optional[int] = None,
 ) -> dict[str, Image.Image]:
-    """把更近层挡住的区域用 LaMa 补进更远的层。
+    """把遮挡边界的窄带用 LaMa 补进更远的层，可见像素保持互斥。
+
+    重叠区域只有更近的层可见：远层在被更近层遮住的像素上 alpha 保持 0，
+    不再把整个被遮区域画满。旧实现里最远几层几乎整层都是补全内容，
+    层片一带错位/偏航，轮廓边就露出和近层对不上的填充带（错位带）。
+
+    补全只补两种洞：
+      1. 轮廓窄带：本层可见内容外缘 ``reveal_band_px`` 像素内被更近层
+         遮住的部分——运镜或层片错位时近层移开会露出这条带，
+         不补会透出世界底色。默认带宽 ≈ 图宽 2.5%（1280 宽时 32px），
+         覆盖纸雕错位（±0.45m）在近层深度上的屏幕位移。
+      2. 全透明洞：所有层都没有像素的点，只补到最远的一层，
+         其余层在那些像素上保持透明。
 
     顺序跟 Z 一致：前景最近，不被补全；地面比前景远，不再当成最近的遮挡。
-    近层自己的像素不动。远层在被挡住的像素上写入补全结果并变为不透明。
-    ``inpaint_fn`` 默认是 ``app.utils.inpaint_utils.generate_inpaint``。
+    近层自己的像素不动。``inpaint_fn`` 默认是
+    ``app.utils.inpaint_utils.generate_inpaint``。
     """
     if not layer_imgs:
         return layer_imgs
@@ -577,6 +635,15 @@ def inpaint_occluded_layers(
     names = [name for name in layer_imgs if name in LAYER_Z_OFFSETS]
     names.sort(key=lambda name: LAYER_Z_OFFSETS[name])
 
+    if reveal_band_px is None:
+        reveal_band_px = max(8, int(round(w * 0.025)))
+
+    # 全透明洞：所有已知层都没有像素的点，只补到最远的一层。
+    uncovered = np.ones((h, w), dtype=bool)
+    for mask in layer_masks.values():
+        if mask is not None and getattr(mask, "shape", None) == (h, w):
+            uncovered &= ~mask.astype(bool)
+
     if inpaint_fn is None:
         from app.utils.inpaint_utils import generate_inpaint
         inpaint_fn = generate_inpaint
@@ -585,29 +652,43 @@ def inpaint_occluded_layers(
         own = layer_masks.get(name)
         if own is None or own.shape != (h, w):
             own = np.zeros((h, w), dtype=bool)
+        else:
+            own = own.astype(bool)
         closer = np.zeros((h, w), dtype=bool)
         for nearer in names[index + 1:]:
             nearer_mask = layer_masks.get(nearer)
             if nearer_mask is not None and nearer_mask.shape == (h, w):
                 closer |= nearer_mask.astype(bool)
-        hole = closer & ~own
+        occluded = closer & ~own
+        # 轮廓窄带：只补本层可见内容外缘 reveal_band_px 内被遮住的部分。
+        hole = _dilate_mask(own, reveal_band_px) & occluded
+        if index == 0:
+            hole |= uncovered
+        # 重叠深处保持透明：可见像素互斥，只有更近的层可见。
+        deep_occluded = occluded & ~hole
         ratio = float(hole.mean()) if hole.size else 0.0
+        layer = np.array(layer_imgs[name].convert("RGBA"))
+        if np.any(deep_occluded):
+            layer[deep_occluded, 3] = 0
         if ratio < 0.001:
             logger.info("[layers] %s: no occluder to inpaint (%.4f)", name, ratio)
+            layer_imgs[name] = Image.fromarray(layer, mode="RGBA")
             continue
-        logger.info("[layers] LaMa fill %s occluded %.1f%%", name, ratio * 100)
+        logger.info(
+            "[layers] LaMa fill %s occluded band %.1f%%", name, ratio * 100,
+        )
         mask_img = Image.fromarray((hole.astype(np.uint8) * 255), mode="L")
         try:
             filled = inpaint_fn(rgb, mask_img, "occluded background")
         except Exception as exc:
             logger.warning("[layers] LaMa failed for %s: %s", name, exc)
+            layer_imgs[name] = Image.fromarray(layer, mode="RGBA")
             continue
         filled_np = np.array(filled.convert("RGB"))
         if filled_np.shape[:2] != (h, w):
             filled_np = np.array(
                 Image.fromarray(filled_np).resize((w, h), Image.LANCZOS)
             )
-        layer = np.array(layer_imgs[name].convert("RGBA"))
         layer[hole, 0:3] = filled_np[hole]
         layer[hole, 3] = 255
         layer_imgs[name] = Image.fromarray(layer, mode="RGBA")

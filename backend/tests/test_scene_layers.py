@@ -210,9 +210,12 @@ def test_人和地面重叠时可见像素属于前景地面待补():
         scene_class="school_playground",
         inpaint_fn=假补全,
     )
-    人洞 = (人遮罩.astype(np.uint8) * 255)
-    assert sum(np.array_equal(洞, 人洞) for 洞 in 调用的洞) == 1
-    assert np.all(人洞[重叠] == 255)
+    # 只有地面需要补（被人遮住的轮廓窄带），且洞不超出人遮罩。
+    assert len(调用的洞) == 1
+    洞 = 调用的洞[0]
+    assert np.all(洞[~人遮罩] == 0)
+    # 靠近地面边界的重叠区必须补上（窄带内）。
+    assert np.all(洞[重叠] == 255)
 
     地面 = np.array(分层后["ground"])
     仅地面 = 地面遮罩 & ~人遮罩
@@ -220,9 +223,48 @@ def test_人和地面重叠时可见像素属于前景地面待补():
     assert np.all(地面[重叠, 0] == 7)
     assert np.all(地面[重叠, 1] == 8)
     assert np.all(地面[重叠, 2] == 9)
+    # 人遮罩深处（四边都离地面边界超过带宽）保持透明：可见像素互斥。
+    assert 地面[19, 21, 3] == 0
     assert np.all(地面[仅地面, 3] == 255)
     assert np.all(地面[仅地面, 0] == 30)
     assert np.array_equal(np.array(分层后["foreground"]), np.array(分层前["foreground"]))
+
+
+def test_全透明洞只补到最远一层():
+    高, 宽 = 48, 48
+    原图 = _空白(高, 宽, (30, 40, 50))
+    深度 = _深度(高, 宽, 5.0)
+    深度[0:2, 0:2] = 0.0  # 深度无效 → 这几像素五层都没有，是全透明洞
+    跑道 = np.zeros((高, 宽), dtype=bool)
+    跑道[30:40, 6:40] = True
+    物件 = [假物件("跑道", mask=跑道, depth_mean=6.0)]
+    分层前 = _导出(原图, 深度, 物件, "school_playground")
+    洞掩码 = np.zeros((高, 宽), dtype=bool)
+    洞掩码[0:2, 0:2] = True
+    分层前堆 = np.stack([np.array(分层前[名])[..., 3] for 名 in _LAYER_NAMES], axis=0)
+    assert np.all(分层前堆[:, 洞掩码] == 0)
+
+    调用的洞: list[np.ndarray] = []
+
+    def 假补全(base, mask, prompt):
+        调用的洞.append(np.array(mask.convert("L")))
+        return Image.new("RGB", base.size, (7, 8, 9))
+
+    分层后 = inpaint_occluded_layers(
+        原图,
+        分层前,
+        深度,
+        object_assets=物件,
+        scene_class="school_playground",
+        inpaint_fn=假补全,
+    )
+    # 全透明洞只补一次、只补到最远层（sky），近层在这些像素保持透明。
+    assert sum(np.array_equal(洞, (洞掩码.astype(np.uint8) * 255)) for 洞 in 调用的洞) == 1
+    天空 = np.array(分层后["sky"])
+    assert np.all(天空[洞掩码, 3] == 255)
+    assert np.all(天空[洞掩码, 0] == 7)
+    for 名 in ("background", "midground", "ground", "foreground"):
+        assert np.all(np.array(分层后[名])[洞掩码, 3] == 0)
 
 
 def test_剩余像素跟随地面物件深度而不是上下位置():
@@ -339,7 +381,7 @@ def test_没有检测结果时仍写出五张全透明层(tmp_path, monkeypatch)
         透明度 = np.array(Image.open(路径).convert("RGBA"))[..., 3]
         assert int(透明度.sum()) == 0
     标记 = json.loads((项目 / "layers" / "_fill.json").read_text(encoding="utf-8"))
-    assert 标记["method"] == "scene_table_perspective_v2"
+    assert 标记["method"] == "scene_table_perspective_v3"
     assert 标记["sceneClass"] == "unknown"
 
 

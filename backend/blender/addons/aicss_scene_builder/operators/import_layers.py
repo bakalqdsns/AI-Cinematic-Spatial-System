@@ -219,25 +219,39 @@ def _first_frame_in_dir(frames_dir: str) -> str:
         return ""
 
 
+# 人物默认身高（米）与帧内占比：清单没写 scale 时按 1.6m 人物、
+# 人物占帧高度九成估算平面高度，不再拍脑袋 4.0。
+DEFAULT_CHARACTER_HEIGHT_M = 1.6
+DEFAULT_CHARACTER_FILL = 0.9
+# 人物平面贴在地面层靠相机一侧的距离（米），避免和地面卡片共面闪面。
+CHARACTER_GROUND_CLEARANCE_M = 0.3
+
+
 def _create_plane_for_character(ch, manifest, *, collection,
                                   scene_width, scene_height):
     """T10: 为一个角色创建一个平面，按 manifest 的 position/scale 落位。
 
     character 项字段：
       id (必填), name, framesDir, frameCount, fps
-      position: [x, y, z]  (可选，默认前景层 z)
-      scale:    [sx, sy]   (可选，默认 [4.0, 4.0] BU)
+      position: [x, y, z]  (可选，默认站在地上：地面层 z + 0.3m)
+      scale:    [sx, sy]   (可选，默认按 1.6m 人物占帧九成 ≈ [1.78, 1.78])
 
     返回创建的对象，失败返回 None。
     """
-    from ..utils.scene_utils import Z_OFFSETS
+    from ..utils.scene_utils import layer_z_offset
 
     char_id = ch.get("id") or ch.get("name") or "character"
     position = ch.get("position")
     if not position or len(position) < 3:
-        # 默认放在前景层前面一点（z=0），水平居中，确保不被 foreground 遮挡
-        position = [0.0, 0.0, 0.0]
-    scale = ch.get("scale") or [4.0, 4.0]
+        # 默认站在地上：贴着地面层靠相机一侧，不再悬在所有层前面
+        position = [
+            0.0, 0.0,
+            layer_z_offset(manifest, "ground") + CHARACTER_GROUND_CLEARANCE_M,
+        ]
+    scale = ch.get("scale")
+    if not scale or len(scale) < 2:
+        s = DEFAULT_CHARACTER_HEIGHT_M / DEFAULT_CHARACTER_FILL
+        scale = [round(s, 3), round(s, 3)]
 
     bpy.ops.mesh.primitive_plane_add(
         size=1.0,
