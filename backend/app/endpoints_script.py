@@ -524,8 +524,7 @@ async def api_get_scene_prompts(request: ScenePromptsRequest):
     """
     from app.services.shot_generator import _build_shots_from_json
 
-    empty_script = ScriptData()
-    shots = _build_shots_from_json(request.shots, empty_script)
+    shots = _build_shots_from_json(request.shots)
     scene_transitions = generate_scene_transitions(shots)
 
     scene_prompts = [
@@ -568,7 +567,7 @@ async def api_get_action_sequences(request: ActionSequencesRequest):
     """
     from app.services.shot_generator import _build_shots_from_json
 
-    shots = _build_shots_from_json(request.shots, ScriptData())
+    shots = _build_shots_from_json(request.shots)
 
     characters = [
         Character(

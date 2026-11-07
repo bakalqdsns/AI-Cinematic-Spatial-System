@@ -421,6 +421,9 @@ def _build_shots_from_json(data: list | dict) -> list[Shot]:
     shots: list[Shot] = []
     for idx, item in enumerate(data, start=1):
         try:
+            nested_vp = item.get("visual_prompts") or {}
+            if not isinstance(nested_vp, dict):
+                nested_vp = {}
             shot = Shot(
                 id=item.get("id", f"shot-{idx}"),
                 scene_id=item.get("scene_id", ""),
@@ -431,10 +434,10 @@ def _build_shots_from_json(data: list | dict) -> list[Shot]:
                 shot_size=_parse_shot_size(item.get("shot_size", "Medium Shot")),
                 characters=item.get("characters", []),
                 visual_prompts=VisualPrompts(
-                    scene_prompt=_strip_language_label(item.get("scene_prompt", "")),
-                    action_prompt=_strip_language_label(item.get("action_prompt", "")),
-                    camera_prompt=_strip_language_label(item.get("camera_prompt", "")),
-                    transition_prompt=_strip_language_label(item.get("transition_prompt", "")),
+                    scene_prompt=_strip_language_label(item.get("scene_prompt") or nested_vp.get("scene_prompt", "")),
+                    action_prompt=_strip_language_label(item.get("action_prompt") or nested_vp.get("action_prompt", "")),
+                    camera_prompt=_strip_language_label(item.get("camera_prompt") or nested_vp.get("camera_prompt", "")),
+                    transition_prompt=_strip_language_label(item.get("transition_prompt") or nested_vp.get("transition_prompt", "")),
                 ),
                 duration_seconds=float(item.get("duration_seconds", 3.0)),
                 keyframe_start_prompt=_strip_language_label(item.get("keyframe_start_prompt", "")),
