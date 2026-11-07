@@ -1,6 +1,6 @@
 # AICSS 工具层（`app.tools`）
 
-《纸间行》链路能力的独立、可单点调用接口。15 个模块、30 个工具，全部从
+《纸间行》链路能力的独立、可单点调用接口。15 个模块、31 个工具，全部从
 `app.tools` 顶层导出。
 
 ## 设计约定
@@ -223,6 +223,21 @@ frames = extract_frames("clip.mp4", "out/frames", fps=12.0)  # 需要 ffmpeg
 - 输出：bool，是否成功写出。
 - 副作用：成功时写 RGBA PNG。
 - 模型：SAM2（GPU）；模型缺失时返回 False。
+
+### `stabilize_frames(frame_paths: list[str], output_dir: Optional[str] = None, anchor_x: float = 0.5, anchor_y: float = 0.95) -> list[str]`
+
+- 输入：抠好的 RGBA PNG 序列（`seg_0001.png` …，如 `key_greenscreen`
+  的输出）；`output_dir=None` 时写到原目录下 `stabilized/` 子目录，
+  传原目录即原地覆盖（文件名保持 `seg_XXXX.png`）；`anchor_x` /
+  `anchor_y` 是脚底锚点的归一化画布坐标（默认 0.5 / 0.95）。
+- 输出：写出的 PNG 路径列表。
+- 行为：对每张帧取 `alpha > 0` 的人物包围盒，先把所有帧包围盒高度
+  等比缩放到全序列中位高度（人物不再忽大忽小），再整数像素平移，使
+  包围盒底边中点（脚底）落在锚点。移出画布的部分裁掉，空出区域
+  alpha=0；没有 alpha 像素的帧原样写出。帧内人物被钉死后，横向位移
+  完全交给 Blender 平面的 X 线性动画，人物稳定平行横过画面。
+- 副作用：向 output_dir 写 PNG。
+- 模型：无（纯 numpy/OpenCV，CPU）。
 
 最小例子（纯 CPU，可直接跑）：
 

@@ -179,7 +179,12 @@ def test_greenscreen_frame_background_alpha_is_zero_without_sam2(tmp_path, monke
 
     rgba = _read_rgba(pngs[0])
     assert rgba.ndim == 3 and rgba.shape[2] == 4
-    green = (rgba[:, :, 0] == 0) & (rgba[:, :, 1] == 255) & (rgba[:, :, 2] == 0)
-    assert int(green.sum()) > 0
-    assert np.all(rgba[:, :, 3][green] == 0)
-    assert int(rgba[32, 32, 3]) == 255
+    # 抠像 + 稳定化后：背景 alpha 为 0（稳定化用全新透明画布，颜色通道一并清零）。
+    assert int(rgba[0, 0, 3]) == 0
+    assert int(rgba[-1, -1, 3]) == 0
+    assert int(rgba[0, -1, 3]) == 0
+    # 人物被钉在默认锚点：脚底在 (0.5*W, 0.95*H)。
+    ys, xs = np.nonzero(rgba[:, :, 3] > 0)
+    assert ys.size > 0
+    assert abs((int(xs.min()) + int(xs.max()) + 1) / 2 - 32) <= 1
+    assert abs((int(ys.max()) + 1) - round(0.95 * 64)) <= 1

@@ -170,11 +170,19 @@ def _add_walk_animation(obj, ch, frame_count: int) -> bool:
         obj["aicss_walk_from_x"] = from_x
         obj["aicss_walk_to_x"] = to_x
         action = getattr(obj.animation_data, "action", None) if obj.animation_data else None
-        for fc in getattr(action, "fcurves", None) or []:
-            if fc.data_path != "location":
-                continue
-            for kp in fc.keyframe_points:
-                kp.interpolation = 'LINEAR'
+        fcurves = getattr(action, "fcurves", None)
+        if fcurves:
+            # 严格平行画面：只保留 X（array_index=0）位移曲线，
+            # 删掉任何残留的 Y/Z location 关键帧（比如 operator 重跑前
+            # 旧动作留下的），保证平面不在深度/高度上漂移。
+            for fc in list(fcurves):
+                if fc.data_path == "location" and fc.array_index in (1, 2):
+                    fcurves.remove(fc)
+            for fc in fcurves:
+                if fc.data_path != "location":
+                    continue
+                for kp in fc.keyframe_points:
+                    kp.interpolation = 'LINEAR'
         return True
     except Exception:
         return False

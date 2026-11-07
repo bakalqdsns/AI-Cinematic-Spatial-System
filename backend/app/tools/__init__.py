@@ -45,6 +45,7 @@ _TOOL_TABLE: dict[str, tuple[str, str]] = {
     "chroma_key_rgba_array": ("app.tools.chroma_key", "chroma_key_rgba_array"),
     "is_greenscreen_frame": ("app.tools.chroma_key", "is_greenscreen_frame"),
     "segment_person": ("app.tools.chroma_key", "segment_person"),
+    "stabilize_frames": ("app.tools.chroma_key", "stabilize_frames"),
     # 深度估计
     "estimate_depth": ("app.tools.depth", "estimate_depth"),
     # 物件检测

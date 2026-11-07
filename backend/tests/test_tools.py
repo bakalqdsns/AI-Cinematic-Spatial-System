@@ -40,7 +40,7 @@ _EXPECTED_ASYNC = {
 
 def test___all__与_TOOL_TABLE一致且每个名字都能getattr():
     assert sorted(tools._TOOL_TABLE) == sorted(tools.__all__)
-    assert len(tools.__all__) == 30
+    assert len(tools.__all__) == 31
     for name in tools.__all__:
         value = getattr(tools, name)  # 触发懒加载，不能抛 AttributeError
         module_name, attr = tools._TOOL_TABLE[name]

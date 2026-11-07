@@ -751,6 +751,144 @@ def _refine_chroma_edges_with_sam2(
     return refined
 
 
+# ── Frame Stabilization ─────────────────────────────────────────────────────
+
+def stabilize_segmented_frames(
+    frame_paths: list[str],
+    output_dir: Optional[str] = None,
+    *,
+    anchor_x: float = 0.5,
+    anchor_y: float = 0.95,
+) -> list[str]:
+    """Pin the character inside each segmented RGBA frame so all apparent
+    motion can be delegated to the Blender plane.
+
+    MiniMax / video-provider footage lets the person drift within the frame
+    (position and distance change), so after chroma keying every ``seg_*.png``
+    has a differently placed, differently sized silhouette. This pass:
+
+    1. Measures the person bounding box (``alpha > 0``) per frame.
+    2. Normalises size: every bounding box is rescaled (aspect-preserving,
+       LANCZOS) to the *median* bounding-box height of the whole sequence,
+       so the person no longer grows/shrinks frame to frame.
+    3. Re-anchors: the scaled sprite is pasted onto a fresh transparent
+       canvas of the original size such that the bounding-box bottom centre
+       (the feet) lands exactly at ``(anchor_x * W, anchor_y * H)``. Paste
+       offsets are integer pixels; content shifted outside the canvas is
+       clipped and vacated area stays ``alpha = 0``.
+
+    Frames with no alpha pixels are written through unchanged and logged.
+    Pure numpy/OpenCV — no models involved.
+
+    Args:
+        frame_paths: Segmented RGBA PNG sequence (``seg_0001.png`` ...).
+        output_dir: Destination directory. ``None`` writes to a
+            ``stabilized/`` subdirectory next to the input frames. File
+            names are preserved, so passing the source directory itself
+            overwrites the frames in place (the pipeline does this).
+        anchor_x / anchor_y: Normalised canvas coordinates of the feet
+            anchor (default: horizontally centred, 95% down the frame).
+
+    Returns:
+        List of written file paths.
+    """
+    paths = [str(p) for p in frame_paths]
+    if not paths:
+        return []
+    if output_dir is None:
+        output_dir = str(Path(paths[0]).parent / "stabilized")
+    out_dir_path = Path(output_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # Pass 1: read every frame and measure the person bounding box.
+    images: list[Optional[np.ndarray]] = []
+    bboxes: list[Optional[tuple[int, int, int, int]]] = []
+    heights: list[int] = []
+    for p in paths:
+        img = _read_image(p, cv2.IMREAD_UNCHANGED)
+        images.append(img)
+        bbox = None
+        if img is not None and img.ndim == 3 and img.shape[2] == 4:
+            alpha = img[:, :, 3]
+            ys, xs = np.nonzero(alpha > 0)
+            if ys.size > 0:
+                y0, y1 = int(ys.min()), int(ys.max()) + 1
+                x0, x1 = int(xs.min()), int(xs.max()) + 1
+                bbox = (y0, y1, x0, x1)
+                heights.append(y1 - y0)
+        bboxes.append(bbox)
+
+    target_h = int(round(float(np.median(heights)))) if heights else 0
+    if target_h > 0:
+        logger.info(
+            "[motion_extractor] stabilize: %d/%d frames have alpha; median bbox height=%d",
+            len(heights),
+            len(paths),
+            target_h,
+        )
+
+    # Pass 2: scale to the median height, then paste with the feet anchored.
+    written: list[str] = []
+    for p, img, bbox in zip(paths, images, bboxes):
+        dest = out_dir_path / Path(p).name
+        if img is None:
+            logger.warning("[motion_extractor] stabilize skipped unreadable frame %s", p)
+            continue
+        if bbox is None or target_h <= 0:
+            logger.info(
+                "[motion_extractor] stabilize: no alpha pixels in %s; written unchanged",
+                p,
+            )
+            if not _write_image(str(dest), img):
+                logger.warning("[motion_extractor] failed to write stabilized %s", dest)
+                continue
+            written.append(str(dest))
+            continue
+
+        y0, y1, x0, x1 = bbox
+        crop = img[y0:y1, x0:x1]
+        src_h, src_w = crop.shape[:2]
+        scale = target_h / float(src_h)
+        new_w = max(1, int(round(src_w * scale)))
+        if src_h == target_h and src_w == new_w:
+            sprite = crop
+        else:
+            sprite = cv2.resize(crop, (new_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+
+        height, width = img.shape[:2]
+        canvas = np.zeros((height, width, 4), dtype=np.uint8)
+        foot_x = int(round(anchor_x * width))
+        foot_y = int(round(anchor_y * height))
+        # Integer-pixel translation: sprite bottom centre lands on the anchor.
+        paste_x = foot_x - new_w // 2
+        paste_y = foot_y - target_h
+        src_x0 = max(0, -paste_x)
+        src_y0 = max(0, -paste_y)
+        dst_x0 = max(0, paste_x)
+        dst_y0 = max(0, paste_y)
+        copy_w = min(new_w - src_x0, width - dst_x0)
+        copy_h = min(target_h - src_y0, height - dst_y0)
+        if copy_w > 0 and copy_h > 0:
+            canvas[dst_y0 : dst_y0 + copy_h, dst_x0 : dst_x0 + copy_w] = sprite[
+                src_y0 : src_y0 + copy_h, src_x0 : src_x0 + copy_w
+            ]
+
+        if not _write_image(str(dest), canvas):
+            logger.warning("[motion_extractor] failed to write stabilized %s", dest)
+            continue
+        written.append(str(dest))
+
+    logger.info(
+        "[motion_extractor] Stabilized %d/%d frames into %s (anchor=%.2f,%.2f)",
+        len(written),
+        len(paths),
+        output_dir,
+        anchor_x,
+        anchor_y,
+    )
+    return written
+
+
 def segment_person_from_frame(
     frame_path: str,
     output_path: str,
@@ -1100,6 +1238,20 @@ async def generate_motion_sequence(
         logger.info(
             "[motion_extractor] SAM2 model not available; leaving extracted frames unsegmented"
         )
+
+    # 4. Stabilize the keyed sequence: pin the in-frame character (feet
+    # anchored, size normalised) so all lateral motion is owned by the
+    # Blender plane. seg_*.png are overwritten in place, so the files later
+    # copied into the project motions/ dir are already stabilized.
+    seg_frames = sorted(Path(motion.segmented_dir).glob("seg_*.png"))
+    if seg_frames:
+        try:
+            stabilize_segmented_frames(
+                [str(p) for p in seg_frames],
+                motion.segmented_dir,
+            )
+        except Exception as e:
+            logger.warning("[motion_extractor] stabilize_segmented_frames failed: %s", e)
 
     motion.status = "done"
     return motion
