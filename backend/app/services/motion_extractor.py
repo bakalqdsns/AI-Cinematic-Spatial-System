@@ -368,7 +368,10 @@ def extract_frames_from_video(
     try:
         cmd = [
             resolved_ffmpeg, "-i", video_path,
-            "-vf", f"fps={fps},scale=1024:1024",
+            "-vf",
+            # Keep aspect ratio: fit inside 1024x1024 instead of stretching to a
+            # square, and round to even dimensions for codec compatibility.
+            f"fps={fps},scale=1024:1024:force_original_aspect_ratio=decrease:force_divisible_by=2",
             "-frames:v", str(max_frames),
             "-q:v", "2",
             str(output_dir_path / "frame_%04d.png"),
@@ -605,30 +608,23 @@ def frame_background_is_greenscreen(
     *,
     min_ratio: float = 0.7,
 ) -> bool:
-    """True when the frame border is mostly the chroma-key color.
+    """True when the frame border looks like a green screen.
 
-    A thin strip around the image is compared to ``key_color``. Character
-    pixels in the middle do not count, so a person on a flat green plate
-    still matches.
+    Reuses :func:`_sample_edge_screen_bgr` so off-pure plates are accepted,
+    not just borders within ``threshold`` of ``key_color``: a dark green
+    curtain (e.g. BGR (77, 148, 93)) passes the hue / channel-lead checks in
+    :func:`_looks_like_greenscreen_bgr` even though its distance to pure
+    green exceeds ``threshold``. Character pixels in the middle do not
+    count, so a person on a flat green plate still matches. A red, gray, or
+    photographic border returns False.
+
+    ``min_ratio`` is kept for backward compatibility with the original
+    ratio-based implementation; the sampling logic does not use it.
     """
     image = _read_image(frame_path, cv2.IMREAD_COLOR)
     if image is None or image.size == 0:
         return False
-    height, width = image.shape[:2]
-    band = _border_band_thickness(height, width)
-    strips = (
-        image[:band, :, :],
-        image[height - band :, :, :],
-        image[:, :band, :],
-        image[:, width - band :, :],
-    )
-    border = np.concatenate([strip.reshape(-1, 3) for strip in strips], axis=0).astype(np.int32)
-    diff = np.sqrt(
-        (border[:, 0] - key_color[0]) ** 2
-        + (border[:, 1] - key_color[1]) ** 2
-        + (border[:, 2] - key_color[2]) ** 2
-    )
-    return float(np.mean(diff <= threshold)) >= min_ratio
+    return _sample_edge_screen_bgr(image[:, :, :3], key_color, threshold) is not None
 
 
 def chroma_key_frames_sequence(

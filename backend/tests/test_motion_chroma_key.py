@@ -21,6 +21,36 @@ def _write_greenscreen_frame(path: Path) -> None:
     path.write_bytes(buf.tobytes())
 
 
+def _write_frame_with_border(path: Path, border_bgr: tuple[int, int, int]) -> None:
+    """边缘一圈是指定幕布色、中间放一个非绿主体的测试帧。"""
+    import cv2
+
+    image = np.zeros((64, 64, 3), dtype=np.uint8)
+    image[:] = border_bgr
+    image[16:48, 16:48] = (40, 40, 180)
+    ok, buf = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError(f"failed to encode {path}")
+    path.write_bytes(buf.tobytes())
+
+
+def test_frame_background_is_greenscreen_accepts_dark_green_plate(tmp_path):
+    """暗绿幕布 BGR (77,148,93) 距纯绿约 161，也必须判为绿幕。"""
+    from app.services.motion_extractor import frame_background_is_greenscreen
+
+    frame_path = tmp_path / "frame_0001.png"
+    _write_frame_with_border(frame_path, (77, 148, 93))
+    assert frame_background_is_greenscreen(str(frame_path)) is True
+
+
+def test_frame_background_is_greenscreen_rejects_red_border(tmp_path):
+    from app.services.motion_extractor import frame_background_is_greenscreen
+
+    frame_path = tmp_path / "frame_0001.png"
+    _write_frame_with_border(frame_path, (40, 40, 200))
+    assert frame_background_is_greenscreen(str(frame_path)) is False
+
+
 def _read_rgba(path: Path) -> np.ndarray:
     import cv2
 
