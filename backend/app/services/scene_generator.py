@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 from .script_parser import Scene, ScriptLanguage
 from .prompt_contract import SCENE_SYSTEM, fallback_scene_prompt
+from .scene_style import apply_scene_style
 
 
 SCENE_VIEWS = ("wide", "closeup", "mood")
@@ -324,11 +325,11 @@ async def _generate_via_zimage_lora(
     from . import zimage_lora_client
 
     width, height = _zimage_lora_size(size)
-    full_prompt = f"{prompt}, {zimage_lora_client.STYLE_SUFFIX}"
+    styled_prompt, negative = apply_scene_style(prompt)
     image = await asyncio.to_thread(
         zimage_lora_client.generate,
-        full_prompt,
-        zimage_lora_client.NEGATIVE_PROMPT,
+        styled_prompt,
+        negative,
         width,
         height,
         seed,
@@ -346,7 +347,10 @@ async def _generate_via_local(
     seed: Optional[int] = None,
     size: Optional[str] = None,
 ) -> Optional[str]:
-    """本地出图。按 local_image_backend 分流：zimage_lora / comfyui / diffusers。"""
+    """本地出图。按 local_image_backend 分流：zimage_lora / comfyui / diffusers。
+
+    三条通路都统一过 :func:`apply_scene_style` 的纸雕 HD-2D 风格。
+    """
     from app.services.comfyui_client import comfy_image_selected, generate_zimage_png
 
     if _zimage_lora_selected():
@@ -357,11 +361,16 @@ async def _generate_via_local(
                 "[scene_generator] Z-Image LoRA backend failed, falling back to default local path: %s", e,
             )
 
+    styled_prompt, negative = apply_scene_style(prompt)
+
     if comfy_image_selected():
         try:
             out_size = size or _default_scene_size()
             width, height = _parse_size_to_tuple(out_size)
-            png = await generate_zimage_png(prompt, width=width, height=height, seed=seed)
+            # 工作流带负面节点（71）时传统一负面词；不带则只追加正面后缀。
+            png = await generate_zimage_png(
+                styled_prompt, width=width, height=height, seed=seed, negative=negative,
+            )
             return base64.b64encode(png).decode("ascii")
         except Exception as e:
             logger.warning("[scene_generator] ComfyUI Z-Image failed: %s", e)
@@ -372,7 +381,7 @@ async def _generate_via_local(
         out_size = size or _default_scene_size()
         size_tuple = _parse_size_to_tuple(out_size)
         image = await asyncio.to_thread(
-            generator.generate, prompt, seed=seed, size=size_tuple,
+            generator.generate, styled_prompt, seed=seed, size=size_tuple,
         )
         if image is not None:
             return generator.pil_to_base64(image)
@@ -387,7 +396,11 @@ async def _generate_via_local_with_reference(
     *,
     strength: float = 0.7,
 ) -> Optional[str]:
-    """带参考图的本地出图。ComfyUI / Z-Image LoRA 通路没有 img2img，只使用提示词。"""
+    """带参考图的本地出图。ComfyUI / Z-Image LoRA 通路没有 img2img，只使用提示词。
+
+    提示词统一过 :func:`apply_scene_style`（幂等，转发给 ``_generate_via_local``
+    时不会重复追加）。
+    """
     from app.services.comfyui_client import comfy_image_selected
 
     if _zimage_lora_selected():
@@ -396,11 +409,12 @@ async def _generate_via_local_with_reference(
     if comfy_image_selected():
         logger.info("[scene_generator] ComfyUI Z-Image 工作流不接收参考图，按提示词出图")
         return await _generate_via_local(prompt)
+    styled_prompt, _negative = apply_scene_style(prompt)
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
         image = await asyncio.to_thread(
-            generator.generate_with_image, prompt, reference_image_b64, strength,
+            generator.generate_with_image, styled_prompt, reference_image_b64, strength,
         )
         if image is not None:
             return generator.pil_to_base64(image)
@@ -418,7 +432,9 @@ async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Option
     try:
         from app.providers.cloud_router import cloud_generate_image
         out_size = size or _default_scene_size()
-        urls = await cloud_generate_image(prompt, size=out_size, n=1)
+        # 云端接口不接收负面词，只追加统一风格正面后缀。
+        styled_prompt, _negative = apply_scene_style(prompt)
+        urls = await cloud_generate_image(styled_prompt, size=out_size, n=1)
         if not urls:
             return None
         url = urls[0]

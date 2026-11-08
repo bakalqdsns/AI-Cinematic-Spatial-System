@@ -60,7 +60,8 @@ def apply_zimage_prompt(
 ) -> dict[str, Any]:
     graph = copy.deepcopy(workflow)
     graph[_ZIMAGE_POSITIVE]["inputs"]["text"] = prompt
-    if negative is not None:
+    # 工作流没有负面节点时忽略 negative（只保留正面风格后缀），不报错。
+    if negative is not None and _ZIMAGE_NEGATIVE in graph:
         graph[_ZIMAGE_NEGATIVE]["inputs"]["text"] = negative
     graph[_ZIMAGE_LATENT]["inputs"]["width"] = int(width)
     graph[_ZIMAGE_LATENT]["inputs"]["height"] = int(height)

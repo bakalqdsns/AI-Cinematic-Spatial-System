@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 from .script_parser import Character, ScriptLanguage
 from .prompt_contract import CHARACTER_SYSTEM, fallback_character_prompt
+from .scene_style import apply_character_style
 
 THREE_VIEWS = ["front", "side", "back"]
 
@@ -180,6 +181,9 @@ async def generate_character_three_view(
     base_prompt = visual_prompt or character.visual_prompt
     if not base_prompt:
         base_prompt = await generate_visual_prompt(character)
+    # 人物本体统一纸雕风格：风格词只进人物描述部分，绿幕措辞仍由下方
+    # 各条提示词保持最后（幂等，下游 _generate_via_* 再过一次不会重复）。
+    base_prompt = apply_character_style(base_prompt)
 
     results: dict[str, Optional[str]] = {"front": None, "side": None, "back": None}
     out_size = size or _default_character_size()
@@ -326,13 +330,17 @@ def _comfy_character_prompt(prompt: str) -> str:
     再收紧一句：背景是一块平整的亮绿 cyclorama，地面和背景是同一块绿色，
     不要阴影、不要渐变、不要任何其他颜色或物体。同时写明不要改脸、发型，
     也不要把衣服改成绿色。
+
+    纸雕风格词（:func:`apply_character_style`）只加在人物描述部分；
+    绿幕条款一字不动、永远在最后——背景只能是绿幕，不是纸雕场景。
     """
     from app.services.video_adapter import (
         _FLAT_CYCLORAMA_CLAUSE,
         _apply_greenscreen_prompt,
     )
 
-    locked = _apply_greenscreen_prompt((prompt or "").strip(), True)
+    styled = apply_character_style(prompt)
+    locked = _apply_greenscreen_prompt(styled.strip(), True)
     return (
         f"{locked}. {_FLAT_CYCLORAMA_CLAUSE} "
         "Keep the face, hairstyle, and clothing colors from the "
@@ -369,8 +377,14 @@ async def _generate_via_local(
     seed: Optional[int] = None,
     size: Optional[str] = None,
 ) -> Optional[str]:
-    """本地出图。local_image_backend=comfyui 时走 Z-Image 工作流，否则走 Diffusers。"""
+    """本地出图。local_image_backend=comfyui 时走 Z-Image 工作流，否则走 Diffusers。
+
+    人物本体统一纸雕风格（幂等）；comfyui 通路由 _comfy_character_prompt
+    保证绿幕条款在最后。
+    """
     from app.services.comfyui_client import comfy_image_selected, generate_zimage_png
+
+    prompt = apply_character_style(prompt)
 
     if comfy_image_selected():
         try:
@@ -411,6 +425,7 @@ async def _generate_via_local_with_reference(
     if comfy_image_selected():
         logger.info("[character_generator] ComfyUI Z-Image 工作流不接收参考图，按提示词出图")
         return await _generate_via_local(prompt)
+    prompt = apply_character_style(prompt)
     try:
         from .image_generator import get_image_generator
         generator = get_image_generator()
@@ -434,7 +449,8 @@ async def _generate_via_cloud(prompt: str, *, size: str | None = None) -> Option
     try:
         from app.providers.cloud_router import cloud_generate_image
         out_size = size or _default_character_size()
-        urls = await cloud_generate_image(prompt, size=out_size, n=1)
+        # 云端接口不接收负面词，只追加人物纸雕风格词（幂等）。
+        urls = await cloud_generate_image(apply_character_style(prompt), size=out_size, n=1)
         if not urls:
             raise RuntimeError(
                 "Cloud image provider returned an empty URL list. "

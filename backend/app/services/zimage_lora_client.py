@@ -36,20 +36,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Paper-diorama HD-2D style (《纸间行》), from gen_zhijing_scenes.py ──────────
+# ── Paper-diorama HD-2D style (《纸间行》) ─────────────────────────────────────
+# 风格常量统一定义在 scene_style（全系统唯一来源，见 docs/style/）；
+# 这里保留旧名 re-export，兼容既有引用。
 
-STYLE_SUFFIX = (
-    "handcrafted paper diorama, layered paper cutout art, construction paper texture, "
-    "miniature scale model photography, Octopath Traveler HD-2D style, tilt-shift lens, "
-    "strong depth of field with blurred foreground and background, soft cinematic lighting, "
-    "wide shot, rich detail, masterpiece, best quality"
-)
+from .scene_style import SCENE_NEGATIVE_PROMPT, SCENE_STYLE_SUFFIX
 
-NEGATIVE_PROMPT = (
-    "flat 2d, cartoon network style, low resolution, blurry, noisy, watermark, text, signature, "
-    "bad anatomy, deformed hands, extra limbs, realistic photograph, modern city, car, crowd, "
-    "overexposed, washed out, dull colours"
-)
+STYLE_SUFFIX = SCENE_STYLE_SUFFIX
+NEGATIVE_PROMPT = SCENE_NEGATIVE_PROMPT
 
 DEFAULT_MODEL_DIR = r"F:\zimage-lora\models\Z-Image"
 DEFAULT_DIFFSYNTH_DIR = r"F:\zimage-lora\DiffSynth-Studio"

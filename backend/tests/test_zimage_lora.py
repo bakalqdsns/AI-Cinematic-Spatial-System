@@ -169,8 +169,10 @@ def test_scene_generator_falls_back_when_zimage_lora_raises(monkeypatch):
     assert result, "fallback path should still return base64 PNG"
     assert len(fake_gen.calls) == 1
     call = fake_gen.calls[0]
-    # Fallback keeps the ORIGINAL prompt — no style suffix leaks into diffusers.
-    assert call["prompt"] == "a quiet classroom at dusk"
+    # 兜底通路同样带统一纸雕风格后缀（全系统场景风格统一，见 scene_style）。
+    from app.services.scene_style import SCENE_STYLE_SUFFIX
+    assert "a quiet classroom at dusk" in call["prompt"]
+    assert SCENE_STYLE_SUFFIX in call["prompt"]
     assert call["size"] == (640, 360)
 
 

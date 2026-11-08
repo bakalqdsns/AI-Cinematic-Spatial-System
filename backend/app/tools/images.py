@@ -42,10 +42,12 @@ async def scene_keyframes(
         调用图像生成后端（本地 GPU 或云端 API）；不写磁盘。
     模型:
         本地 Z-Image/SDXL（GPU）或云端 DashScope，取决于部署 settings。
+        所有通路（comfyui / diffusers / zimage_lora / 云端）的场景图都统一
+        经过 ``scene_style.apply_scene_style`` 追加纸雕 HD-2D 风格后缀
+        （支持负面词的通路同时传统一负面词），风格基准见 docs/style/。
         当 settings.local_image_backend == "zimage_lora" 且 image_mode 为本地时，
-        场景图改走本地 DiffSynth ZImagePipeline 通路（自动追加纸雕 HD-2D 风格
-        后缀与固定负面词），三个视角同一条 txt2img 通路；失败自动回退原有
-        comfyui/diffusers 通路。
+        场景图改走本地 DiffSynth ZImagePipeline 通路，三个视角同一条
+        txt2img 通路；失败自动回退原有 comfyui/diffusers 通路。
     """
     from app.services.scene_generator import generate_scene_keyframes
 
@@ -86,6 +88,9 @@ async def character_three_view(
         重试全部失败时底层抛 RuntimeError。
     模型:
         本地 Z-Image/SDXL（GPU）或云端 DashScope，取决于部署 settings。
+        人物本体统一为纸雕风格（``scene_style.apply_character_style``，
+        风格词只在人物描述部分）；绿幕条款（#00FF00 + 平整 cyclorama）
+        一字不动、保持最后——背景永远只是绿幕，不是纸雕场景。
     """
     from app.services.character_generator import generate_character_three_view
 
