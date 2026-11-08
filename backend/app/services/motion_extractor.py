@@ -547,6 +547,156 @@ def chroma_key_rgba(
     return out
 
 
+def _estimate_plate_chroma(
+    frame_paths: list[str],
+    *,
+    max_samples: int = 24,
+    min_pixels: int = 500,
+    hue_min: int = 30,
+    hue_max: int = 110,
+    sat_min: int = 60,
+) -> Optional[tuple[float, float]]:
+    """Lock one plate chroma for a whole clip, sampled from green-looking pixels.
+
+    Per-frame border sampling follows the light while the clip runs: once the
+    generated plate darkens, or the character touches the frame edge, the
+    sampled colour drifts and the key either eats the character or leaves the
+    plate behind. Voting over the green-hue pixels of many frames and taking
+    the median Cr/Cb gives one stable plate colour for the sequence.
+
+    Chroma is used rather than BGR because it ignores plate brightness: a
+    cyclorama floor lit differently from its wall keeps the same Cr/Cb.
+
+    Returns ``None`` when no frame has enough green pixels to vote.
+    """
+    if not frame_paths:
+        return None
+    step = max(1, len(frame_paths) // max(1, max_samples))
+    samples: list[np.ndarray] = []
+    for path in frame_paths[::step]:
+        image = _read_image(path, cv2.IMREAD_COLOR)
+        if image is None or image.size == 0:
+            continue
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        green = (
+            (hsv[:, :, 0] >= hue_min)
+            & (hsv[:, :, 0] <= hue_max)
+            & (hsv[:, :, 1] >= sat_min)
+        )
+        if int(green.sum()) < min_pixels:
+            continue
+        ycc = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+        samples.append(np.median(ycc[green][:, 1:].astype(np.float32), axis=0))
+    if not samples:
+        return None
+    median = np.median(np.stack(samples), axis=0)
+    return float(median[0]), float(median[1])
+
+
+def chroma_key_rgba_locked(
+    rgba_bgr: np.ndarray,
+    plate_chroma: tuple[float, float],
+    *,
+    threshold: float = 14.0,
+    softness: float = 5.0,
+    despill: bool = True,
+    min_island: int = 300,
+) -> np.ndarray:
+    """Key a green plate against one fixed Cr/Cb, then clean up the matte.
+
+    Same contract as :func:`chroma_key_rgba` (only edge-connected plate pixels
+    become transparent, and the existing alpha can only shrink), with three
+    changes that matter for generated footage:
+
+    1. Distance is measured in YCrCb chroma, so a plate that darkens or
+       brightens between frames still matches. ``threshold`` / ``softness``
+       are chroma units here, not BGR units.
+    2. The matte is cleaned: a 3x3 open drops speckle, a 7x7 close fills
+       pinholes, components below ``min_island`` are dropped, and a 1 px
+       erosion plus a small blur pulls the edge in so the plate halo along the
+       silhouette does not travel with the sprite.
+    3. Green spill on the surviving pixels is pushed back toward neutral
+       (``G`` clamped to the mean of ``R`` and ``B`` plus a small margin), so
+       the sprite does not carry a green fringe onto the Blender plane.
+
+    Args:
+        rgba_bgr: HxWx4 uint8 array in BGR channel order.
+        plate_chroma: ``(Cr, Cb)`` of the plate, from
+            :func:`_estimate_plate_chroma`.
+        threshold: Chroma distance below which a reached pixel becomes 0.
+        softness: Chroma band over which alpha ramps from 0 to 255.
+        despill: Whether to suppress green spill on kept pixels.
+        min_island: Drop matte islands smaller than this many pixels (0 = off).
+
+    Returns:
+        New HxWx4 uint8 RGBA array.
+    """
+    out = rgba_bgr.copy()
+    if out.ndim != 3 or out.shape[2] < 4 or out.shape[0] == 0 or out.shape[1] == 0:
+        return out
+
+    plate = np.asarray(plate_chroma, dtype=np.float32)
+    ycc = cv2.cvtColor(out[:, :, :3], cv2.COLOR_BGR2YCrCb).astype(np.float32)
+    dist = np.sqrt(np.sum((ycc[:, :, 1:] - plate) ** 2, axis=-1))
+    reach_limit = float(threshold) + max(0.0, float(softness))
+    keyable = dist < reach_limit
+    if not np.any(keyable):
+        return out
+
+    count, labels = cv2.connectedComponents(keyable.astype(np.uint8), connectivity=4)
+    if count <= 1:
+        return out
+    rim = np.zeros(keyable.shape, dtype=bool)
+    rim[0, :] = True
+    rim[-1, :] = True
+    rim[:, 0] = True
+    rim[:, -1] = True
+    reached_ids = np.unique(labels[rim])
+    reached_ids = reached_ids[reached_ids > 0]
+    if reached_ids.size == 0:
+        return out
+    reached = np.isin(labels, reached_ids)
+
+    if softness <= 0:
+        keyed = np.where(reached, 0, 255).astype(np.uint8)
+    else:
+        ramp = np.clip(
+            (dist - float(threshold)) * 255.0 / float(softness), 0.0, 255.0
+        )
+        keyed = np.where(reached, ramp, 255.0).astype(np.uint8)
+
+    alpha = keyed
+    if min_island > 0:
+        fg = (alpha > 128).astype(np.uint8)
+        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        n_lab, lab, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+        keep = np.zeros_like(fg)
+        for idx in range(1, n_lab):
+            if stats[idx, cv2.CC_STAT_AREA] >= int(min_island):
+                keep[lab == idx] = 1
+        alpha = np.where(keep > 0, alpha, 0).astype(np.uint8)
+
+    solid = cv2.erode((alpha > 0).astype(np.uint8), np.ones((3, 3), np.uint8))
+    alpha = (
+        alpha.astype(np.float32) * (0.5 + 0.5 * solid.astype(np.float32))
+    ).clip(0, 255).astype(np.uint8)
+    alpha = cv2.GaussianBlur(alpha, (0, 0), 0.9)
+
+    out[:, :, 3] = np.minimum(out[:, :, 3], alpha)
+
+    if despill:
+        kept = out[:, :, 3] > 0
+        b = out[:, :, 0].astype(np.int16)
+        g = out[:, :, 1].astype(np.int16)
+        r = out[:, :, 2].astype(np.int16)
+        cap = ((r + b) // 2 + 12).clip(0, 255)
+        spill = kept & (g > cap)
+        out[:, :, 1] = np.where(spill, cap, g).astype(np.uint8)
+
+    return out
+
+
 def _read_image(path: str, flags: int) -> Optional[np.ndarray]:
     """Load an image from a path OpenCV's ``imread`` cannot open.
 
@@ -633,13 +783,37 @@ def chroma_key_frames_sequence(
     *,
     chroma_threshold: int = 80,
     chroma_softness: int = 20,
+    lock_plate: bool = False,
+    despill: bool = False,
 ) -> list[str]:
     """Chroma-key each frame to an RGBA PNG named ``seg_0001.png``, ``seg_0002.png``, ...
 
     Written even when SAM2 is not loaded. Unreadable frames are skipped.
+
+    ``lock_plate`` estimates one Cr/Cb plate for the whole clip
+    (:func:`_estimate_plate_chroma`) and keys every frame against it with
+    :func:`chroma_key_rgba_locked`; this is the path the motion pipeline uses,
+    because per-frame border sampling drifts once the generated plate darkens.
+    When the lock cannot be estimated, per-frame border sampling is used.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    plate: Optional[tuple[float, float]] = None
+    if lock_plate:
+        plate = _estimate_plate_chroma(frame_paths)
+        if plate is None:
+            logger.info(
+                "[motion_extractor] no green plate to lock; "
+                "falling back to per-frame border sampling"
+            )
+        else:
+            logger.info(
+                "[motion_extractor] locked plate chroma Cr=%.1f Cb=%.1f over %d frames",
+                plate[0],
+                plate[1],
+                len(frame_paths),
+            )
 
     written: list[str] = []
     for ordinal, frame_path in enumerate(frame_paths, start=1):
@@ -653,12 +827,15 @@ def chroma_key_frames_sequence(
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
         rgba[:, :, :3] = image[:, :, :3]
         rgba[:, :, 3] = 255
-        rgba = chroma_key_rgba(
-            rgba,
-            key_color=GREEN_KEY_BGR,
-            threshold=chroma_threshold,
-            softness=chroma_softness,
-        )
+        if plate is not None:
+            rgba = chroma_key_rgba_locked(rgba, plate, despill=despill)
+        else:
+            rgba = chroma_key_rgba(
+                rgba,
+                key_color=GREEN_KEY_BGR,
+                threshold=chroma_threshold,
+                softness=chroma_softness,
+            )
         if not _write_image(str(out_file), rgba):
             logger.warning("[motion_extractor] failed to write chroma key %s", out_file)
             continue
@@ -1205,6 +1382,8 @@ async def generate_motion_sequence(
             motion.segmented_dir,
             chroma_threshold=chroma_threshold,
             chroma_softness=chroma_softness,
+            lock_plate=True,
+            despill=True,
         )
 
     if sam2_model and use_chroma:

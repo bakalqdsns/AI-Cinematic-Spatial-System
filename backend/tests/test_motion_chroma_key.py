@@ -188,3 +188,121 @@ def test_greenscreen_frame_background_alpha_is_zero_without_sam2(tmp_path, monke
     assert ys.size > 0
     assert abs((int(xs.min()) + int(xs.max()) + 1) / 2 - 32) <= 1
     assert abs((int(ys.max()) + 1) - round(0.95 * 64)) <= 1
+
+
+def _write_shaded_plate_frame(path: Path, plate_dark: tuple[int, int, int],
+                              plate_light: tuple[int, int, int]) -> None:
+    """上半暗、下半亮的同一块绿幕，中间一个非绿主体；模拟生成视频里幕布变暗。"""
+    import cv2
+
+    image = np.zeros((64, 64, 3), dtype=np.uint8)
+    image[:32] = plate_dark
+    image[32:] = plate_light
+    image[20:44, 20:44] = (40, 40, 180)
+    ok, buf = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError(f"failed to encode {path}")
+    path.write_bytes(buf.tobytes())
+
+
+def _plate_chroma(bgr: tuple[int, int, int]) -> tuple[float, float]:
+    import cv2
+
+    ycc = cv2.cvtColor(np.uint8([[list(bgr)]]), cv2.COLOR_BGR2YCrCb)[0, 0]
+    return float(ycc[1]), float(ycc[2])
+
+
+def test_estimate_plate_chroma_picks_the_green_plate(tmp_path):
+    """无论幕布明暗，投票出来的 Cr/Cb 都应该贴近幕布的色度。"""
+    frame_path = tmp_path / "frame_0001.png"
+    _write_shaded_plate_frame(frame_path, (75, 131, 49), (119, 178, 94))
+
+    plate = me._estimate_plate_chroma([str(frame_path)])
+    assert plate is not None
+    expected = _plate_chroma((75, 131, 49))
+    assert abs(plate[0] - expected[0]) < 6
+    assert abs(plate[1] - expected[1]) < 6
+
+
+def test_estimate_plate_chroma_returns_none_without_green(tmp_path):
+    frame_path = tmp_path / "frame_0001.png"
+    _write_frame_with_border(frame_path, (40, 40, 200))
+    assert me._estimate_plate_chroma([str(frame_path)]) is None
+
+
+def test_locked_key_removes_shaded_plate_and_keeps_subject():
+    """同一帧里暗幕布和亮幕布亮度差很远，锁色后两半都必须变透明。"""
+    rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+    rgba[:32, :, :3] = (75, 131, 49)
+    rgba[32:, :, :3] = (119, 178, 94)
+    rgba[:, :, 3] = 255
+    rgba[20:44, 20:44] = (40, 40, 180, 255)
+
+    out = me.chroma_key_rgba_locked(rgba, _plate_chroma((75, 131, 49)), min_island=0)
+    assert int(out[4, 4, 3]) == 0
+    assert int(out[60, 60, 3]) == 0
+    assert int(out[32, 32, 3]) == 255
+
+
+def test_locked_key_suppresses_green_spill_on_kept_pixels():
+    """幕布反光把主体边缘染绿时，保留像素的 G 要压回中性。"""
+    rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+    rgba[:, :, :3] = (75, 131, 49)
+    rgba[:, :, 3] = 255
+    rgba[20:44, 20:44] = (60, 140, 180, 255)
+
+    out = me.chroma_key_rgba_locked(
+        rgba, _plate_chroma((75, 131, 49)), min_island=0, despill=True
+    )
+    b, g, r = (int(out[32, 32, 0]), int(out[32, 32, 1]), int(out[32, 32, 2]))
+    assert int(out[32, 32, 3]) == 255
+    assert g <= (r + b) // 2 + 12
+
+
+def test_locked_key_does_not_restore_existing_alpha():
+    """锁色版同样只能更透明，不能把 SAM2 已经挖掉的轮廓涂回不透明。"""
+    rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+    rgba[:, :, :3] = (75, 131, 49)
+    rgba[:, :, 3] = 0
+    rgba[20:44, 20:44] = (40, 40, 180, 255)
+
+    out = me.chroma_key_rgba_locked(rgba, _plate_chroma((75, 131, 49)), min_island=0)
+    assert int(out[4, 4, 3]) == 0
+    assert int(out[32, 32, 3]) == 255
+
+
+def test_chroma_key_frames_sequence_lock_plate_clears_shaded_screen(tmp_path):
+    """整段锁色：两帧幕布一暗一亮，抠完都应该是透明底。"""
+    frames = []
+    for idx, (dark, light) in enumerate(
+        [((75, 131, 49), (95, 154, 73)), ((90, 146, 70), (119, 178, 94))], start=1
+    ):
+        frame_path = tmp_path / "frames" / f"frame_{idx:04d}.png"
+        frame_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_shaded_plate_frame(frame_path, dark, light)
+        frames.append(str(frame_path))
+
+    written = me.chroma_key_frames_sequence(
+        frames, str(tmp_path / "seg"), lock_plate=True, despill=True
+    )
+    assert len(written) == 2
+    for path in written:
+        rgba = _read_rgba(Path(path))
+        assert int(rgba[2, 2, 3]) == 0
+        assert int(rgba[-2, -2, 3]) == 0
+        assert int(rgba[32, 32, 3]) == 255
+
+
+def test_chroma_key_frames_sequence_falls_back_when_plate_cannot_be_locked(tmp_path):
+    """没有绿幕时锁色拿不到颜色，要退回逐帧采样而不是抛异常。"""
+    frame_path = tmp_path / "frames" / "frame_0001.png"
+    frame_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_frame_with_border(frame_path, (40, 40, 200))
+
+    written = me.chroma_key_frames_sequence(
+        [str(frame_path)], str(tmp_path / "seg"), lock_plate=True, despill=True
+    )
+    assert len(written) == 1
+    rgba = _read_rgba(Path(written[0]))
+    # 蓝底不是绿幕，逐帧采样会放弃抠像，主体保留。
+    assert int(rgba[32, 32, 3]) == 255
