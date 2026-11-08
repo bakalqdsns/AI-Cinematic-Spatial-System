@@ -259,10 +259,20 @@ class Settings(BaseSettings):
     #   "comfyui"    — local ComfyUI MiniMax H3 reference-to-video workflow
     video_provider: str = "dashscope"
     # Local image execution when image_mode == "local".
-    #   "diffusers" — in-process Z-Image / SDXL
-    #   "comfyui"   — workflows/comfy/zimage.json on the ComfyUI server
+    #   "diffusers"  — in-process Z-Image / SDXL
+    #   "comfyui"    — workflows/comfy/zimage.json on the ComfyUI server
+    #   "zimage_lora"— local DiffSynth ZImagePipeline (scene images only,
+    #                  paper-diorama HD-2D style; characters keep green-screen path)
     local_image_backend: str = "diffusers"
     comfyui_base_url: str = "http://127.0.0.1:8188"
+
+    # ── Z-Image LoRA backend (local_image_backend == "zimage_lora") ──────────────
+    # Root of the local DiffSynth-Studio clone; appended to sys.path lazily on
+    # first use because diffsynth is not installed into backend/.venv.
+    zimage_lora_diffsynth_dir: str = r"F:\zimage-lora\DiffSynth-Studio"
+    # Z-Image model weights: transformer/ + text_encoder/ shards (merged files
+    # excluded), vae/diffusion_pytorch_model.safetensors, tokenizer/.
+    zimage_lora_model_dir: str = r"F:\zimage-lora\models\Z-Image"
 
     # When True, the video provider is asked to render the action against a
     # flat green-screen backdrop and the segmenter applies a chroma-key pass

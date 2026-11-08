@@ -42,6 +42,10 @@ async def scene_keyframes(
         调用图像生成后端（本地 GPU 或云端 API）；不写磁盘。
     模型:
         本地 Z-Image/SDXL（GPU）或云端 DashScope，取决于部署 settings。
+        当 settings.local_image_backend == "zimage_lora" 且 image_mode 为本地时，
+        场景图改走本地 DiffSynth ZImagePipeline 通路（自动追加纸雕 HD-2D 风格
+        后缀与固定负面词），三个视角同一条 txt2img 通路；失败自动回退原有
+        comfyui/diffusers 通路。
     """
     from app.services.scene_generator import generate_scene_keyframes
 

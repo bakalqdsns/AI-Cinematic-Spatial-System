@@ -294,14 +294,68 @@ def _parse_size_to_tuple(size: str) -> tuple[int, int]:
         return (1024, 1024)
 
 
+def _zimage_lora_selected() -> bool:
+    try:
+        from app.services.settings_manager import get as get_setting
+        return str(get_setting("local_image_backend", "diffusers")) == "zimage_lora"
+    except Exception:
+        return False
+
+
+def _zimage_lora_size(size: Optional[str]) -> tuple[int, int]:
+    """zimage_lora 尺寸：显式 size > settings.image_size_scene > 1344×768 (16:9)。"""
+    if size:
+        return _parse_size_to_tuple(size)
+    from app.config import settings
+    configured = getattr(settings, "image_size_scene", "") or ""
+    if configured:
+        return _parse_size_to_tuple(configured)
+    return (1344, 768)
+
+
+async def _generate_via_zimage_lora(
+    prompt: str,
+    *,
+    seed: Optional[int] = None,
+    size: Optional[str] = None,
+) -> Optional[str]:
+    """走本地 DiffSynth Z-Image（LoRA 基座），纸雕 HD-2D 风格。返回 base64 PNG。"""
+    import io
+    from . import zimage_lora_client
+
+    width, height = _zimage_lora_size(size)
+    full_prompt = f"{prompt}, {zimage_lora_client.STYLE_SUFFIX}"
+    image = await asyncio.to_thread(
+        zimage_lora_client.generate,
+        full_prompt,
+        zimage_lora_client.NEGATIVE_PROMPT,
+        width,
+        height,
+        seed,
+    )
+    if image is None:
+        return None
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 async def _generate_via_local(
     prompt: str,
     *,
     seed: Optional[int] = None,
     size: Optional[str] = None,
 ) -> Optional[str]:
-    """本地出图。local_image_backend=comfyui 时走 Z-Image 工作流，否则走 Diffusers。"""
+    """本地出图。按 local_image_backend 分流：zimage_lora / comfyui / diffusers。"""
     from app.services.comfyui_client import comfy_image_selected, generate_zimage_png
+
+    if _zimage_lora_selected():
+        try:
+            return await _generate_via_zimage_lora(prompt, seed=seed, size=size)
+        except Exception as e:
+            logger.warning(
+                "[scene_generator] Z-Image LoRA backend failed, falling back to default local path: %s", e,
+            )
 
     if comfy_image_selected():
         try:
@@ -333,9 +387,12 @@ async def _generate_via_local_with_reference(
     *,
     strength: float = 0.7,
 ) -> Optional[str]:
-    """带参考图的本地出图。ComfyUI 的 Z-Image 工作流没有 img2img，只使用提示词。"""
+    """带参考图的本地出图。ComfyUI / Z-Image LoRA 通路没有 img2img，只使用提示词。"""
     from app.services.comfyui_client import comfy_image_selected
 
+    if _zimage_lora_selected():
+        logger.info("[scene_generator] Z-Image LoRA 通路不接收参考图，与 wide 同一条 txt2img 通路出图")
+        return await _generate_via_local(prompt)
     if comfy_image_selected():
         logger.info("[scene_generator] ComfyUI Z-Image 工作流不接收参考图，按提示词出图")
         return await _generate_via_local(prompt)

@@ -54,6 +54,8 @@ RUNTIME_FIELDS = (
     "video_provider",
     "local_image_backend",
     "comfyui_base_url",
+    "zimage_lora_diffsynth_dir",
+    "zimage_lora_model_dir",
     "motion_greenscreen_default",
     "motion_feather_edges_default",
     # API keys

@@ -80,6 +80,7 @@ const LOCAL_VIDEO_PROVIDER_OPTIONS = [
 const LOCAL_IMAGE_BACKEND_OPTIONS = [
   { value: 'comfyui', label: 'ComfyUI Z-Image' },
   { value: 'diffusers', label: '进程内 Diffusers' },
+  { value: 'zimage_lora', label: 'Z-Image LoRA 本地' },
 ];
 
 const IMAGE_MODEL_PRESETS = [
@@ -506,7 +507,7 @@ export function SettingsPanel() {
                 <>
                   <Field label="本地后端">
                     <select
-                      value={settings.local_image_backend === 'comfyui' ? 'comfyui' : 'diffusers'}
+                      value={['comfyui', 'diffusers', 'zimage_lora'].includes(settings.local_image_backend ?? '') ? settings.local_image_backend : 'diffusers'}
                       onChange={(e) => setLocalField('local_image_backend', e.target.value)}
                       className="w-full px-2 py-1.5 rounded bg-gray-950 border border-gray-700 text-gray-100 text-xs
                         focus:outline-none focus:border-blue-500"
@@ -528,6 +529,11 @@ export function SettingsPanel() {
                           placeholder-gray-600 focus:outline-none focus:border-blue-500"
                       />
                     </Field>
+                  ) : settings.local_image_backend === 'zimage_lora' ? (
+                    <p className="text-xs text-gray-500 leading-relaxed">
+                      使用本地 DiffSynth Z-Image（纸雕 HD-2D 风格）出场景图；模型与 DiffSynth
+                      目录由服务端 settings 的 zimage_lora_model_dir / zimage_lora_diffsynth_dir 配置。
+                    </p>
                   ) : (
                     <>
                   <Field label="Model ID">
